@@ -27,6 +27,9 @@ class Config:
     strix_reasoning_effort = "high"
     strix_llm_max_retries = "5"
     strix_memory_compressor_timeout = "30"
+    strix_max_context_tokens = None  # Default: 100000
+    strix_min_recent_messages = None  # Default: 15
+    strix_max_tool_output_chars = None  # Default: 0 (no truncation)
     llm_timeout = "300"
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
