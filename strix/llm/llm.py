@@ -313,9 +313,30 @@ class LLM:
         if self.config.api_base:
             args["api_base"] = self.config.api_base
         if self._supports_reasoning():
-            args["reasoning_effort"] = self._reasoning_effort
+            # Opus 4.7+ dropped `thinking.type.enabled` in favour of adaptive
+            # thinking controlled by `output_config.effort`. LiteLLM 1.81.x
+            # only remaps `reasoning_effort` -> `output_config.effort` for
+            # `opus-4-5`, so for 4.7+ we pass `output_config` directly to
+            # bypass the faulty gate and stop LiteLLM from injecting the
+            # deprecated `thinking` block.
+            if self._uses_adaptive_thinking():
+                args["output_config"] = {"effort": self._reasoning_effort}
+                args["thinking"] = {"type": "adaptive"}
+            else:
+                args["reasoning_effort"] = self._reasoning_effort
 
         return args
+
+    def _uses_adaptive_thinking(self) -> bool:
+        """Claude Opus 4.7+ requires `thinking.type=adaptive` + `output_config.effort`.
+
+        Earlier Opus/Sonnet models still accept the legacy `thinking.type=enabled`
+        schema that LiteLLM's default translation of `reasoning_effort` produces.
+        """
+        model = (self.config.litellm_model or "").lower()
+        # Match both the litellm bedrock id (bedrock/us.anthropic.claude-opus-4-7)
+        # and anthropic-direct ids (anthropic/claude-opus-4-7-...).
+        return "opus-4-7" in model or "opus_4_7" in model
 
     def _get_chunk_content(self, chunk: Any) -> str:
         if chunk.choices and hasattr(chunk.choices[0], "delta"):
