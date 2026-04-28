@@ -167,6 +167,8 @@ class LLM:
         max_retries = int(Config.get("strix_llm_max_retries") or "5")
 
         bad_request_retried = False
+        transient_thinking_retries = 0
+        max_transient_thinking_retries = 6
 
         for attempt in range(max_retries + 1):
             try:
@@ -174,6 +176,26 @@ class LLM:
                     yield response
                 return  # noqa: TRY300
             except Exception as e:  # noqa: BLE001
+                # Transient thinking-block 400s (Bedrock-specific) — retry in an
+                # inner loop with exponential backoff. Does not consume the outer
+                # max_retries budget. If the inner budget is exhausted or `e`
+                # changes to a non-transient error, fall through.
+                while (
+                    self._is_transient_thinking_error(e)
+                    and transient_thinking_retries < max_transient_thinking_retries
+                ):
+                    transient_thinking_retries += 1
+                    await asyncio.sleep(min(240, 5 * (2 ** (transient_thinking_retries - 1))))
+                    try:
+                        async for response in self._stream(messages):
+                            yield response
+                        return  # noqa: TRY300
+                    except Exception as e2:  # noqa: BLE001
+                        e = e2
+
+                # Generic bad-request handling: retry once bare, then try
+                # truncating oversized tool_result blocks if the feature flag
+                # is set.
                 if self._is_bad_request(e):
                     if not bad_request_retried:
                         bad_request_retried = True
@@ -404,6 +426,22 @@ class LLM:
             getattr(e, "response", None), "status_code", None
         )
         return code == 400
+
+    @staticmethod
+    def _is_transient_thinking_error(e: Exception) -> bool:
+        """Detect Bedrock's transient 'thinking blocks cannot be modified' 400.
+
+        Observed on claude-sonnet-4-6 with adaptive thinking: Bedrock occasionally
+        rejects a well-formed payload with this error, and the identical payload
+        succeeds on replay. Treat it as transient rather than a structural issue.
+        """
+        code = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if code != 400:
+            return False
+        message = str(e).lower()
+        return "thinking" in message and "cannot be modified" in message
 
     def _should_retry(self, e: Exception) -> bool:
         code = getattr(e, "status_code", None) or getattr(
