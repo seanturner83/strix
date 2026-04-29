@@ -310,10 +310,33 @@ Examples:
         "-t",
         "--target",
         type=str,
-        required=True,
+        required=False,
         action="append",
         help="Target to test (URL, repository, local directory path, domain name, or IP address). "
         "Can be specified multiple times for multi-target scans.",
+    )
+
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="__PICK__",
+        default=None,
+        metavar="RUN_NAME",
+        help="Resume a past scan session. Omit RUN_NAME to open an interactive picker.",
+    )
+
+    parser.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_recent",
+        action="store_true",
+        help="Resume the most recent scan session.",
+    )
+
+    parser.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List all past scan sessions and exit.",
     )
     parser.add_argument(
         "--instruction",
@@ -389,6 +412,11 @@ Examples:
 
     args = parser.parse_args()
 
+    # Resume flags make --target optional
+    _resume_flags = args.resume or args.continue_recent or args.list_sessions
+    if not args.target and not _resume_flags:
+        parser.error("the following arguments are required: -t/--target")
+
     if args.instruction and args.instruction_file:
         parser.error(
             "Cannot specify both --instruction and --instruction-file. Use one or the other."
@@ -405,23 +433,27 @@ Examples:
             parser.error(f"Failed to read instruction file '{instruction_path}': {e}")
 
     args.targets_info = []
-    for target in args.target:
-        try:
-            target_type, target_dict = infer_target_type(target)
+    if args.target:
+        for target in args.target:
+            try:
+                target_type, target_dict = infer_target_type(target)
 
-            if target_type == "local_code":
-                display_target = target_dict.get("target_path", target)
-            else:
-                display_target = target
+                if target_type == "local_code":
+                    display_target = target_dict.get("target_path", target)
+                else:
+                    display_target = target
 
-            args.targets_info.append(
-                {"type": target_type, "details": target_dict, "original": display_target}
-            )
-        except ValueError:
-            parser.error(f"Invalid target '{target}'")
+                args.targets_info.append(
+                    {"type": target_type, "details": target_dict, "original": display_target}
+                )
+            except ValueError:
+                parser.error(f"Invalid target '{target}'")
 
-    assign_workspace_subdirs(args.targets_info)
-    rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
+        assign_workspace_subdirs(args.targets_info)
+        rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
+
+    # Sentinel to distinguish an explicit --target from a resume-provided one
+    args._explicit_target = bool(args.target)
 
     return args
 
@@ -544,6 +576,64 @@ def persist_config() -> None:
         save_current_config()
 
 
+def _handle_resume_bootstrap(args: argparse.Namespace) -> None:
+    """Resolve resume/list-sessions flags early, before docker/env setup."""
+    from rich.console import Console
+
+    from strix.sessions import ResumeError, apply_resume_to_args, load_resume_bundle, most_recent
+    from strix.sessions.listing import list_sessions
+
+    console = Console()
+
+    # --list-sessions: print table and exit
+    if args.list_sessions:
+        from strix.interface.session_picker_cli import print_session_table
+
+        rows = list_sessions()
+        print_session_table(rows, console)
+        sys.exit(0)
+
+    bundle = None
+
+    if args.continue_recent:
+        row = most_recent()
+        if row is None:
+            console.print("[red]No resumable sessions found.[/red]")
+            sys.exit(1)
+        try:
+            bundle = load_resume_bundle(row.run_name)
+        except ResumeError as exc:
+            console.print(f"[red]Resume failed:[/red] {exc}")
+            sys.exit(1)
+
+    elif args.resume == "__PICK__":
+        if args.non_interactive:
+            console.print(
+                "[red]Interactive session picker unavailable in non-interactive mode.[/red]\n"
+                "Use [bold]--resume <run_name>[/bold] or [bold]--continue[/bold] instead."
+            )
+            sys.exit(1)
+        # TUI mode: defer to the TUI to push SessionPickerScreen
+        args.resume_pick = True
+        return
+
+    elif args.resume:
+        try:
+            bundle = load_resume_bundle(args.resume)
+        except ResumeError as exc:
+            console.print(f"[red]Resume failed:[/red] {exc}")
+            sys.exit(1)
+
+    if bundle is not None:
+        apply_resume_to_args(args, bundle)
+        mode_label = "Reopening" if bundle.mode == "reopen" else "Resuming"
+        console.print(
+            f"[green]{mode_label}[/green] session [bold cyan]{bundle.run_name}[/bold cyan] "
+            f"— iteration [bold]{bundle.agent_state.iteration}[/bold], "
+            f"mode [bold]{bundle.mode}[/bold]"
+        )
+
+
 def main() -> None:  # noqa: PLR0912, PLR0915
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -553,6 +643,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     if args.config:
         apply_config_override(args.config)
 
+    _handle_resume_bootstrap(args)
+
     check_docker_installed()
     pull_docker_image()
 
@@ -561,7 +653,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     persist_config()
 
-    args.run_name = generate_run_name(args.targets_info)
+    if not getattr(args, "run_name", None):
+        args.run_name = generate_run_name(args.targets_info)
 
     for target_info in args.targets_info:
         if target_info["type"] == "repository":

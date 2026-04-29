@@ -704,6 +704,11 @@ class StrixTUIApp(App):  # type: ignore[misc]
         self.scan_config = self._build_scan_config(args)
         self.agent_config = self._build_agent_config(args)
 
+        if getattr(args, "resumed_state", None) is not None:
+            from strix.sessions import merge_into_agent_config
+
+            merge_into_agent_config(self.agent_config, args.resume_bundle)
+
         self.tracer = Tracer(self.scan_config["run_name"])
         self.tracer.set_scan_config(self.scan_config)
         set_global_tracer(self.tracer)
@@ -883,7 +888,41 @@ class StrixTUIApp(App):  # type: ignore[misc]
     def on_mount(self) -> None:
         self.title = "strix"
 
-        self.set_timer(4.5, self._hide_splash_screen)
+        if getattr(self.args, "resume_pick", False):
+            self.set_timer(0.1, self._open_session_picker)
+        elif getattr(self.args, "resumed_state", None) is not None:
+            # Already have a bundle — skip splash and start immediately
+            self.set_timer(0.1, self._hide_splash_screen)
+        else:
+            self.set_timer(4.5, self._hide_splash_screen)
+
+    def _open_session_picker(self) -> None:
+        from strix.interface.session_picker_tui import SessionPickerScreen
+
+        def _on_session_picked(row: "SessionRow | None") -> None:  # type: ignore[name-defined]
+            if row is None:
+                self.exit()
+                return
+            from strix.sessions import ResumeError, apply_resume_to_args, load_resume_bundle
+
+            try:
+                bundle = load_resume_bundle(row.run_name)
+            except ResumeError as exc:
+                from textual.widgets import Label
+
+                self.notify(f"Resume failed: {exc}", severity="error")
+                self.exit()
+                return
+
+            apply_resume_to_args(self.args, bundle)
+            from strix.sessions import merge_into_agent_config
+
+            merge_into_agent_config(self.agent_config, bundle)
+            self.scan_config = self._build_scan_config(self.args)
+            self.tracer.set_run_name(bundle.run_name)
+            self._hide_splash_screen()
+
+        self.push_screen(SessionPickerScreen(), _on_session_picked)
 
     def _hide_splash_screen(self) -> None:
         self.show_splash = False

@@ -116,6 +116,17 @@ class BaseAgent(metaclass=AgentMeta):
 
         self._add_to_agents_graph()
 
+        self._conv_log = None
+        if self.state.parent_id is None and tracer:
+            from strix.telemetry.conversation_log import ConversationLog
+
+            self._conv_log = ConversationLog(tracer.get_run_dir(), tracer.run_name or "")
+            is_resume = config.get("state") is not None
+            if not is_resume:
+                self._conv_log.write_session_start(tracer.scan_config or {})
+            self.state.set_conversation_log(self._conv_log)
+            tracer._conversation_log = self._conv_log
+
     def _add_to_agents_graph(self) -> None:
         from strix.tools.agents_graph import agents_graph_actions
 
@@ -215,6 +226,11 @@ class BaseAgent(metaclass=AgentMeta):
                 self._current_task = iteration_task
                 should_finish = await iteration_task
                 self._current_task = None
+
+                if self._conv_log is not None:
+                    self._conv_log.append_iteration_end(
+                        self.state.iteration, self.state.context, self.state.completed
+                    )
 
                 if should_finish is None and self.interactive:
                     await self._enter_waiting_state(tracer, text_response=True)

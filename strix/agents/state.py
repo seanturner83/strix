@@ -1,8 +1,11 @@
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
+
+if TYPE_CHECKING:
+    from strix.telemetry.conversation_log import ConversationLog
 
 
 def _generate_agent_id() -> str:
@@ -40,6 +43,11 @@ class AgentState(BaseModel):
 
     errors: list[str] = Field(default_factory=list)
 
+    _conversation_log: "ConversationLog | None" = PrivateAttr(default=None)
+
+    def set_conversation_log(self, log: "ConversationLog") -> None:
+        self._conversation_log = log
+
     def increment_iteration(self) -> None:
         self.iteration += 1
         self.last_updated = datetime.now(UTC).isoformat()
@@ -52,6 +60,13 @@ class AgentState(BaseModel):
             message["thinking_blocks"] = thinking_blocks
         self.messages.append(message)
         self.last_updated = datetime.now(UTC).isoformat()
+        if self._conversation_log is not None:
+            self._conversation_log.append_message(
+                role=role,
+                content=content,
+                iteration=self.iteration,
+                thinking_blocks=thinking_blocks,
+            )
 
     def add_action(self, action: dict[str, Any]) -> None:
         self.actions_taken.append(

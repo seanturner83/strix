@@ -79,6 +79,7 @@ class Tracer:
         self._next_message_id = 1
         self._saved_vuln_ids: set[str] = set()
         self._run_completed_emitted = False
+        self._conversation_log: "Any" = None  # ConversationLog set by BaseAgent
         self._telemetry_enabled = is_otel_enabled()
         self._sanitizer = TelemetrySanitizer()
 
@@ -610,6 +611,7 @@ class Tracer:
             status="configured",
             source="strix.run",
         )
+        self._write_initial_session_meta(config)
 
     def save_run_data(self, mark_complete: bool = False) -> None:
         try:
@@ -856,5 +858,64 @@ class Tracer:
 
         return self.interrupted_content.pop(agent_id, None)
 
+    def _write_initial_session_meta(self, config: dict[str, Any]) -> None:
+        try:
+            from strix.telemetry.session_meta import write_session_meta
+
+            instructions = config.get("user_instructions", "") or ""
+            summary = (instructions[:160] + "…") if len(instructions) > 160 else instructions
+            if not summary:
+                targets = config.get("targets", [])
+                summary = ", ".join(
+                    t.get("original", str(t)) if isinstance(t, dict) else str(t)
+                    for t in targets
+                )
+
+            meta = {
+                "schema_version": 1,
+                "run_name": self.run_name or self.run_id,
+                "created_at": self.start_time,
+                "status": "running",
+                "scan_mode": config.get("scan_mode", "deep"),
+                "max_iterations": config.get("max_iterations", 300),
+                "targets": config.get("targets", []),
+                "first_prompt_summary": summary,
+                "has_conversation_log": True,
+            }
+            write_session_meta(self.get_run_dir(), meta)
+        except Exception:
+            pass  # metadata is best-effort; never block a scan
+
+    def _finalize_session_meta(self, completed: bool) -> None:
+        try:
+            from strix.telemetry.session_meta import write_session_meta
+
+            write_session_meta(
+                self.get_run_dir(),
+                {
+                    "status": "completed" if completed else "errored",
+                    "ended_at": datetime.now(UTC).isoformat(),
+                    "iteration_count": max(
+                        (a.get("iteration", 0) for ag in self.agents.values()
+                         for a in ag.get("tool_executions", [])), default=0
+                    ),
+                    "vulnerability_count": len(self.vulnerability_reports),
+                    "agent_count": len(self.agents),
+                },
+            )
+        except Exception:
+            pass
+
     def cleanup(self) -> None:
+        completed = self.run_metadata.get("status") == "completed" or bool(
+            self.final_scan_result
+        )
+        if self._conversation_log is not None:
+            try:
+                self._conversation_log.write_session_end(
+                    completed=completed, final_result=None
+                )
+            except Exception:
+                pass
+        self._finalize_session_meta(completed)
         self.save_run_data(mark_complete=True)

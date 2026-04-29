@@ -61,9 +61,11 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         padding=(1, 2),
     )
 
-    console.print("\n")
-    console.print(startup_panel)
-    console.print()
+    is_resume = getattr(args, "resumed_state", None) is not None
+    if not is_resume:
+        console.print("\n")
+        console.print(startup_panel)
+        console.print()
 
     scan_mode = getattr(args, "scan_mode", "deep")
 
@@ -72,6 +74,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "targets": args.targets_info,
         "user_instructions": args.instruction or "",
         "run_name": args.run_name,
+        "scan_mode": scan_mode,
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
     }
 
@@ -86,6 +89,11 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
 
     if getattr(args, "local_sources", None):
         agent_config["local_sources"] = args.local_sources
+
+    if is_resume:
+        from strix.sessions import merge_into_agent_config
+
+        merge_into_agent_config(agent_config, args.resume_bundle)
 
     tracer = Tracer(args.run_name)
     tracer.set_scan_config(scan_config)
