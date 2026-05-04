@@ -32,7 +32,7 @@ RUN apt-get update && \
     golang-go \
     net-tools dnsutils whois \
     jq parallel ripgrep grep \
-    less man-db procps htop \
+    less procps htop \
     iproute2 iputils-ping netcat-traditional \
     nmap ncat ndiff \
     sqlmap nuclei subfinder naabu ffuf \
