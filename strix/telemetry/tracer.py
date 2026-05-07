@@ -13,6 +13,7 @@ from opentelemetry.trace import SpanContext, SpanKind
 from strix.config import Config
 from strix.telemetry import posthog
 from strix.telemetry.flags import is_otel_enabled
+from strix.telemetry.sarif import write_sarif
 from strix.telemetry.utils import (
     TelemetrySanitizer,
     append_jsonl_record,
@@ -756,6 +757,14 @@ class Tracer:
                         vuln_dir,
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
+
+                # SARIF 2.1.0 sidecar for machine-readable consumption (GitHub
+                # code-scanning upload-sarif, ASPM platforms, etc.). Emit-only;
+                # no behaviour change to existing outputs.
+                try:
+                    write_sarif(run_dir, sorted_reports)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to write SARIF report (non-fatal)")
 
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
