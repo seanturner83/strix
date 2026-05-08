@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 from typing import Any
 
@@ -124,7 +125,23 @@ def _summarize_messages(
         if api_base:
             completion_args["api_base"] = api_base
 
-        response = litellm.completion(**completion_args)
+        # Wall-clock timeout guard. litellm.completion's `timeout` kwarg does
+        # not reliably propagate to the underlying httpx client in the Bedrock
+        # sync path (we see "Connection timed out after None seconds" even
+        # though we passed an int). Wrapping in a ThreadPoolExecutor gives us
+        # a hard wall-clock bail regardless of what litellm does internally.
+        # The abandoned future's HTTP call continues in the background thread
+        # until the AWS SDK gives up, but we return to the caller promptly
+        # and the fallback path logs the failure and returns messages[0].
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(litellm.completion, **completion_args)
+            try:
+                response = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError as exc:
+                raise TimeoutError(
+                    f"memory_compressor: litellm.completion exceeded "
+                    f"{timeout}s wall-clock budget"
+                ) from exc
         summary = response.choices[0].message.content or ""
         if not summary.strip():
             return messages[0]
