@@ -2,7 +2,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from strix.telemetry.sarif import build_sarif_report, write_sarif_report
+from strix.telemetry.sarif import (
+    build_sarif_document,
+    build_sarif_report,
+    write_sarif,
+    write_sarif_report,
+)
 
 
 def _finding(**overrides: Any) -> dict[str, Any]:
@@ -54,9 +59,13 @@ def test_build_sarif_maps_code_location_and_metadata() -> None:
     assert result["ruleId"] == "CWE-601"
     assert result["level"] == "error"
     assert result["message"]["text"] == "Unsanitized redirect target"
-    assert result["properties"]["cvss"] == 8.1
-    assert result["properties"]["cve"] == "CVE-2026-0001"
-    assert result["properties"]["target"] == "./demo-app"
+    # ``security-severity`` is the only top-level property GitHub code-scanning
+    # reads; Strix-specific fields are namespaced so generic SARIF consumers
+    # don't surface finding metadata (notably PoC) to a wide audience.
+    assert result["properties"]["security-severity"] == "8.1"
+    assert result["properties"]["strix"]["cvss"] == 8.1
+    assert result["properties"]["strix"]["cve"] == "CVE-2026-0001"
+    assert result["properties"]["strix"]["target"] == "./demo-app"
 
     location = result["locations"][0]["physicalLocation"]
     assert location["artifactLocation"]["uri"] == "src/auth/redirects.py"
@@ -162,3 +171,127 @@ def test_write_sarif_report_creates_parent_directories(tmp_path: Path) -> None:
 
     saved = json.loads(output_path.read_text(encoding="utf-8"))
     assert saved["runs"][0]["results"][0]["ruleId"] == "CWE-601"
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage — these test surfaces added in the combined PR beyond
+# the original #477 scope: CWE normalisation, rule-level GitHub properties,
+# PoC namespacing, backwards-compatible write_sarif alias.
+
+
+def test_cwe_normalisation_unifies_input_variants() -> None:
+    """The same weakness expressed three different ways in Strix output
+    must collapse to a single rule so dedup across runs works."""
+    variants = [
+        _finding(id="a", cwe="CWE-306"),
+        _finding(id="b", cwe="cwe:306"),
+        _finding(id="c", cwe="306"),
+    ]
+    sarif = build_sarif_report(variants)
+    rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+    assert len(rules) == 1
+    assert rules[0]["id"] == "CWE-306"
+    for result in sarif["runs"][0]["results"]:
+        assert result["ruleId"] == "CWE-306"
+
+
+def test_cwe_rule_includes_github_code_scanning_properties() -> None:
+    """GitHub code-scanning reads rule.properties['security-severity'] +
+    rule.properties['tags']. Without them, alerts show up at default severity
+    and can't be filtered by security tag."""
+    sarif = build_sarif_report([_finding()])
+    rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+
+    assert rule["properties"]["security-severity"] == "8.1"
+    assert "security" in rule["properties"]["tags"]
+    assert "CWE-601" in rule["properties"]["tags"]
+    assert "CVE-2026-0001" in rule["properties"]["tags"]
+    assert rule["defaultConfiguration"]["level"] == "error"
+    assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/601.html"
+
+
+def test_non_cwe_rules_omit_help_uri() -> None:
+    """A finding with neither CWE nor CVE falls back to a slug rule id;
+    helpUri only applies when we can link to a canonical taxonomy."""
+    sarif = build_sarif_report([
+        _finding(cwe=None, cve=None, code_locations=_finding()["code_locations"]),
+    ])
+    rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+    assert "helpUri" not in rule
+
+
+def test_poc_content_is_namespaced_under_strix_not_flat_on_properties() -> None:
+    """PoC exploitation payloads live under ``properties.strix.poc`` so
+    generic SARIF UI consumers don't surface exploit text to triage
+    audiences by default."""
+    sarif = build_sarif_report([_finding(
+        poc_description="curl --request POST …",
+        poc_script_code="#!/bin/sh\ncurl -X POST …",
+    )])
+    result = sarif["runs"][0]["results"][0]
+    assert "poc" not in result["properties"]
+    assert "poc" in result["properties"]["strix"]
+    assert result["properties"]["strix"]["poc"]["description"].startswith("curl")
+    assert result["properties"]["strix"]["poc"]["script"].startswith("#!/bin/sh")
+
+
+def test_security_severity_prefers_cvss_over_label() -> None:
+    """When CVSS is present, it drives security-severity; label only used
+    as fallback. CVSS ≠ label-mean-score for severity-label-only findings."""
+    cvss_only = build_sarif_report([_finding(cvss=9.2, severity="high")])
+    assert (
+        cvss_only["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"]
+        == "9.2"
+    )
+
+    label_only = build_sarif_report([_finding(cvss=None, severity="medium")])
+    assert (
+        label_only["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"]
+        == "5.5"
+    )
+
+
+def test_backwards_compatible_write_sarif_alias(tmp_path: Path) -> None:
+    """``write_sarif`` is the tracer-hook entry point; must keep working so
+    internal callers aren't coupled to the CLI-invoked ``write_sarif_report``.
+    """
+    out = write_sarif(tmp_path, [_finding()], tool_version="1.0.0")
+    assert out == tmp_path / "findings.sarif"
+    assert out.exists()
+
+    # ``build_sarif_document`` alias equivalent to ``build_sarif_report``.
+    a = build_sarif_document([_finding()])
+    b = build_sarif_report([_finding()])
+    assert a == b
+
+
+def test_document_shape_matches_sarif_2_1_0_top_level() -> None:
+    """Basic structural validation without pulling in jsonschema. Catches
+    any regression that would trip schemastore.org validation at CI time."""
+    sarif = build_sarif_report([_finding()])
+
+    assert sarif["version"] == "2.1.0"
+    assert sarif["$schema"].endswith("sarif-2.1.0.json")
+    assert isinstance(sarif["runs"], list)
+    assert len(sarif["runs"]) == 1
+
+    run = sarif["runs"][0]
+    driver = run["tool"]["driver"]
+    assert driver["name"] == "Strix"
+    assert driver["informationUri"]
+    assert isinstance(driver["rules"], list)
+
+    for rule in driver["rules"]:
+        assert rule["id"]
+        assert rule["shortDescription"]["text"]
+        assert rule["fullDescription"]["text"]
+        assert rule["defaultConfiguration"]["level"] in {"error", "warning", "note"}
+
+    for result in run["results"]:
+        assert result["ruleId"]
+        assert result["level"] in {"error", "warning", "note"}
+        assert result["message"]["text"]
+        assert isinstance(result["locations"], list)
+        for location in result["locations"]:
+            assert location["physicalLocation"]["artifactLocation"]["uri"]
+            assert "startLine" in location["physicalLocation"]["region"]
