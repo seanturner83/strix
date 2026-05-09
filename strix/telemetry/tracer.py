@@ -13,6 +13,7 @@ from opentelemetry.trace import SpanContext, SpanKind
 from strix.config import Config
 from strix.telemetry import posthog
 from strix.telemetry.flags import is_otel_enabled
+from strix.telemetry.sarif import write_sarif
 from strix.telemetry.utils import (
     TelemetrySanitizer,
     append_jsonl_record,
@@ -45,6 +46,16 @@ def get_global_tracer() -> Optional["Tracer"]:
 def set_global_tracer(tracer: "Tracer") -> None:
     global _global_tracer  # noqa: PLW0603
     _global_tracer = tracer
+
+
+def _emit_sarif_sidecar(run_dir: Any, reports: Any) -> None:
+    """Write findings.sarif alongside existing outputs. Emit-only helper —
+    any exception is caught + logged so SARIF failure never breaks the
+    primary CSV + markdown reporting path."""
+    try:
+        write_sarif(run_dir, reports)
+    except Exception:
+        logger.exception("Failed to write SARIF report (non-fatal)")
 
 
 class Tracer:
@@ -756,6 +767,12 @@ class Tracer:
                         vuln_dir,
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
+
+                # SARIF 2.1.0 sidecar for machine-readable consumption (GitHub
+                # code-scanning upload-sarif, ASPM platforms, etc.). Emit-only;
+                # no behaviour change to existing outputs. Wrapped so any SARIF
+                # failure never breaks the primary CSV + markdown reporting.
+                _emit_sarif_sidecar(run_dir, sorted_reports)
 
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
