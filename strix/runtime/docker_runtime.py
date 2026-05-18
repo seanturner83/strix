@@ -108,6 +108,53 @@ class DockerRuntime(AbstractRuntime):
             "Container initialization timed out. Please try again.",
         )
 
+    def _force_free_container_name(self, name: str, max_passes: int = 6) -> None:
+        """Best-effort guarantee that no container with `name` exists.
+
+        The previous inline cleanup (get → stop → remove(force=True) → sleep 1)
+        races against Docker's lagged name-release: when a container fails
+        partway through init (e.g. the tool-server-port wait times out),
+        remove() returns "success" but Docker keeps the name reserved for a
+        moment while the underlying container is torn down. The next
+        containers.run() with the same name then 409s. We observed this
+        consistently on busy ARC pods (seedcx infra, 2026-05-15 → 05-18,
+        ~6% strix-pr-dispatch failure rate, all the same 409 pattern).
+
+        This helper polls until the name is genuinely free, killing + removing
+        any container holding it on each pass. Idempotent and safe to call
+        even when no container exists.
+        """
+        for _ in range(max_passes):
+            try:
+                existing = self.client.containers.get(name)
+            except NotFound:
+                return
+            except DockerException:
+                # Transient API error — back off + retry the get
+                time.sleep(0.3)
+                continue
+            # Container exists; kill + remove. Both are best-effort —
+            # a kill-then-remove on a container that's already stopping
+            # may raise APIError, which we silently ignore so the next
+            # pass can retry the get/remove cycle.
+            with contextlib.suppress(Exception):
+                existing.kill()
+            with contextlib.suppress(Exception):
+                existing.remove(force=True, v=True)
+            time.sleep(0.5)
+        # Final check: if the name is STILL taken, escalate. This is a
+        # genuine "Docker is wedged" state — runner reboot territory.
+        try:
+            self.client.containers.get(name)
+        except NotFound:
+            return
+        raise SandboxInitializationError(
+            "Could not free container name",
+            f"After {max_passes} cleanup passes, container {name!r} still exists "
+            "and could not be removed. Docker daemon may be in a wedged state — "
+            "consider restarting the runner or its docker daemon.",
+        )
+
     def _create_container(self, scan_id: str, max_retries: int = 2) -> Container:
         container_name = f"strix-scan-{scan_id}"
         image_name = Config.get("strix_image")
@@ -119,12 +166,11 @@ class DockerRuntime(AbstractRuntime):
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
-                with contextlib.suppress(NotFound):
-                    existing = self.client.containers.get(container_name)
-                    with contextlib.suppress(Exception):
-                        existing.stop(timeout=5)
-                    existing.remove(force=True)
-                    time.sleep(1)
+                # Aggressively free the name before each attempt. The old
+                # inline get/remove/sleep-1 didn't account for Docker's
+                # lagged name-release after a failed init — see
+                # _force_free_container_name docstring.
+                self._force_free_container_name(container_name)
 
                 self._tool_server_port = self._find_available_port()
                 self._caido_port = self._find_available_port()
