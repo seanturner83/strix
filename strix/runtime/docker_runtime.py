@@ -156,7 +156,7 @@ class DockerRuntime(AbstractRuntime):
         )
 
     def _create_container(self, scan_id: str, max_retries: int = 2) -> Container:
-        container_name = f"strix-scan-{scan_id}"
+        base_name = f"strix-scan-{scan_id}"
         image_name = Config.get("strix_image")
         if not image_name:
             raise ValueError("STRIX_IMAGE must be configured")
@@ -165,12 +165,30 @@ class DockerRuntime(AbstractRuntime):
 
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
+            # Unique name per attempt. The previous fix (poll-until-name-freed
+            # cleanup) was insufficient: Docker has a known quirk where a
+            # container in a partial/dying init state can reserve its name
+            # internally without appearing in containers.get() — so our
+            # cleanup helper sees "name free" but the subsequent
+            # containers.run() still 409s. Empirically observed on
+            # seedcx infra 2026-05-18: zh-global-infrastructure scan with
+            # the previous fix in place still hit the 409 on first
+            # attempt's retry.
+            #
+            # Suffixing the name on retry sidesteps the issue entirely:
+            # each attempt uses a different name, so name-reservation
+            # collision is impossible. The strix-scan-id label is stable
+            # across the suffix variation, so _get_or_create_container's
+            # label-based lookup (line ~252) still finds the resulting
+            # container on later calls.
+            container_name = base_name if attempt == 0 else f"{base_name}-r{attempt}"
             try:
-                # Aggressively free the name before each attempt. The old
-                # inline get/remove/sleep-1 didn't account for Docker's
-                # lagged name-release after a failed init — see
-                # _force_free_container_name docstring.
-                self._force_free_container_name(container_name)
+                # Still run the cleanup helper for the FIRST attempt, in
+                # case there's a leftover from an earlier scan_id collision
+                # on the same ARC pod. Useful but not load-bearing — the
+                # unique-name guarantees correctness even if cleanup fails.
+                if attempt == 0:
+                    self._force_free_container_name(container_name)
 
                 self._tool_server_port = self._find_available_port()
                 self._caido_port = self._find_available_port()
