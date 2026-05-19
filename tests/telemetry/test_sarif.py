@@ -218,3 +218,23 @@ def test_stride_idor_is_elevation():
     doc = build_sarif_document([_base_report(cwe="CWE-639")])
     rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
     assert "stride:E" in rule_tags
+
+
+def test_stride_missing_authz_is_elevation():
+    """CWE-862 (Missing Authorization) is canonical Elevation of Privilege.
+    Sibling of CWE-863. Real-world calibration: trade-api scan
+    2026-05-19 surfaced a CWE-862 finding that fell through to the
+    default T+I; adding the explicit mapping."""
+    doc = build_sarif_document([_base_report(cwe="CWE-862")])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:E" in rule_tags
+    # Should NOT carry the default T+I.
+    assert "stride:T" not in rule_tags
+    assert "stride:I" not in rule_tags
+
+
+def test_stride_incorrect_default_perms_is_elevation():
+    """CWE-276 (Incorrect Default Permissions) — also Elevation."""
+    doc = build_sarif_document([_base_report(cwe="CWE-276")])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:E" in rule_tags

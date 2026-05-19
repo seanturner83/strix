@@ -118,9 +118,11 @@ _CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
     "22":  ("T", "I"),                    # Path Traversal
     "269": ("E",),                        # Improper Privilege Management
     "284": ("E",),                        # Improper Access Control
+    "276": ("E",),                        # Incorrect Default Permissions
     "285": ("E",),                        # Improper Authorization
     "639": ("E",),                        # Authorization Bypass via User-controlled Key (BOLA/IDOR)
     "732": ("E",),                        # Incorrect Permission Assignment for Critical Resource
+    "862": ("E",),                        # Missing Authorization (sibling of 285/863, very common in API authz gaps)
     "863": ("E",),                        # Incorrect Authorization
     "1220": ("E",),                       # Insufficient Granularity of Access Control
     # XXE / XML — multi-leg
