@@ -165,3 +165,56 @@ def test_cwe_normalisation_accepts_variants():
     for raw in ["CWE-306", "306", "cwe 306", "CWE306"]:
         doc = build_sarif_document([_base_report(cwe=raw)])
         assert doc["runs"][0]["results"][0]["ruleId"] == "CWE-306"
+
+
+def test_stride_tags_on_rule_for_known_cwe():
+    """CWE-306 (Missing Authentication) maps to S+E STRIDE legs."""
+    doc = build_sarif_document([_base_report(cwe="CWE-306")])
+    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
+    tags = rule["properties"]["tags"]
+    assert "stride:S" in tags
+    assert "stride:E" in tags
+    # Existing tags preserved.
+    assert "security" in tags
+    assert "CWE-306" in tags
+
+
+def test_stride_tags_on_result_for_known_cwe():
+    """Per-result tags duplicate from the rule for consumer-side filtering."""
+    doc = build_sarif_document([_base_report(cwe="CWE-306")])
+    result_tags = doc["runs"][0]["results"][0]["properties"]["tags"]
+    assert "stride:S" in result_tags
+    assert "stride:E" in result_tags
+
+
+def test_stride_default_for_unknown_cwe():
+    """Unmapped CWE falls back to T+I default — never empty."""
+    doc = build_sarif_document([_base_report(cwe="CWE-99999")])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:T" in rule_tags
+    assert "stride:I" in rule_tags
+
+
+def test_stride_default_for_no_cwe():
+    """No-CWE finding still gets STRIDE tags (default T+I)."""
+    doc = build_sarif_document([_base_report(cwe=None)])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:T" in rule_tags
+    assert "stride:I" in rule_tags
+
+
+def test_stride_sql_injection_is_tampering():
+    """CWE-89 (SQL Injection) is canonical Tampering."""
+    doc = build_sarif_document([_base_report(cwe="CWE-89")])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:T" in rule_tags
+    # Should NOT include S or E for plain SQLi (it's tampering, not auth-shape).
+    assert "stride:S" not in rule_tags
+
+
+def test_stride_idor_is_elevation():
+    """CWE-639 (Authorization Bypass via User-controlled Key, IDOR/BOLA)
+    is canonical Elevation of Privilege."""
+    doc = build_sarif_document([_base_report(cwe="CWE-639")])
+    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
+    assert "stride:E" in rule_tags

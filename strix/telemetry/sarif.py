@@ -56,6 +56,96 @@ _SEVERITY_TO_SCORE = {
     "info": "1.0",
 }
 
+# CWE → STRIDE leg mapping for SARIF result tagging. Maps the most-common
+# CWEs Strix surfaces to one or more STRIDE legs (Spoofing / Tampering /
+# Repudiation / Information disclosure / Denial of service / Elevation of
+# privilege). Tags become `stride:<leg>` on each result so consumers
+# (GHAS Security tab, ASPM dashboards) can group by threat-model leg.
+#
+# Where a CWE could plausibly map to multiple legs, list the dominant first
+# (the same convention strix-triage's vuln_class → STRIDE map uses).
+# Anything without an entry falls back to the dominant-T+I default that
+# matches strix-triage's DEFAULT_STRIDE_LEGS.
+_CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
+    # Spoofing — authentication / identity
+    "287": ("S",),                        # Improper Authentication
+    "290": ("S",),                        # Authentication Bypass by Spoofing
+    "294": ("S",),                        # Authentication Bypass by Capture-replay
+    "306": ("S", "E"),                    # Missing Authentication for Critical Function
+    "345": ("S", "T"),                    # Insufficient Verification of Data Authenticity
+    "346": ("S",),                        # Origin Validation Error
+    "352": ("T", "S"),                    # CSRF
+    "384": ("S",),                        # Session Fixation
+    "521": ("S",),                        # Weak Password Requirements
+    "613": ("S",),                        # Insufficient Session Expiration
+    "640": ("S",),                        # Weak Password Recovery
+    # Tampering — integrity
+    "20":  ("T",),                        # Improper Input Validation
+    "73":  ("T", "I"),                    # External Control of File Name or Path
+    "78":  ("T", "E"),                    # OS Command Injection
+    "79":  ("T", "I"),                    # XSS
+    "89":  ("T",),                        # SQL Injection
+    "91":  ("T",),                        # XML Injection
+    "94":  ("T", "E"),                    # Code Injection
+    "434": ("T",),                        # Unrestricted File Upload
+    "502": ("T", "E"),                    # Deserialization of Untrusted Data
+    "915": ("E", "T"),                    # Mass Assignment
+    "918": ("T", "I"),                    # SSRF
+    "1336": ("T", "E"),                   # Server-Side Template Injection
+    # Repudiation — audit
+    "117": ("R",),                        # Improper Output Neutralization for Logs
+    "223": ("R",),                        # Omission of Security-relevant Information
+    "778": ("R",),                        # Insufficient Logging
+    # Information disclosure — confidentiality
+    "200": ("I",),                        # Exposure of Sensitive Info
+    "201": ("I",),                        # Insertion of Sensitive Info into Sent Data
+    "209": ("I",),                        # Sensitive Info in Error Message
+    "256": ("I",),                        # Plaintext Storage of Password
+    "311": ("I",),                        # Missing Encryption of Sensitive Data
+    "319": ("I",),                        # Cleartext Transmission
+    "327": ("I",),                        # Use of Broken/Risky Crypto
+    "328": ("I",),                        # Use of Weak Hash
+    "522": ("I",),                        # Insufficiently Protected Credentials
+    "525": ("I",),                        # Web-Browser Cache of Sensitive Info
+    "532": ("I",),                        # Insertion of Sensitive Info into Log
+    "538": ("I",),                        # File / Directory Info Exposure
+    "598": ("I",),                        # Sensitive Info in URL Query
+    # Denial of service — availability
+    "400": ("D",),                        # Uncontrolled Resource Consumption
+    "770": ("D",),                        # Allocation of Resources Without Limits
+    "1333": ("D",),                       # Inefficient Regex / ReDoS
+    # Elevation of privilege — authorization
+    "22":  ("T", "I"),                    # Path Traversal
+    "269": ("E",),                        # Improper Privilege Management
+    "284": ("E",),                        # Improper Access Control
+    "285": ("E",),                        # Improper Authorization
+    "639": ("E",),                        # Authorization Bypass via User-controlled Key (BOLA/IDOR)
+    "732": ("E",),                        # Incorrect Permission Assignment for Critical Resource
+    "863": ("E",),                        # Incorrect Authorization
+    "1220": ("E",),                       # Insufficient Granularity of Access Control
+    # XXE / XML — multi-leg
+    "611": ("I", "T"),                    # XXE
+    "918_alt": ("T", "I"),                # placeholder mirror
+}
+
+# Default for unmapped CWEs / no-CWE findings. Conservative: tampering +
+# information-disclosure is the most-common shape for an unclassified bug.
+_DEFAULT_STRIDE_LEGS: tuple[str, ...] = ("T", "I")
+
+
+def _stride_legs_for_cwe(cwe_str: str | None) -> tuple[str, ...]:
+    """Map a CWE id (raw, eg 'CWE-306', '306', 'cwe 306') to STRIDE legs.
+
+    Returns the default tuple for no-CWE / unrecognised CWE so every result
+    gets at least one leg tag — useful for downstream coverage reports.
+    """
+    if not cwe_str:
+        return _DEFAULT_STRIDE_LEGS
+    digits = "".join(c for c in str(cwe_str) if c.isdigit())
+    if not digits:
+        return _DEFAULT_STRIDE_LEGS
+    return _CWE_TO_STRIDE.get(digits, _DEFAULT_STRIDE_LEGS)
+
 
 def _rule_id_for(report: dict[str, Any]) -> str:
     cwe = (report.get("cwe") or "").strip()
@@ -147,13 +237,18 @@ def _build_rules(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
         help_text = _help_text(report)
         if help_text:
             rule["help"] = {"text": help_text, "markdown": help_text}
+        # STRIDE leg tags from CWE → STRIDE mapping. Always at least one
+        # (default T+I for unmapped CWEs) so downstream coverage reports
+        # don't have gaps. Tags appear as `stride:S`, `stride:T` etc.
+        stride_tags = [f"stride:{leg}"
+                       for leg in _stride_legs_for_cwe(report.get("cwe"))]
         if rid.startswith("CWE-"):
-            rule["properties"]["tags"] = ["security", rid]
+            rule["properties"]["tags"] = ["security", rid, *stride_tags]
             rule["helpUri"] = (
                 f"https://cwe.mitre.org/data/definitions/{rid.removeprefix('CWE-')}.html"
             )
         else:
-            rule["properties"]["tags"] = ["security"]
+            rule["properties"]["tags"] = ["security", *stride_tags]
         seen[rid] = rule
     return list(seen.values())
 
@@ -195,8 +290,14 @@ def _build_result(report: dict[str, Any]) -> dict[str, Any]:
             "script": report.get("poc_script_code"),
         }
 
+    # Per-result STRIDE tags — duplicated from the rule definition for
+    # consumers that filter on result.properties.tags rather than walking
+    # back to rules[].
+    stride_tags = [f"stride:{leg}"
+                   for leg in _stride_legs_for_cwe(report.get("cwe"))]
     result["properties"] = {
         "security-severity": _security_severity(report),
+        "tags": stride_tags,
         "strix": strix_props,
     }
     return result
