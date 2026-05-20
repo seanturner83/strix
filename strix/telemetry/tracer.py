@@ -945,14 +945,20 @@ class Tracer:
         try:
             from strix.telemetry.session_meta import write_session_meta
 
+            # NB: per-agent `tool_executions` is a list[int] of execution
+            # IDs (see add_tool_execution); the real execution dicts live in
+            # self.tool_executions. The original genexpr tried `.get()` on
+            # those ints and failed with AttributeError, which was
+            # previously masked by bare `pass`. Iterate the canonical dict
+            # directly.
             write_session_meta(
                 self.get_run_dir(),
                 {
                     "status": "completed" if completed else "errored",
                     "ended_at": datetime.now(UTC).isoformat(),
                     "iteration_count": max(
-                        (a.get("iteration", 0) for ag in self.agents.values()
-                         for a in ag.get("tool_executions", [])), default=0
+                        (e.get("iteration", 0) for e in self.tool_executions.values()),
+                        default=0,
                     ),
                     "vulnerability_count": len(self.vulnerability_reports),
                     "agent_count": len(self.agents),

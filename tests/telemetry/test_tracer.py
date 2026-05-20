@@ -656,6 +656,57 @@ def test_orchestrator_success_unset_falls_back_to_legacy(monkeypatch, tmp_path) 
     assert events[0]["completed"] is True
 
 
+def test_finalize_session_meta_with_populated_tool_executions(monkeypatch, tmp_path) -> None:
+    """Regression: _finalize_session_meta computes iteration_count over
+    self.tool_executions.values() — not over per-agent tool_executions
+    (which is a list[int] of execution IDs, not dicts). The original
+    expression tried `.get("iteration")` on those ints and failed with
+    AttributeError; bare `pass` masked it in production. Surfaced once
+    the bare-pass was replaced with logger.exception (SEC-6635 dispatch
+    on external-api, run 26188539567)."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("finalize-iter-count")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "finalize-iter-count"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    # Mirror the production shape: agents indexed by int execution IDs
+    # into a separate tool_executions dict.
+    tracer.agents["agent-1"] = {"name": "subagent", "tool_executions": [1, 2, 3]}
+    tracer.tool_executions[1] = {"tool": "read", "iteration": 5}
+    tracer.tool_executions[2] = {"tool": "grep", "iteration": 7}
+    tracer.tool_executions[3] = {"tool": "edit", "iteration": 11}
+
+    # Must not raise. Side effect: session_meta.json gets written.
+    tracer.mark_orchestrator_success(True)
+    tracer._finalize_session_meta(True)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "completed"
+    assert meta["iteration_count"] == 11, (
+        f"iteration_count should be the max iteration across tool_executions; "
+        f"got {meta['iteration_count']}"
+    )
+
+
+def test_finalize_session_meta_with_no_tool_executions(monkeypatch, tmp_path) -> None:
+    """Empty tool_executions (e.g. scan exited before any tool ran) must
+    not raise; iteration_count defaults to 0."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("finalize-no-tools")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "finalize-no-tools"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    assert tracer.tool_executions == {}
+    tracer._finalize_session_meta(True)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["iteration_count"] == 0
+
+
 def test_update_scan_final_fields_sets_orchestrator_success(monkeypatch, tmp_path) -> None:
     """The canonical 'scan finished cleanly' hook (update_scan_final_fields)
     must set orchestrator_success=True so cleanup() reports completed=True
