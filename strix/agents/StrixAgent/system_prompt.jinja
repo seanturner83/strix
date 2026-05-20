@@ -29,7 +29,21 @@ INTERACTIVE BEHAVIOR:
   - If you want to plan, call the think tool. If you want to act, call the appropriate tool. There is NO valid reason to output text without a tool call while working on a task.
   - The ONLY time you may send a message without a tool call is when you are genuinely DONE and presenting final results, or when you NEED the user to answer a question before continuing.
 {% if tool_mode == "parallel" %}
-- EVERY message while working MUST contain at least one tool call — this is what keeps execution moving. No tool call = execution stops. You MAY emit multiple independent tool calls in a single message when they are mutually independent and can run in parallel (e.g. multiple file reads, multiple read-only HTTP probes against different endpoints). Do NOT batch a tool call with another that depends on its output — emit those sequentially across turns. Do NOT batch mutating tools (file writes, agent creation, finish_scan, send_message_to_agent) — emit each on its own turn. Aim for 2-5 calls per message when batching independent reads; do not exceed 8.
+- EVERY message while working MUST contain at least one tool call. Execution stops without one.
+- **STRONGLY PREFER batching independent tool calls in a single message.** When you would emit several read-only tools that don't depend on each other's output, emit them all in one message — do NOT spread them across turns. Each turn you fail to batch is a wasted LLM round-trip.
+- **When to batch (do this):** exploring a directory tree (multiple `list_files` for sibling subdirs), reading multiple unrelated files (multiple `search_files`), probing multiple HTTP endpoints (multiple `view_request`/`list_requests`), or any combination of view-only proxy/filesystem tools.
+- **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need the result of `list_files` before deciding which file to `search_files`). Mutating tools (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone on their own turn — never batched.
+- **Concrete batching example.** When you decide to enumerate three sibling directories of a repo, emit ALL three in the same message:
+
+  ```
+  <function=list_files><parameter=path>/workspace/repo/scripts</parameter></function>
+  <function=list_files><parameter=path>/workspace/repo/templates</parameter></function>
+  <function=list_files><parameter=path>/workspace/repo/.github</parameter></function>
+  ```
+
+  Not three separate turns. The system runs them concurrently and returns all three results in one observation block.
+
+- Aim for 2-5 calls per batched message; do not exceed 8.
 {% else %}
 - EVERY message while working MUST contain exactly one tool call — this is what keeps execution moving. No tool call = execution stops.
 {% endif %}

@@ -125,7 +125,7 @@ def test_executor_runs_serial_when_any_tool_unsafe(monkeypatch):
     call_order: list[str] = []
     completion_times: dict[str, float] = {}
 
-    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id):
+    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=None):
         name = inv.get("toolName", "?")
         call_order.append(f"start:{name}")
         await asyncio.sleep(0.01)
@@ -163,7 +163,7 @@ def test_executor_runs_parallel_when_all_tools_safe(monkeypatch):
 
     call_order: list[str] = []
 
-    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id):
+    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=None):
         name = inv.get("toolName", "?")
         call_order.append(f"start:{name}")
         await asyncio.sleep(0.05)
@@ -193,7 +193,7 @@ def test_executor_serial_fallback_when_only_one_tool(monkeypatch):
 
     parallel_path_taken = False
 
-    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id):
+    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=None):
         return ("<tool_result/>", [], False)
 
     real_gather = asyncio.gather
@@ -214,6 +214,49 @@ def test_executor_serial_fallback_when_only_one_tool(monkeypatch):
     assert parallel_path_taken is False  # single-tool stays serial
 
 
+def test_executor_emits_shared_batch_id_for_one_call(monkeypatch):
+    """Tools from one process_tool_invocations call share a batch_id;
+    tools from separate calls get distinct batch_ids. This is what makes
+    'did the LLM batch?' answerable from OTel events."""
+    from strix.tools import executor as exec_mod
+
+    captured_batch_ids: list[str | None] = []
+
+    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=None):
+        captured_batch_ids.append(batch_id)
+        return ("<tool_result/>", [], False)
+
+    monkeypatch.setattr(exec_mod, "_execute_single_tool", fake_execute_single_tool)
+    monkeypatch.setattr(exec_mod, "is_tool_parallel_safe", lambda name: True)
+
+    # First call: 3 tools — should share one batch_id
+    asyncio.run(
+        exec_mod.process_tool_invocations(
+            [{"toolName": "list_files", "args": {}}] * 3, [], None
+        )
+    )
+
+    first_call_ids = captured_batch_ids[:3]
+    assert len(set(first_call_ids)) == 1, (
+        f"3 tools in one call must share a batch_id, got {first_call_ids}"
+    )
+    assert first_call_ids[0] is not None
+
+    # Second call: separate batch_id
+    captured_batch_ids.clear()
+    asyncio.run(
+        exec_mod.process_tool_invocations(
+            [{"toolName": "list_files", "args": {}}] * 2, [], None
+        )
+    )
+
+    second_call_ids = captured_batch_ids[:2]
+    assert len(set(second_call_ids)) == 1
+    assert second_call_ids[0] != first_call_ids[0], (
+        "Separate process_tool_invocations calls must produce distinct batch_ids"
+    )
+
+
 def test_executor_observation_order_preserves_invocation_order(monkeypatch):
     """Even when execution completes out-of-order, observations land in
     invocation order to keep the LLM's mental model consistent."""
@@ -221,7 +264,7 @@ def test_executor_observation_order_preserves_invocation_order(monkeypatch):
 
     delays = {"a": 0.05, "b": 0.01, "c": 0.03}
 
-    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id):
+    async def fake_execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=None):
         name = inv.get("toolName", "?")
         await asyncio.sleep(delays[name])
         return (

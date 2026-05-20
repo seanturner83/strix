@@ -263,6 +263,7 @@ async def _execute_single_tool(
     agent_state: Any | None,
     tracer: Any | None,
     agent_id: str,
+    batch_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], bool]:
     tool_name = tool_inv.get("toolName", "unknown")
     args = tool_inv.get("args", {})
@@ -270,7 +271,7 @@ async def _execute_single_tool(
     should_agent_finish = False
 
     if tracer:
-        execution_id = tracer.log_tool_execution_start(agent_id, tool_name, args)
+        execution_id = tracer.log_tool_execution_start(agent_id, tool_name, args, batch_id=batch_id)
 
     try:
         result = await execute_tool_invocation(tool_inv, agent_state)
@@ -326,11 +327,19 @@ async def process_tool_invocations(
     conversation_history: list[dict[str, Any]],
     agent_state: Any | None = None,
 ) -> bool:
+    import uuid
+
     observation_parts: list[str] = []
     all_images: list[dict[str, Any]] = []
     should_agent_finish = False
 
     tracer, agent_id = _get_tracer_and_agent_id(agent_state)
+
+    # Tag all invocations from one agent turn with a shared batch_id so OTel
+    # consumers can answer "did this turn batch?" without inferring from
+    # timestamps. Single-tool turns get a batch_id of size-1 (still useful for
+    # joining started/updated events).
+    batch_id = uuid.uuid4().hex if len(tool_invocations) >= 1 else None
 
     can_parallelise = (
         len(tool_invocations) > 1 and _all_parallel_safe(tool_invocations)
@@ -342,7 +351,7 @@ async def process_tool_invocations(
         # in the same order it requested.
         results = await asyncio.gather(
             *[
-                _execute_single_tool(inv, agent_state, tracer, agent_id)
+                _execute_single_tool(inv, agent_state, tracer, agent_id, batch_id=batch_id)
                 for inv in tool_invocations
             ],
             return_exceptions=True,
@@ -363,7 +372,7 @@ async def process_tool_invocations(
     else:
         for tool_inv in tool_invocations:
             observation_xml, images, tool_should_finish = await _execute_single_tool(
-                tool_inv, agent_state, tracer, agent_id
+                tool_inv, agent_state, tracer, agent_id, batch_id=batch_id
             )
             observation_parts.append(observation_xml)
             all_images.extend(images)
