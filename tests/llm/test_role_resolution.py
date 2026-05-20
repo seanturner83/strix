@@ -162,3 +162,43 @@ def test_memory_compressor_explicit_model_overrides_role(monkeypatch):
 
     compressor = MemoryCompressor(model_name="anthropic/claude-haiku-4-5")
     assert compressor.model_name == "anthropic/claude-haiku-4-5"
+
+
+def test_summarize_messages_dispatches_to_compressor_endpoint(monkeypatch):
+    """End-to-end proof: _summarize_messages routes its litellm.completion
+    call to the compressor role's api_base, NOT the orchestrator's."""
+    from unittest.mock import MagicMock
+
+    from strix.llm import memory_compressor
+
+    monkeypatch.setenv("STRIX_LLM", "bedrock/us.anthropic.claude-opus-4-7")
+    monkeypatch.setenv(
+        "STRIX_LLM_ORCHESTRATOR_API_BASE", "https://orch.example.com"
+    )
+    monkeypatch.setenv("STRIX_LLM_COMPRESSOR", "openai/qwen3.6-7b")
+    monkeypatch.setenv(
+        "STRIX_LLM_COMPRESSOR_API_BASE", "http://localhost:1234/v1"
+    )
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+
+    captured: dict = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "summary"
+        return response
+
+    monkeypatch.setattr(memory_compressor.litellm, "completion", fake_completion)
+
+    result = memory_compressor._summarize_messages(
+        messages=[{"role": "user", "content": "hello world"}],
+        model="openai/qwen3.6-7b",
+        timeout=30,
+    )
+
+    assert captured["api_base"] == "http://localhost:1234/v1"
+    assert captured["model"] == "openai/qwen3.6-7b"
+    assert captured["api_key"] == "test-key"
+    assert "summary" in result["content"]
