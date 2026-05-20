@@ -1,9 +1,13 @@
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import litellm
 
 from strix.config.config import Config, resolve_llm_config
+
+
+UsageCallback = Callable[[Any, str], None]
 
 
 logger = logging.getLogger(__name__)
@@ -94,6 +98,7 @@ def _summarize_messages(
     messages: list[dict[str, Any]],
     model: str,
     timeout: int = 30,
+    on_usage: UsageCallback | None = None,
 ) -> dict[str, Any]:
     if not messages:
         empty_summary = "<context_summary message_count='0'>{text}</context_summary>"
@@ -125,6 +130,11 @@ def _summarize_messages(
             completion_args["api_base"] = api_base
 
         response = litellm.completion(**completion_args)
+        if on_usage is not None:
+            try:
+                on_usage(response, model)
+            except Exception:  # noqa: BLE001
+                logger.exception("Compressor usage callback failed")
         summary = response.choices[0].message.content or ""
         if not summary.strip():
             return messages[0]
@@ -180,6 +190,7 @@ class MemoryCompressor:
         max_images: int = 3,
         model_name: str | None = None,
         timeout: int | None = None,
+        on_usage: UsageCallback | None = None,
     ):
         self.max_images = max_images
         if model_name is None:
@@ -188,6 +199,7 @@ class MemoryCompressor:
         else:
             self.model_name = model_name
         self.timeout = timeout or int(Config.get("strix_memory_compressor_timeout") or "120")
+        self.on_usage = on_usage
 
         self.max_total_tokens = int(
             Config.get("strix_max_context_tokens") or str(DEFAULT_MAX_TOTAL_TOKENS)
@@ -307,7 +319,9 @@ class MemoryCompressor:
         chunk_size = 10
         for i in range(0, len(old_msgs), chunk_size):
             chunk = old_msgs[i : i + chunk_size]
-            summary = _summarize_messages(chunk, model_name, self.timeout)
+            summary = _summarize_messages(
+                chunk, model_name, self.timeout, on_usage=self.on_usage
+            )
             if summary:
                 compressed.append(summary)
 

@@ -164,6 +164,43 @@ def test_memory_compressor_explicit_model_overrides_role(monkeypatch):
     assert compressor.model_name == "anthropic/claude-haiku-4-5"
 
 
+def test_compressor_usage_callback_invoked_with_compressor_model(monkeypatch):
+    """Compressor cost must be priced against the compressor's model,
+    not the orchestrator's. This test asserts the on_usage callback
+    receives the model that was passed to litellm.completion."""
+    from unittest.mock import MagicMock
+
+    from strix.llm import memory_compressor
+
+    captured_callbacks: list[tuple] = []
+
+    def fake_completion(**kwargs):
+        response = MagicMock()
+        response.usage.prompt_tokens = 100
+        response.usage.completion_tokens = 50
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "summary"
+        return response
+
+    monkeypatch.setattr(memory_compressor.litellm, "completion", fake_completion)
+
+    def on_usage(response, model):
+        captured_callbacks.append((response, model))
+
+    memory_compressor._summarize_messages(
+        messages=[{"role": "user", "content": "hello"}],
+        model="bedrock/anthropic.claude-haiku-4-5",
+        timeout=30,
+        on_usage=on_usage,
+    )
+
+    assert len(captured_callbacks) == 1
+    response, model = captured_callbacks[0]
+    assert model == "bedrock/anthropic.claude-haiku-4-5"
+    assert response.usage.prompt_tokens == 100
+    assert response.usage.completion_tokens == 50
+
+
 def test_summarize_messages_dispatches_to_compressor_endpoint(monkeypatch):
     """End-to-end proof: _summarize_messages routes its litellm.completion
     call to the compressor role's api_base, NOT the orchestrator's."""

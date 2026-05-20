@@ -88,6 +88,7 @@ class LLM:
             model_name=None
             if Config.get("strix_llm_compressor")
             else config.litellm_model,
+            on_usage=self._update_compressor_stats,
         )
         self.system_prompt = self._load_system_prompt(agent_name)
 
@@ -360,7 +361,7 @@ class LLM:
         except Exception:  # noqa: BLE001, S110  # nosec B110
             pass
 
-    def _extract_cost(self, response: Any) -> float:
+    def _extract_cost(self, response: Any, model: str | None = None) -> float:
         if hasattr(response, "usage") and response.usage:
             direct_cost = getattr(response.usage, "cost", None)
             if direct_cost is not None:
@@ -368,9 +369,44 @@ class LLM:
         try:
             if hasattr(response, "_hidden_params"):
                 response._hidden_params.pop("custom_llm_provider", None)
-            return completion_cost(response, model=self.config.canonical_model) or 0.0
+            return completion_cost(
+                response, model=model or self.config.canonical_model
+            ) or 0.0
         except Exception:  # noqa: BLE001
             return 0.0
+
+    def _update_compressor_stats(self, response: Any, model: str) -> None:
+        """Usage callback for MemoryCompressor.
+
+        Compressor calls hit a different model than the orchestrator (when
+        STRIX_LLM_COMPRESSOR is set), so cost must be priced against that
+        model. Token counts accumulate into the same _total_stats so they
+        appear in the run summary.
+        """
+        try:
+            if hasattr(response, "usage") and response.usage:
+                input_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+
+                cached_tokens = 0
+                if hasattr(response.usage, "prompt_tokens_details"):
+                    prompt_details = response.usage.prompt_tokens_details
+                    if hasattr(prompt_details, "cached_tokens"):
+                        cached_tokens = prompt_details.cached_tokens or 0
+
+                cost = self._extract_cost(response, model=model)
+            else:
+                input_tokens = 0
+                output_tokens = 0
+                cached_tokens = 0
+                cost = 0.0
+
+            self._total_stats.input_tokens += input_tokens
+            self._total_stats.output_tokens += output_tokens
+            self._total_stats.cached_tokens += cached_tokens
+            self._total_stats.cost += cost
+        except Exception:  # noqa: BLE001, S110  # nosec B110
+            pass
 
     def _should_retry(self, e: Exception) -> bool:
         code = getattr(e, "status_code", None) or getattr(
