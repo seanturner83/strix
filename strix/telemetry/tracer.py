@@ -80,6 +80,17 @@ class Tracer:
         self._next_message_id = 1
         self._saved_vuln_ids: set[str] = set()
         self._run_completed_emitted = False
+        # Set to True the first time cleanup() runs to its end. Guards
+        # against the dual-write that bit production on 2026-05-20:
+        #   1. First cleanup() call writes session_end with completed=False
+        #      (because save_run_data(mark_complete=True) hasn't run yet)
+        #   2. save_run_data() flips run_metadata["status"] = "completed"
+        #   3. Second cleanup() call (signal handler / atexit) reads the
+        #      now-"completed" status and writes session_end with
+        #      completed=True
+        # Downstream (CI parsers, run-resume detection) sees the second
+        # session_end and treats a timeout-killed scan as successful.
+        self._cleanup_emitted = False
         self._conversation_log: "Any" = None  # ConversationLog set by BaseAgent
         self._telemetry_enabled = is_otel_enabled()
         self._sanitizer = TelemetrySanitizer()
@@ -916,6 +927,16 @@ class Tracer:
             pass
 
     def cleanup(self) -> None:
+        # Idempotency guard: cleanup() is reachable from multiple paths
+        # (normal teardown, signal handlers, atexit, asyncio task
+        # cancellation). Re-entry rewrites session_end with a stale
+        # "completed=True" because save_run_data() at the end of the
+        # first call mutates run_metadata["status"]. See
+        # _cleanup_emitted in __init__ for the full sequence.
+        if self._cleanup_emitted:
+            return
+        self._cleanup_emitted = True
+
         completed = self.run_metadata.get("status") == "completed" or bool(
             self.final_scan_result
         )

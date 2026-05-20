@@ -447,3 +447,89 @@ def test_tracer_otel_flag_overrides_global_telemetry(monkeypatch, tmp_path) -> N
 
     events_path = tmp_path / "strix_runs" / "otel-enabled" / "events.jsonl"
     assert events_path.exists()
+
+
+# ----------------------------------------------------------------------------
+# cleanup() idempotency — guards against the dual-write that bit production
+# on 2026-05-20 (timeout-killed scan emitted session_end with completed:True
+# on second cleanup invocation, masking the failure as success).
+# ----------------------------------------------------------------------------
+def _read_session_end_events(run_dir: Path) -> list[dict[str, Any]]:
+    conv_path = run_dir / "conversation.jsonl"
+    if not conv_path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in conv_path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") == "session_end":
+            out.append(entry)
+    return out
+
+
+def _attach_real_conversation_log(tracer: Tracer, run_dir: Path) -> None:
+    from strix.telemetry.conversation_log import ConversationLog
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tracer._conversation_log = ConversationLog(run_dir, tracer.run_name or "test-run")
+
+
+def test_cleanup_emits_session_end_only_once(monkeypatch, tmp_path) -> None:
+    """First cleanup() emits session_end. Second cleanup() must be a no-op."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("cleanup-idempotency")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "cleanup-idempotency"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    # Simulate a timeout-killed scan: status stays "running", no
+    # final_scan_result, then cleanup is invoked twice (signal handler
+    # + atexit pattern).
+    assert tracer.run_metadata["status"] == "running"
+    tracer.cleanup()
+    tracer.cleanup()
+
+    events = _read_session_end_events(run_dir)
+    assert len(events) == 1, f"expected exactly one session_end, got {len(events)}: {events}"
+    assert events[0]["completed"] is False, (
+        f"timeout-killed scan must report completed=False, got {events[0]}"
+    )
+
+
+def test_cleanup_preserves_real_completion_flag(monkeypatch, tmp_path) -> None:
+    """A genuine completion (final_scan_result populated) reports completed=True
+    even with the idempotency guard."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("cleanup-real-success")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "cleanup-real-success"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.final_scan_result = "# Executive Summary\n\nAll done."
+    tracer.cleanup()
+
+    events = _read_session_end_events(run_dir)
+    assert len(events) == 1
+    assert events[0]["completed"] is True
+
+
+def test_cleanup_idempotency_does_not_block_save_run_data(monkeypatch, tmp_path) -> None:
+    """cleanup() guard must not interfere with subsequent direct calls
+    to save_run_data() — only re-entry into cleanup() itself is blocked."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("cleanup-save-after")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "cleanup-save-after"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.cleanup()
+    # Direct call after cleanup should still succeed (no exception).
+    tracer.save_run_data(mark_complete=True)
+    assert tracer.run_metadata["status"] == "completed"
