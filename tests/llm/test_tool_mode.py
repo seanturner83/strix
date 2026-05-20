@@ -98,6 +98,7 @@ def test_listed_tools_marked_parallel_safe():
         "view_sitemap_entry",
         "view_agent_graph",
         "batch_list_files",
+        "batch_view_files",
         "batch_search_files",
         "batch_view_request",
     }
@@ -151,6 +152,58 @@ def test_batch_list_files_rejects_empty_or_wrong_type():
 
     assert "error" in asyncio.run(batch_list_files(paths=[]))
     assert "error" in asyncio.run(batch_list_files(paths="not-a-list"))  # type: ignore[arg-type]
+
+
+def test_batch_view_files_runs_concurrently(monkeypatch):
+    from strix.tools.file_edit import file_edit_actions as mod
+
+    seen: list[tuple] = []
+
+    def fake_str_replace_editor(command, path, view_range=None, **kwargs):
+        seen.append((command, path, view_range))
+        return {"content": f"contents-of-{path}"}
+
+    monkeypatch.setattr(mod, "str_replace_editor", fake_str_replace_editor)
+
+    result = asyncio.run(mod.batch_view_files(views=[
+        {"path": "/a.py"},
+        {"path": "/b.py", "view_range": [1, 50]},
+        {"path": "/c.py"},
+    ]))
+
+    assert result["count"] == 3
+    assert all(call[0] == "view" for call in seen)
+    assert ("view", "/b.py", [1, 50]) in seen
+    assert result["results"][0]["path"] == "/a.py"
+    assert "contents-of-/b.py" in result["results"][1]["content"]
+    assert result["results"][1]["view_range"] == [1, 50]
+
+
+def test_batch_view_files_handles_missing_file(monkeypatch):
+    from strix.tools.file_edit import file_edit_actions as mod
+
+    def fake_str_replace_editor(command, path, view_range=None, **kwargs):
+        if path == "/missing.py":
+            return {"error": f"File not found: {path}"}
+        return {"content": f"ok-{path}"}
+
+    monkeypatch.setattr(mod, "str_replace_editor", fake_str_replace_editor)
+
+    result = asyncio.run(mod.batch_view_files(views=[
+        {"path": "/good.py"},
+        {"path": "/missing.py"},
+    ]))
+
+    assert result["count"] == 2
+    assert "error" in result["results"][1]
+    assert "content" in result["results"][0]
+
+
+def test_batch_view_files_validates_input():
+    from strix.tools.file_edit.file_edit_actions import batch_view_files
+
+    assert "error" in asyncio.run(batch_view_files(views=[]))
+    assert "error" in asyncio.run(batch_view_files(views=[{"no_path": "x"}]))
 
 
 def test_batch_search_files_runs_searches_concurrently(monkeypatch):

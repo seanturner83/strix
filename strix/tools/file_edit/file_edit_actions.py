@@ -174,6 +174,58 @@ async def batch_list_files(
 
 
 @register_tool(parallel_safe=True)
+async def batch_view_files(
+    views: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Run str_replace_editor command=view for multiple files concurrently.
+
+    Each entry in `views` is a dict with keys: path (required),
+    view_range (optional, list of two ints [start_line, end_line];
+    -1 for end_line means EOF).
+    Use this after list_files / batch_list_files when you've identified
+    several files of interest — one tool call returns all their contents.
+    """
+    if not views:
+        return {"error": "views must be a non-empty list"}
+
+    if not isinstance(views, list):
+        return {"error": f"views must be a list, got {type(views).__name__}"}
+
+    for i, entry in enumerate(views):
+        if not isinstance(entry, dict):
+            return {"error": f"views[{i}] must be a dict"}
+        if "path" not in entry:
+            return {"error": f"views[{i}] missing required key 'path'"}
+
+    results = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                str_replace_editor,
+                command="view",
+                path=v["path"],
+                view_range=v.get("view_range"),
+            )
+            for v in views
+        ],
+        return_exceptions=True,
+    )
+
+    out: list[dict[str, Any]] = []
+    for entry, result in zip(views, results, strict=True):
+        item: dict[str, Any] = {"path": entry["path"]}
+        if entry.get("view_range") is not None:
+            item["view_range"] = entry["view_range"]
+        if isinstance(result, BaseException):
+            item["error"] = f"{type(result).__name__}: {result!s}"
+        elif isinstance(result, dict):
+            item.update(result)
+        else:
+            item["content"] = str(result)
+        out.append(item)
+    return {"results": out, "count": len(views)}
+
+
+@register_tool(parallel_safe=True)
 async def batch_search_files(
     searches: list[dict[str, Any]],
 ) -> dict[str, Any]:

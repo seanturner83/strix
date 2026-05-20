@@ -13,11 +13,12 @@
   - Runs in parallel via asyncio.gather inside the sandbox
   - Use whenever you would otherwise emit multiple view_request calls in a row
   - Failed individual views don't fail the batch; their entry has an "error" key
+  - Pass N requests where N matches your actual need (up to 8 per call). Examples below use small N for brevity — size to fit, not to match the example.
     </notes>
     <examples>
-  # View three captured requests in one call
+  # View N captured requests in one call (N can be 2 to 8 — size to fit your need)
   <function=batch_view_request>
-  <parameter=requests>[{"request_id": "req_abc123"}, {"request_id": "req_def456"}, {"request_id": "req_ghi789"}]</parameter>
+  <parameter=requests>[{"request_id": "req_abc123"}, {"request_id": "req_def456"}, {"request_id": "req_ghi789"}, {"request_id": "req_jkl012"}]</parameter>
   </function>
 
   # View request and response of one ID, plus another whole request

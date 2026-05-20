@@ -46,17 +46,47 @@
   - Runs in parallel via asyncio.gather inside the sandbox
   - Use this whenever you would otherwise emit multiple list_files calls in a row
   - If one path errors, the others still return; failed entries have an "error" key
+  - Pass N paths where N matches your actual need (up to 8 per call). Examples below use small N for brevity but you should size to fit the situation, not match the example count.
     </notes>
     <examples>
-  # Walk three sibling directories of a repo in one call
+  # Walk N sibling directories in one call (N can be 2 to 8 — size to fit your need)
   <function=batch_list_files>
-  <parameter=paths>["/workspace/repo/scripts", "/workspace/repo/templates", "/workspace/repo/.github"]</parameter>
+  <parameter=paths>["/workspace/repo/scripts", "/workspace/repo/templates", "/workspace/repo/.github", "/workspace/repo/src", "/workspace/repo/tests"]</parameter>
   </function>
 
-  # Recursive walk of two top-level dirs
+  # Recursive walk of multiple top-level dirs
   <function=batch_list_files>
   <parameter=paths>["/workspace/repo/src", "/workspace/repo/tests"]</parameter>
   <parameter=recursive>true</parameter>
+  </function>
+    </examples>
+  </tool>
+  <tool name="batch_view_files">
+    <description>View multiple files concurrently. Issues all view operations in parallel inside the sandbox; returns a single combined result. Prefer this over multiple separate str_replace_editor command=view calls when reading several files.</description>
+    <parameters>
+      <parameter name="views" type="array" required="true">
+        <description>JSON array of view specs. Each spec is an object with keys: "path" (required), "view_range" (optional, two-element list [start_line, end_line]; -1 for end_line means EOF). Example: [{"path": "/workspace/repo/main.py"}, {"path": "/workspace/repo/auth.py", "view_range": [1, 50]}]</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing: - results: list of view results (path, view_range, content/error) preserving input order - count: number of views run</description>
+    </returns>
+    <notes>
+  - Runs all views in parallel via asyncio.gather inside the sandbox
+  - Use whenever you would otherwise emit multiple str_replace_editor command=view calls in a row
+  - Common after list_files / batch_list_files: list a directory, then batch-view the interesting files
+  - Each result has the same shape as a single str_replace_editor view; failed entries have an "error" key
+  - Pass N views where N matches your actual need (up to 8 per call); for very large files, use view_range to scope each entry. Examples below use small N for brevity — size to fit, not to match the example.
+    </notes>
+    <examples>
+  # View N files of interest after directory enumeration (N can be 2 to 8 — size to fit your need)
+  <function=batch_view_files>
+  <parameter=views>[{"path": "/workspace/repo/main.py"}, {"path": "/workspace/repo/auth.py"}, {"path": "/workspace/repo/db.py"}, {"path": "/workspace/repo/config.py"}]</parameter>
+  </function>
+
+  # View specific line ranges of multiple large files
+  <function=batch_view_files>
+  <parameter=views>[{"path": "/workspace/repo/server.py", "view_range": [1, 100]}, {"path": "/workspace/repo/handlers.py", "view_range": [200, 300]}]</parameter>
   </function>
     </examples>
   </tool>
@@ -74,11 +104,12 @@
   - Runs all searches in parallel via asyncio.gather inside the sandbox
   - Use whenever you would otherwise emit multiple search_files calls in a row
   - Failed individual searches don't fail the batch; their entry has an "error" key
+  - Pass N searches where N matches your actual need (up to 8 per call). Examples below use small N for brevity — size to fit, not to match the example.
     </notes>
     <examples>
-  # Grep three different patterns across the same repo
+  # Grep N different patterns across the same repo (N can be 2 to 8 — size to fit your need)
   <function=batch_search_files>
-  <parameter=searches>[{"path": "/workspace/repo", "regex": "password\\s*="}, {"path": "/workspace/repo", "regex": "secret\\s*="}, {"path": "/workspace/repo", "regex": "api[_-]?key"}]</parameter>
+  <parameter=searches>[{"path": "/workspace/repo", "regex": "password\\s*="}, {"path": "/workspace/repo", "regex": "secret\\s*="}, {"path": "/workspace/repo", "regex": "api[_-]?key"}, {"path": "/workspace/repo", "regex": "AKIA[0-9A-Z]{16}"}]</parameter>
   </function>
 
   # Grep one pattern across multiple paths with different file filters
