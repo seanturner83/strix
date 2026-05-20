@@ -17,8 +17,10 @@ class LLMConfig:
         interactive: bool = False,
         reasoning_effort: str | None = None,
         system_prompt_context: dict[str, Any] | None = None,
+        role: str | None = None,
     ):
-        resolved_model, self.api_key, self.api_base = resolve_llm_config()
+        self.role = role
+        resolved_model, self.api_key, self.api_base = resolve_llm_config(role=role)
         self.model_name = model_name or resolved_model
 
         if not self.model_name:

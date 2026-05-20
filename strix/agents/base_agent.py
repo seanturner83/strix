@@ -92,6 +92,7 @@ class BaseAgent(metaclass=AgentMeta):
                 name=self.state.agent_name,
                 task=self.state.task,
                 parent_id=self.state.parent_id,
+                role=getattr(self.llm_config, "role", None),
             )
             if self.state.parent_id is None:
                 scan_config = tracer.scan_config or {}

@@ -451,6 +451,7 @@ def create_agent(
             scan_mode=scan_mode,
             is_whitebox=is_whitebox,
             interactive=interactive,
+            role="subagent",
         )
 
         agent_config = {
