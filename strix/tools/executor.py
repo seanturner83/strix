@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import os
 from typing import Any
@@ -16,6 +17,7 @@ from .registry import (
     get_tool_by_name,
     get_tool_names,
     get_tool_param_schema,
+    is_tool_parallel_safe,
     needs_agent_state,
     should_execute_in_sandbox,
 )
@@ -310,6 +312,15 @@ def _get_tracer_and_agent_id(agent_state: Any | None) -> tuple[Any | None, str]:
     return tracer, agent_id
 
 
+def _all_parallel_safe(tool_invocations: list[dict[str, Any]]) -> bool:
+    """True if every invocation is for a tool registered as parallel_safe=True."""
+    for inv in tool_invocations:
+        name = inv.get("toolName")
+        if not isinstance(name, str) or not is_tool_parallel_safe(name):
+            return False
+    return True
+
+
 async def process_tool_invocations(
     tool_invocations: list[dict[str, Any]],
     conversation_history: list[dict[str, Any]],
@@ -321,15 +332,44 @@ async def process_tool_invocations(
 
     tracer, agent_id = _get_tracer_and_agent_id(agent_state)
 
-    for tool_inv in tool_invocations:
-        observation_xml, images, tool_should_finish = await _execute_single_tool(
-            tool_inv, agent_state, tracer, agent_id
-        )
-        observation_parts.append(observation_xml)
-        all_images.extend(images)
+    can_parallelise = (
+        len(tool_invocations) > 1 and _all_parallel_safe(tool_invocations)
+    )
 
-        if tool_should_finish:
-            should_agent_finish = True
+    if can_parallelise:
+        # Run independent tools concurrently. Results are gathered in invocation
+        # order (asyncio.gather preserves ordering), so the LLM observes them
+        # in the same order it requested.
+        results = await asyncio.gather(
+            *[
+                _execute_single_tool(inv, agent_state, tracer, agent_id)
+                for inv in tool_invocations
+            ],
+            return_exceptions=True,
+        )
+        for inv, result in zip(tool_invocations, results, strict=False):
+            if isinstance(result, BaseException):
+                tool_name = inv.get("toolName", "unknown")
+                observation_parts.append(
+                    f"<tool_result>\n<tool_name>{tool_name}</tool_name>\n"
+                    f"<result>Error: {result!s}</result>\n</tool_result>"
+                )
+                continue
+            observation_xml, images, tool_should_finish = result
+            observation_parts.append(observation_xml)
+            all_images.extend(images)
+            if tool_should_finish:
+                should_agent_finish = True
+    else:
+        for tool_inv in tool_invocations:
+            observation_xml, images, tool_should_finish = await _execute_single_tool(
+                tool_inv, agent_state, tracer, agent_id
+            )
+            observation_parts.append(observation_xml)
+            all_images.extend(images)
+
+            if tool_should_finish:
+                should_agent_finish = True
 
     if all_images:
         content = [{"type": "text", "text": "Tool Results:\n\n" + "\n\n".join(observation_parts)}]

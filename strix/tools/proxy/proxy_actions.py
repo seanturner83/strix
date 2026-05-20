@@ -6,7 +6,7 @@ from strix.tools.registry import register_tool
 RequestPart = Literal["request", "response"]
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def list_requests(
     httpql_filter: str | None = None,
     start_page: int = 1,
@@ -33,7 +33,7 @@ def list_requests(
     )
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def view_request(
     request_id: str,
     part: RequestPart = "request",
@@ -90,7 +90,7 @@ def scope_rules(
     return manager.scope_rules(action, allowlist, denylist, scope_id, scope_name)
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def list_sitemap(
     scope_id: str | None = None,
     parent_id: str | None = None,
@@ -103,7 +103,7 @@ def list_sitemap(
     return manager.list_sitemap(scope_id, parent_id, depth, page)
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def view_sitemap_entry(
     entry_id: str,
 ) -> dict[str, Any]:

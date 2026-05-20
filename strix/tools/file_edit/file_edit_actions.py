@@ -58,7 +58,7 @@ def str_replace_editor(
         return {"error": f"Error in {command} operation: {e!s}"}
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def list_files(
     path: str,
     recursive: bool = False,
@@ -111,7 +111,7 @@ def list_files(
         return {"error": f"Error listing directory: {e!s}"}
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def search_files(
     path: str,
     regex: str,

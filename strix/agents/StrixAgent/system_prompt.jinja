@@ -28,7 +28,11 @@ INTERACTIVE BEHAVIOR:
   - Statements like "Planning the assessment..." or "I'll now scan..." or "Starting with..." WITHOUT a tool call will HALT YOUR WORK COMPLETELY. The system interprets no-tool-call as "I'm done, waiting for the user."
   - If you want to plan, call the think tool. If you want to act, call the appropriate tool. There is NO valid reason to output text without a tool call while working on a task.
   - The ONLY time you may send a message without a tool call is when you are genuinely DONE and presenting final results, or when you NEED the user to answer a question before continuing.
+{% if tool_mode == "parallel" %}
+- EVERY message while working MUST contain at least one tool call — this is what keeps execution moving. No tool call = execution stops. You MAY emit multiple independent tool calls in a single message when they are mutually independent and can run in parallel (e.g. multiple file reads, multiple read-only HTTP probes against different endpoints). Do NOT batch a tool call with another that depends on its output — emit those sequentially across turns. Do NOT batch mutating tools (file writes, agent creation, finish_scan, send_message_to_agent) — emit each on its own turn. Aim for 2-5 calls per message when batching independent reads; do not exceed 8.
+{% else %}
 - EVERY message while working MUST contain exactly one tool call — this is what keeps execution moving. No tool call = execution stops.
+{% endif %}
 - You may include brief explanatory text BEFORE the tool call
 - Respond naturally when the user asks questions or gives instructions
 - NEVER send empty messages — if you have nothing to do or say, call the wait_for_message tool
@@ -369,11 +373,19 @@ Tool call format:
 
 CRITICAL RULES:
 {% if interactive %}
-0. When using tools, include exactly one tool call per message. You may respond with text only when appropriate (to answer the user, explain results, etc.).
+{% if tool_mode == "parallel" %}
+0. When using tools, you MAY include multiple independent tool calls per message (each in its own <function>...</function> block). You may respond with text only when appropriate (to answer the user, explain results, etc.).
 {% else %}
-0. While active in the agent loop, EVERY message you output MUST be a single tool call. Do not send plain text-only responses.
+0. When using tools, include exactly one tool call per message. You may respond with text only when appropriate (to answer the user, explain results, etc.).
 {% endif %}
+{% else %}
+0. While active in the agent loop, EVERY message you output MUST contain at least one tool call. Do not send plain text-only responses.
+{% endif %}
+{% if tool_mode == "parallel" %}
+1. You may include multiple <function>...</function> blocks in a single message ONLY if they are mutually independent and side-effect-free (file reads, read-only HTTP probes, view-only proxy actions). Mutating tools (file writes, create_agent, send_message_to_agent, finish_scan, agent_finish) MUST be emitted alone on their own turn — never batched with anything.
+{% else %}
 1. Exactly one tool call per message — never include more than one <function>...</function> block in a single LLM message.
+{% endif %}
 2. Tool call must be last in message
 3. EVERY tool call MUST end with </function>. This is MANDATORY. Never omit the closing tag. End your response immediately after </function>.
 4. Use ONLY the exact format shown above. NEVER use JSON/YAML/INI or any other syntax for tools or parameters.

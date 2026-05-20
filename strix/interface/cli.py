@@ -75,10 +75,13 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
     }
 
-    llm_config = LLMConfig(
-        scan_mode=scan_mode,
-        is_whitebox=bool(getattr(args, "local_sources", [])),
-    )
+    llm_config_kwargs: dict[str, Any] = {
+        "scan_mode": scan_mode,
+        "is_whitebox": bool(getattr(args, "local_sources", [])),
+    }
+    if getattr(args, "tool_mode", None):
+        llm_config_kwargs["tool_mode"] = args.tool_mode
+    llm_config = LLMConfig(**llm_config_kwargs)
     agent_config = {
         "llm_config": llm_config,
         "max_iterations": 300,

@@ -117,6 +117,7 @@ class LLM:
                 get_tools_prompt=get_tools_prompt,
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
+                tool_mode=self.config.tool_mode,
                 system_prompt_context=self._system_prompt_context,
                 **skill_content,
             )
@@ -213,14 +214,20 @@ class LLM:
             delta = self._get_chunk_content(chunk)
             if delta:
                 accumulated += delta
-                check_content = _THINKING_BLOCK_OR_OPEN_RE.sub("", accumulated)
-                if "</function>" in check_content or "</invoke>" in check_content:
-                    end_tag = "</function>" if "</function>" in check_content else "</invoke>"
-                    pos = _find_end_tag_outside_thinking(accumulated, end_tag)
-                    accumulated = accumulated[: pos + len(end_tag)]
-                    yield LLMResponse(content=accumulated)
-                    done_streaming = 1
-                    continue
+                # In serial mode, stop streaming as soon as the first tool call closes
+                # to prevent hallucinated extra calls. In parallel mode, let the model
+                # emit multiple tool calls; the parser will collect all of them.
+                if self.config.tool_mode == "serial":
+                    check_content = _THINKING_BLOCK_OR_OPEN_RE.sub("", accumulated)
+                    if "</function>" in check_content or "</invoke>" in check_content:
+                        end_tag = (
+                            "</function>" if "</function>" in check_content else "</invoke>"
+                        )
+                        pos = _find_end_tag_outside_thinking(accumulated, end_tag)
+                        accumulated = accumulated[: pos + len(end_tag)]
+                        yield LLMResponse(content=accumulated)
+                        done_streaming = 1
+                        continue
                 yield LLMResponse(content=accumulated)
 
         if chunks:
@@ -228,7 +235,10 @@ class LLM:
 
         accumulated = _THINKING_BLOCK_RE.sub("", accumulated)
         accumulated = normalize_tool_format(accumulated)
-        accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
+        if self.config.tool_mode == "serial":
+            accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
+        else:
+            accumulated = fix_incomplete_tool_call(accumulated)
 
         yield LLMResponse(
             content=accumulated,
