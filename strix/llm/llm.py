@@ -84,7 +84,11 @@ class LLM:
             getattr(config, "system_prompt_context", {}) or {}
         )
         self._total_stats = RequestStats()
-        self.memory_compressor = MemoryCompressor()
+        self.memory_compressor = MemoryCompressor(
+            model_name=None
+            if Config.get("strix_llm_compressor")
+            else config.litellm_model,
+        )
         self.system_prompt = self._load_system_prompt(agent_name)
 
         reasoning = Config.get("strix_reasoning_effort")
