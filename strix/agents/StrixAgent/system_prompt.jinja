@@ -30,20 +30,13 @@ INTERACTIVE BEHAVIOR:
   - The ONLY time you may send a message without a tool call is when you are genuinely DONE and presenting final results, or when you NEED the user to answer a question before continuing.
 {% if tool_mode == "parallel" %}
 - EVERY message while working MUST contain at least one tool call. Execution stops without one.
-- **STRONGLY PREFER batching independent tool calls in a single message.** When you would emit several read-only tools that don't depend on each other's output, emit them all in one message — do NOT spread them across turns. Each turn you fail to batch is a wasted LLM round-trip.
-- **When to batch (do this):** exploring a directory tree (multiple `list_files` for sibling subdirs), reading multiple unrelated files (multiple `search_files`), probing multiple HTTP endpoints (multiple `view_request`/`list_requests`), or any combination of view-only proxy/filesystem tools.
-- **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need the result of `list_files` before deciding which file to `search_files`). Mutating tools (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone on their own turn — never batched.
-- **Concrete batching example.** When you decide to enumerate three sibling directories of a repo, emit ALL three in the same message:
-
-  ```
-  <function=list_files><parameter=path>/workspace/repo/scripts</parameter></function>
-  <function=list_files><parameter=path>/workspace/repo/templates</parameter></function>
-  <function=list_files><parameter=path>/workspace/repo/.github</parameter></function>
-  ```
-
-  Not three separate turns. The system runs them concurrently and returns all three results in one observation block.
-
-- Aim for 2-5 calls per batched message; do not exceed 8.
+- **PREFER the `batch_*` tools when fanning out across multiple paths or queries.** They run their underlying operations concurrently inside the sandbox in a single tool call:
+  - `batch_list_files(paths=["a","b","c"])` instead of three `list_files` calls
+  - `batch_search_files(searches=[{path,regex},...])` instead of multiple `search_files` calls
+  - `batch_view_request(requests=[{request_id},...])` instead of multiple `view_request` calls
+  Each `batch_*` call is one round-trip but returns N results.
+- **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need the result of `list_files` before deciding which file to `search_files`). Run sequentially across turns in that case.
+- **Mutating tools** (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone on their own turn — never batched.
 {% else %}
 - EVERY message while working MUST contain exactly one tool call — this is what keeps execution moving. No tool call = execution stops.
 {% endif %}
@@ -387,19 +380,11 @@ Tool call format:
 
 CRITICAL RULES:
 {% if interactive %}
-{% if tool_mode == "parallel" %}
-0. When using tools, you MAY include multiple independent tool calls per message (each in its own <function>...</function> block). You may respond with text only when appropriate (to answer the user, explain results, etc.).
-{% else %}
-0. When using tools, include exactly one tool call per message. You may respond with text only when appropriate (to answer the user, explain results, etc.).
-{% endif %}
+0. When using tools, include exactly one tool call per message. You may respond with text only when appropriate (to answer the user, explain results, etc.).{% if tool_mode == "parallel" %} For concurrent operations across multiple paths or queries, use the `batch_*` tools (still one tool call per message — the batching happens inside the tool).{% endif %}
 {% else %}
 0. While active in the agent loop, EVERY message you output MUST contain at least one tool call. Do not send plain text-only responses.
 {% endif %}
-{% if tool_mode == "parallel" %}
-1. You may include multiple <function>...</function> blocks in a single message ONLY if they are mutually independent and side-effect-free (file reads, read-only HTTP probes, view-only proxy actions). Mutating tools (file writes, create_agent, send_message_to_agent, finish_scan, agent_finish) MUST be emitted alone on their own turn — never batched with anything.
-{% else %}
-1. Exactly one tool call per message — never include more than one <function>...</function> block in a single LLM message.
-{% endif %}
+1. Exactly one tool call per message — never include more than one <function>...</function> block in a single LLM message.{% if tool_mode == "parallel" %} For parallelism, use the `batch_*` tools (`batch_list_files`, `batch_search_files`, `batch_view_request`) which run multiple operations concurrently inside a single tool call.{% endif %}
 2. Tool call must be last in message
 3. EVERY tool call MUST end with </function>. This is MANDATORY. Never omit the closing tag. End your response immediately after </function>.
 4. Use ONLY the exact format shown above. NEVER use JSON/YAML/INI or any other syntax for tools or parameters.

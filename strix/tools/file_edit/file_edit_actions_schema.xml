@@ -29,6 +29,64 @@
   </function>
     </examples>
   </tool>
+  <tool name="batch_list_files">
+    <description>List multiple directories concurrently. Issues all listings in parallel inside the sandbox; returns a single combined result. Prefer this over multiple separate list_files calls when exploring several directories.</description>
+    <parameters>
+      <parameter name="paths" type="array" required="true">
+        <description>List of directory paths to list, as a JSON array. Example: ["scripts", "templates", ".github"]</description>
+      </parameter>
+      <parameter name="recursive" type="boolean" required="false">
+        <description>Apply recursive listing to ALL paths. Default false.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing: - results: dict keyed by path, each value the same shape as a single list_files result - count: number of paths listed</description>
+    </returns>
+    <notes>
+  - Runs in parallel via asyncio.gather inside the sandbox
+  - Use this whenever you would otherwise emit multiple list_files calls in a row
+  - If one path errors, the others still return; failed entries have an "error" key
+    </notes>
+    <examples>
+  # Walk three sibling directories of a repo in one call
+  <function=batch_list_files>
+  <parameter=paths>["/workspace/repo/scripts", "/workspace/repo/templates", "/workspace/repo/.github"]</parameter>
+  </function>
+
+  # Recursive walk of two top-level dirs
+  <function=batch_list_files>
+  <parameter=paths>["/workspace/repo/src", "/workspace/repo/tests"]</parameter>
+  <parameter=recursive>true</parameter>
+  </function>
+    </examples>
+  </tool>
+  <tool name="batch_search_files">
+    <description>Run multiple regex searches concurrently. Each search has its own path/regex/file_pattern. Prefer this over multiple separate search_files calls when grepping for several patterns or across several locations.</description>
+    <parameters>
+      <parameter name="searches" type="array" required="true">
+        <description>JSON array of search specs. Each spec is an object with keys: "path" (required), "regex" (required), "file_pattern" (optional, default "*"). Example: [{"path": "/workspace/src", "regex": "TODO"}, {"path": "/workspace/tests", "regex": "FIXME"}]</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing: - results: list of result entries (path, regex, output or error) preserving input order - count: number of searches run</description>
+    </returns>
+    <notes>
+  - Runs all searches in parallel via asyncio.gather inside the sandbox
+  - Use whenever you would otherwise emit multiple search_files calls in a row
+  - Failed individual searches don't fail the batch; their entry has an "error" key
+    </notes>
+    <examples>
+  # Grep three different patterns across the same repo
+  <function=batch_search_files>
+  <parameter=searches>[{"path": "/workspace/repo", "regex": "password\\s*="}, {"path": "/workspace/repo", "regex": "secret\\s*="}, {"path": "/workspace/repo", "regex": "api[_-]?key"}]</parameter>
+  </function>
+
+  # Grep one pattern across multiple paths with different file filters
+  <function=batch_search_files>
+  <parameter=searches>[{"path": "/workspace/repo/src", "regex": "eval\\(", "file_pattern": "*.py"}, {"path": "/workspace/repo/src", "regex": "eval\\(", "file_pattern": "*.js"}]</parameter>
+  </function>
+    </examples>
+  </tool>
   <tool name="search_files">
     <description>Perform a regex search across files in a directory.</description>
     <parameters>

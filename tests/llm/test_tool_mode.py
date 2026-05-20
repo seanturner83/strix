@@ -97,9 +97,115 @@ def test_listed_tools_marked_parallel_safe():
         "list_sitemap",
         "view_sitemap_entry",
         "view_agent_graph",
+        "batch_list_files",
+        "batch_search_files",
+        "batch_view_request",
     }
     for name in expected_safe:
         assert is_tool_parallel_safe(name), f"{name} should be parallel_safe"
+
+
+def test_batch_list_files_runs_paths_concurrently(monkeypatch):
+    """batch_list_files invokes list_files for each path via asyncio.gather."""
+    from strix.tools.file_edit import file_edit_actions as mod
+
+    invocations: list[str] = []
+
+    def fake_list_files(path, recursive=False):
+        invocations.append(path)
+        return {"path": path, "recursive": recursive, "files": [f"f-in-{path}"]}
+
+    monkeypatch.setattr(mod, "list_files", fake_list_files)
+
+    result = asyncio.run(
+        mod.batch_list_files(paths=["/a", "/b", "/c"])
+    )
+
+    assert result["count"] == 3
+    assert set(result["results"].keys()) == {"/a", "/b", "/c"}
+    assert result["results"]["/a"]["files"] == ["f-in-/a"]
+    assert sorted(invocations) == ["/a", "/b", "/c"]
+
+
+def test_batch_list_files_handles_per_path_errors(monkeypatch):
+    """One failing path doesn't fail the whole batch."""
+    from strix.tools.file_edit import file_edit_actions as mod
+
+    def fake_list_files(path, recursive=False):
+        if path == "/bad":
+            raise OSError("permission denied")
+        return {"path": path, "files": []}
+
+    monkeypatch.setattr(mod, "list_files", fake_list_files)
+
+    result = asyncio.run(mod.batch_list_files(paths=["/good", "/bad", "/also-good"]))
+
+    assert "error" in result["results"]["/bad"]
+    assert "permission denied" in result["results"]["/bad"]["error"]
+    assert "error" not in result["results"]["/good"]
+    assert "error" not in result["results"]["/also-good"]
+
+
+def test_batch_list_files_rejects_empty_or_wrong_type():
+    from strix.tools.file_edit.file_edit_actions import batch_list_files
+
+    assert "error" in asyncio.run(batch_list_files(paths=[]))
+    assert "error" in asyncio.run(batch_list_files(paths="not-a-list"))  # type: ignore[arg-type]
+
+
+def test_batch_search_files_runs_searches_concurrently(monkeypatch):
+    from strix.tools.file_edit import file_edit_actions as mod
+
+    invocations: list[tuple] = []
+
+    def fake_search_files(path, regex, file_pattern="*"):
+        invocations.append((path, regex, file_pattern))
+        return {"output": f"matches-for-{regex}-in-{path}"}
+
+    monkeypatch.setattr(mod, "search_files", fake_search_files)
+
+    result = asyncio.run(
+        mod.batch_search_files(searches=[
+            {"path": "/a", "regex": "TODO"},
+            {"path": "/b", "regex": "FIXME", "file_pattern": "*.py"},
+        ])
+    )
+
+    assert result["count"] == 2
+    assert result["results"][0]["path"] == "/a"
+    assert result["results"][0]["regex"] == "TODO"
+    assert "matches-for-TODO" in result["results"][0]["output"]
+    assert ("/b", "FIXME", "*.py") in invocations
+
+
+def test_batch_search_files_validates_required_keys():
+    from strix.tools.file_edit.file_edit_actions import batch_search_files
+
+    # missing regex
+    result = asyncio.run(batch_search_files(searches=[{"path": "/a"}]))
+    assert "error" in result and "regex" in result["error"]
+
+
+def test_batch_view_request_runs_concurrently(monkeypatch):
+    from strix.tools.proxy import proxy_actions as mod
+
+    seen: list[str] = []
+
+    def fake_view_request(request_id, part="request", search_pattern=None, page=1, page_size=50):
+        seen.append(request_id)
+        return {"id": request_id, "part": part, "body": f"body-{request_id}"}
+
+    monkeypatch.setattr(mod, "view_request", fake_view_request)
+
+    result = asyncio.run(mod.batch_view_request(requests=[
+        {"request_id": "r1"},
+        {"request_id": "r2", "part": "response"},
+    ]))
+
+    assert result["count"] == 2
+    assert sorted(seen) == ["r1", "r2"]
+    assert result["results"][0]["request_id"] == "r1"
+    assert result["results"][1]["part"] == "response"
 
 
 def test_mutating_tools_NOT_marked_parallel_safe():

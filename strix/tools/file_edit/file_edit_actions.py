@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -139,6 +140,83 @@ def search_files(
 
     except (OSError, ValueError) as e:
         return {"error": f"Error searching files: {e!s}"}
+
+
+@register_tool(parallel_safe=True)
+async def batch_list_files(
+    paths: list[str],
+    recursive: bool = False,
+) -> dict[str, Any]:
+    """Run list_files for multiple paths concurrently.
+
+    Use this instead of multiple separate list_files calls when exploring
+    several directories at once — it issues all the directory listings in
+    parallel inside the sandbox and returns them as a single result.
+    """
+    if not paths:
+        return {"error": "paths must be a non-empty list"}
+
+    if not isinstance(paths, list):
+        return {"error": f"paths must be a list, got {type(paths).__name__}"}
+
+    results = await asyncio.gather(
+        *[asyncio.to_thread(list_files, path=p, recursive=recursive) for p in paths],
+        return_exceptions=True,
+    )
+
+    out: dict[str, Any] = {}
+    for path, result in zip(paths, results, strict=True):
+        if isinstance(result, BaseException):
+            out[path] = {"error": f"{type(result).__name__}: {result!s}"}
+        else:
+            out[path] = result
+    return {"results": out, "count": len(paths)}
+
+
+@register_tool(parallel_safe=True)
+async def batch_search_files(
+    searches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Run search_files for multiple (path, regex) pairs concurrently.
+
+    Each entry in `searches` is a dict with keys: path (required),
+    regex (required), file_pattern (optional, default '*').
+    Use this to grep across several locations or for several patterns at once.
+    """
+    if not searches:
+        return {"error": "searches must be a non-empty list"}
+
+    if not isinstance(searches, list):
+        return {"error": f"searches must be a list, got {type(searches).__name__}"}
+
+    for i, entry in enumerate(searches):
+        if not isinstance(entry, dict):
+            return {"error": f"searches[{i}] must be a dict"}
+        if "path" not in entry or "regex" not in entry:
+            return {"error": f"searches[{i}] missing required keys 'path' or 'regex'"}
+
+    results = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                search_files,
+                path=s["path"],
+                regex=s["regex"],
+                file_pattern=s.get("file_pattern", "*"),
+            )
+            for s in searches
+        ],
+        return_exceptions=True,
+    )
+
+    out: list[dict[str, Any]] = []
+    for entry, result in zip(searches, results, strict=True):
+        item = {"path": entry["path"], "regex": entry["regex"]}
+        if isinstance(result, BaseException):
+            item["error"] = f"{type(result).__name__}: {result!s}"
+        else:
+            item.update(result if isinstance(result, dict) else {"output": str(result)})
+        out.append(item)
+    return {"results": out, "count": len(searches)}
 
 
 # ruff: noqa: TRY300

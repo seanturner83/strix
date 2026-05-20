@@ -1,4 +1,31 @@
 <tools>
+  <tool name="batch_view_request">
+    <description>View multiple captured requests/responses concurrently. Issues all view_request calls in parallel inside the sandbox; returns a single combined result. Prefer this over multiple separate view_request calls.</description>
+    <parameters>
+      <parameter name="requests" type="array" required="true">
+        <description>JSON array of view specs. Each spec is an object with keys: "request_id" (required), "part" (optional, "request" or "response", default "request"), "search_pattern" (optional), "page" (optional, default 1), "page_size" (optional, default 50). Example: [{"request_id": "abc"}, {"request_id": "def", "part": "response"}]</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing: - results: list of result entries preserving input order - count: number of requests viewed</description>
+    </returns>
+    <notes>
+  - Runs in parallel via asyncio.gather inside the sandbox
+  - Use whenever you would otherwise emit multiple view_request calls in a row
+  - Failed individual views don't fail the batch; their entry has an "error" key
+    </notes>
+    <examples>
+  # View three captured requests in one call
+  <function=batch_view_request>
+  <parameter=requests>[{"request_id": "req_abc123"}, {"request_id": "req_def456"}, {"request_id": "req_ghi789"}]</parameter>
+  </function>
+
+  # View request and response of one ID, plus another whole request
+  <function=batch_view_request>
+  <parameter=requests>[{"request_id": "req_abc"}, {"request_id": "req_abc", "part": "response"}, {"request_id": "req_def"}]</parameter>
+  </function>
+    </examples>
+  </tool>
   <tool name="list_requests">
     <description>List and filter proxy requests using HTTPQL with pagination.</description>
     <parameters>
