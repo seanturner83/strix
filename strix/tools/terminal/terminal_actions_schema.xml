@@ -1,4 +1,41 @@
 <tools>
+  <tool name="batch_terminal_execute">
+    <description>Run multiple shell commands concurrently, each in its own ephemeral /workspace-rooted session. The session is closed after the command completes, so there is NO shared state between batched commands. Use for independent slow operations: running multiple SAST scanners (semgrep + gitleaks + trufflehog), running scanners with different rule packs, running git metadata sweeps in parallel.</description>
+    <parameters>
+      <parameter name="commands" type="array" required="true">
+        <description>JSON array of command specs. Each spec is an object with keys: "command" (required string), "timeout" (optional number, seconds, default 300). Example: [{"command": "semgrep --config p/default ."}, {"command": "gitleaks detect --source ."}]</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing: - results: list of command results (command, content, status, exit_code, etc., or error) preserving input order - count: number of commands run</description>
+    </returns>
+    <notes>
+  - Each command runs in a fresh tmux session rooted at /workspace; the session is closed afterwards
+  - There is NO shared state between batched commands (no cwd persistence, no env var persistence)
+  - Use this whenever you would otherwise emit multiple independent terminal_execute calls in a row that don't share state
+  - Heaviest wins: independent SAST scanners (semgrep, gitleaks, trufflehog) and independent git/find sweeps
+  - Per-command timeout default 300s (vs. 30s for terminal_execute) — these are typically slow scanners
+  - Failed commands don't fail the batch; their entry has an "error" key
+  - Pass N commands where N matches your actual need (up to 8 per call). Examples below use small N for brevity — size to fit, not to match the example.
+  - When NOT to use: commands that depend on each other's state (cd then ls, export then echo $VAR). Use plain terminal_execute for those.
+    </notes>
+    <examples>
+  # Run three independent SAST scanners against the same repo in parallel
+  <function=batch_terminal_execute>
+  <parameter=commands>[{"command": "cd /workspace/repo && semgrep scan --config p/default --json . > /tmp/semgrep.json"}, {"command": "cd /workspace/repo && gitleaks detect --source . --report-format json --report-path /tmp/gitleaks.json"}, {"command": "cd /workspace/repo && trufflehog filesystem --json . > /tmp/trufflehog.json"}]</parameter>
+  </function>
+
+  # Run two semgrep configs in parallel with custom timeouts
+  <function=batch_terminal_execute>
+  <parameter=commands>[{"command": "cd /workspace/repo && semgrep scan --config p/github-actions --json .", "timeout": 600}, {"command": "cd /workspace/repo && semgrep scan --config p/bash --json .", "timeout": 600}]</parameter>
+  </function>
+
+  # Multiple git metadata sweeps
+  <function=batch_terminal_execute>
+  <parameter=commands>[{"command": "cd /workspace/repo && git log --all --oneline | head -100"}, {"command": "cd /workspace/repo && git log --diff-filter=D --summary 2>&1 | head -50"}, {"command": "cd /workspace/repo && git rev-list --count HEAD"}]</parameter>
+  </function>
+    </examples>
+  </tool>
   <tool name="terminal_execute">
     <description>Execute a bash command in a persistent terminal session. The terminal maintains state (environment variables, current directory, running processes) between commands.</description>
     <parameters>

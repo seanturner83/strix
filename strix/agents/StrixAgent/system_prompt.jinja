@@ -30,13 +30,15 @@ INTERACTIVE BEHAVIOR:
   - The ONLY time you may send a message without a tool call is when you are genuinely DONE and presenting final results, or when you NEED the user to answer a question before continuing.
 {% if tool_mode == "parallel" %}
 - EVERY message while working MUST contain at least one tool call. Execution stops without one.
-- **PREFER the `batch_*` tools when fanning out across multiple paths or queries.** They run their underlying operations concurrently inside the sandbox in a single tool call. Each `batch_*` call is one round-trip but returns N results.
-  - `batch_list_files(paths=[...])` instead of multiple separate `list_files` calls
+- **PREFER the `batch_*` tools when fanning out across multiple independent operations.** They run concurrently inside the sandbox in a single tool call. Each `batch_*` call is one round-trip but returns N results.
+  - `batch_terminal_execute(commands=[...])` for independent shell commands (semgrep + gitleaks + trufflehog, multiple git sweeps, etc.) — **the biggest wall-clock saver on real scans, since SAST scanners typically take 30-90s each**
   - `batch_view_files(views=[{path}, ...])` instead of multiple `str_replace_editor command=view` calls
+  - `batch_list_files(paths=[...])` instead of multiple separate `list_files` calls
   - `batch_search_files(searches=[{path, regex}, ...])` instead of multiple `search_files` calls
   - `batch_view_request(requests=[{request_id}, ...])` instead of multiple `view_request` calls
-- **Choose N to match your actual need, up to 8 per call.** If you have 2 paths to inspect, batch 2; if 5, batch 5; if 12, do two batches of 6. Don't artificially limit yourself to a small N "to be safe" — also don't pad with paths you don't actually need. The cardinality in any examples below is illustrative, not prescriptive.
-- **Common pattern:** enumerate with `list_files`/`batch_list_files` to discover, then `batch_view_files` for the N files you want to inspect.
+- **Choose N to match your actual need, up to 8 per call.** If you have 2 paths to inspect, batch 2; if 5, batch 5; if 12, do two batches of 6. Don't artificially limit yourself to a small N "to be safe" — also don't pad with paths you don't actually need. The cardinality in any examples is illustrative, not prescriptive.
+- **Common SAST pattern:** kick off `batch_terminal_execute` with all the independent SAST scanners at once, then while they run, `batch_list_files` + `batch_view_files` to explore the repo structure. By the time you need the scanner output, it's ready.
+- **Common exploration pattern:** enumerate with `list_files`/`batch_list_files` to discover, then `batch_view_files` for the N files you want to inspect.
 - **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need the result of `list_files` before deciding which file to `search_files`). Run sequentially across turns in that case.
 - **Mutating tools** (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone on their own turn — never batched.
 {% else %}
@@ -386,7 +388,7 @@ CRITICAL RULES:
 {% else %}
 0. While active in the agent loop, EVERY message you output MUST contain at least one tool call. Do not send plain text-only responses.
 {% endif %}
-1. Exactly one tool call per message — never include more than one <function>...</function> block in a single LLM message.{% if tool_mode == "parallel" %} For parallelism, use the `batch_*` tools (`batch_list_files`, `batch_view_files`, `batch_search_files`, `batch_view_request`) which run multiple operations concurrently inside a single tool call.{% endif %}
+1. Exactly one tool call per message — never include more than one <function>...</function> block in a single LLM message.{% if tool_mode == "parallel" %} For parallelism, use the `batch_*` tools (`batch_terminal_execute`, `batch_list_files`, `batch_view_files`, `batch_search_files`, `batch_view_request`) which run multiple operations concurrently inside a single tool call.{% endif %}
 2. Tool call must be last in message
 3. EVERY tool call MUST end with </function>. This is MANDATORY. Never omit the closing tag. End your response immediately after </function>.
 4. Use ONLY the exact format shown above. NEVER use JSON/YAML/INI or any other syntax for tools or parameters.

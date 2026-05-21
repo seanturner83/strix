@@ -101,6 +101,7 @@ def test_listed_tools_marked_parallel_safe():
         "batch_view_files",
         "batch_search_files",
         "batch_view_request",
+        "batch_terminal_execute",
     }
     for name in expected_safe:
         assert is_tool_parallel_safe(name), f"{name} should be parallel_safe"
@@ -237,6 +238,110 @@ def test_batch_search_files_validates_required_keys():
     # missing regex
     result = asyncio.run(batch_search_files(searches=[{"path": "/a"}]))
     assert "error" in result and "regex" in result["error"]
+
+
+def test_batch_terminal_execute_runs_each_in_fresh_session(monkeypatch):
+    """Each batched command goes through _run_one_in_fresh_session.
+    We patch that helper so the test doesn't touch libtmux."""
+    from strix.tools.terminal import terminal_actions as mod
+
+    seen: list[tuple] = []
+
+    def fake_run(command, timeout):
+        seen.append((command, timeout))
+        return {
+            "command": command,
+            "content": f"out-of-{command[:10]}",
+            "status": "completed",
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr(mod, "_run_one_in_fresh_session", fake_run)
+
+    result = asyncio.run(mod.batch_terminal_execute(commands=[
+        {"command": "semgrep --config p/default ."},
+        {"command": "gitleaks detect --source ."},
+        {"command": "trufflehog filesystem --json .", "timeout": 600},
+    ]))
+
+    assert result["count"] == 3
+    # Default timeout 300 applied when not specified, custom timeout honoured
+    assert (("semgrep --config p/default ."), 300.0) in seen
+    assert (("trufflehog filesystem --json ."), 600) in seen
+    # Order preserved
+    assert "semgrep" in result["results"][0]["command"]
+    assert "gitleaks" in result["results"][1]["command"]
+    assert "trufflehog" in result["results"][2]["command"]
+
+
+def test_batch_terminal_execute_validates_input(monkeypatch):
+    from strix.tools.terminal import terminal_actions as mod
+
+    # Make sure validation runs before any _run_one_in_fresh_session call
+    monkeypatch.setattr(mod, "_run_one_in_fresh_session", lambda *a, **k: {"never": True})
+
+    assert "error" in asyncio.run(mod.batch_terminal_execute(commands=[]))
+    assert "error" in asyncio.run(mod.batch_terminal_execute(commands=[{"no_command": "x"}]))
+    assert "error" in asyncio.run(mod.batch_terminal_execute(commands=[{"command": 42}]))  # type: ignore[list-item]
+
+
+def test_batch_terminal_execute_per_command_error_isolation(monkeypatch):
+    """Per-command exceptions don't kill sibling commands."""
+    from strix.tools.terminal import terminal_actions as mod
+
+    def fake_run(command, timeout):
+        if "fail" in command:
+            raise RuntimeError("boom")
+        return {"command": command, "status": "completed"}
+
+    monkeypatch.setattr(mod, "_run_one_in_fresh_session", fake_run)
+
+    result = asyncio.run(mod.batch_terminal_execute(commands=[
+        {"command": "echo ok"},
+        {"command": "echo fail"},
+        {"command": "echo also-ok"},
+    ]))
+
+    assert result["count"] == 3
+    assert "error" not in result["results"][0]
+    assert "error" in result["results"][1]
+    assert "error" not in result["results"][2]
+
+
+def test_batch_terminal_execute_uses_unique_terminal_ids(monkeypatch):
+    """The terminal_id passed to each manager.execute_command is unique
+    (auto-generated) so concurrent batched commands don't collide."""
+    from strix.tools.terminal import terminal_actions as mod
+
+    seen_ids: list[str] = []
+
+    class FakeManager:
+        def execute_command(self, command, timeout=None, terminal_id=None, **kwargs):
+            seen_ids.append(terminal_id)
+            return {"command": command, "terminal_id": terminal_id, "status": "completed"}
+
+        def close_session(self, terminal_id):
+            return {"status": "closed"}
+
+    fake = FakeManager()
+
+    # Patch the late-imported module via sys.modules to avoid libtmux import
+    import sys
+    import types
+
+    fake_tm = types.ModuleType("strix.tools.terminal.terminal_manager")
+    fake_tm.get_terminal_manager = lambda: fake  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "strix.tools.terminal.terminal_manager", fake_tm)
+
+    result = asyncio.run(mod.batch_terminal_execute(commands=[
+        {"command": "cmd1"},
+        {"command": "cmd2"},
+        {"command": "cmd3"},
+    ]))
+
+    assert result["count"] == 3
+    assert len(set(seen_ids)) == 3, f"terminal_ids must be unique, got {seen_ids}"
+    assert all(tid.startswith("batch-") for tid in seen_ids)
 
 
 def test_batch_view_request_runs_concurrently(monkeypatch):
