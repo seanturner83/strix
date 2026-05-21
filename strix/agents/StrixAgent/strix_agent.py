@@ -150,16 +150,27 @@ class StrixAgent(BaseAgent):
 
         if getattr(self.llm_config, "tool_mode", "serial") == "parallel":
             task_description += (
-                "\n\nPARALLEL MODE — when fanning out, USE the batch_* tools:\n"
-                "- batch_terminal_execute(commands=[...]) is the biggest wall-clock saver. "
-                "Whenever you would run more than one independent shell command in series "
-                "(e.g. semgrep + gitleaks + trufflehog, or multiple semgrep configs, or git "
-                "metadata sweeps), run them all in one batch_terminal_execute call.\n"
-                "- batch_view_files(views=[...]) when reading more than one file.\n"
-                "- batch_list_files(paths=[...]) when listing more than one directory.\n"
-                "- batch_search_files(searches=[...]) when grepping for more than one pattern.\n"
-                "Sizing: pass N where N matches your actual need (up to 8). Don't pad. Don't shrink to N=3.\n"
-                "Default to the batch tool whenever you catch yourself about to do the same kind of read twice in a row."
+                "\n\nPARALLEL MODE — tool batching guidance:\n"
+                "Still ONE tool call per message. The parallelism comes from inside the "
+                "batch_* tools (a list parameter), NOT from emitting multiple <function> "
+                "blocks per turn. Do NOT emit multiple <function> blocks in one message — "
+                "that produces a flood and many of them won't actually run in parallel.\n\n"
+                "When you would otherwise issue two or more similar tool calls in a row, "
+                "issue ONE batch_* call instead with a list:\n"
+                "- batch_terminal_execute(commands=[...]) for independent shell commands "
+                "(semgrep + gitleaks + trufflehog; multiple semgrep configs; multiple git "
+                "sweeps). This is the biggest wall-clock saver because each command takes "
+                "30-90s otherwise.\n"
+                "- batch_view_files(views=[{path}, ...]) when reading 2+ files.\n"
+                "- batch_list_files(paths=[...]) when listing 2+ directories.\n"
+                "- batch_search_files(searches=[{path,regex}, ...]) when grepping 2+ patterns.\n\n"
+                "Sizing: pass N items per call where N matches your actual need, capped at 8. "
+                "If you truly need 12, do two batches of 6 across two turns — not one giant "
+                "batch and not one tool flood. Don't pad to look batchy. Don't shrink to "
+                "match an example.\n\n"
+                "Single tool calls (one path, one command, one search) stay as plain "
+                "list_files / terminal_execute / etc. Don't wrap a single item in a batch_* "
+                "tool — that's overhead with no benefit."
             )
 
         return await self.agent_loop(task=task_description)

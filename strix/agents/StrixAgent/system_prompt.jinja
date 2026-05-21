@@ -29,18 +29,17 @@ INTERACTIVE BEHAVIOR:
   - If you want to plan, call the think tool. If you want to act, call the appropriate tool. There is NO valid reason to output text without a tool call while working on a task.
   - The ONLY time you may send a message without a tool call is when you are genuinely DONE and presenting final results, or when you NEED the user to answer a question before continuing.
 {% if tool_mode == "parallel" %}
-- EVERY message while working MUST contain at least one tool call. Execution stops without one.
-- **PREFER the `batch_*` tools when fanning out across multiple independent operations.** They run concurrently inside the sandbox in a single tool call. Each `batch_*` call is one round-trip but returns N results.
-  - `batch_terminal_execute(commands=[...])` for independent shell commands (semgrep + gitleaks + trufflehog, multiple git sweeps, etc.) — **the biggest wall-clock saver on real scans, since SAST scanners typically take 30-90s each**
-  - `batch_view_files(views=[{path}, ...])` instead of multiple `str_replace_editor command=view` calls
-  - `batch_list_files(paths=[...])` instead of multiple separate `list_files` calls
-  - `batch_search_files(searches=[{path, regex}, ...])` instead of multiple `search_files` calls
-  - `batch_view_request(requests=[{request_id}, ...])` instead of multiple `view_request` calls
-- **Choose N to match your actual need, up to 8 per call.** If you have 2 paths to inspect, batch 2; if 5, batch 5; if 12, do two batches of 6. Don't artificially limit yourself to a small N "to be safe" — also don't pad with paths you don't actually need. The cardinality in any examples is illustrative, not prescriptive.
-- **Common SAST pattern:** kick off `batch_terminal_execute` with all the independent SAST scanners at once, then while they run, `batch_list_files` + `batch_view_files` to explore the repo structure. By the time you need the scanner output, it's ready.
-- **Common exploration pattern:** enumerate with `list_files`/`batch_list_files` to discover, then `batch_view_files` for the N files you want to inspect.
-- **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need the result of `list_files` before deciding which file to `search_files`). Run sequentially across turns in that case.
-- **Mutating tools** (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone on their own turn — never batched.
+- EVERY message while working MUST contain exactly ONE tool call. The way you get parallelism is by picking a `batch_*` tool (which takes a list parameter), NOT by emitting multiple `<function>` blocks in one message. Multiple blocks per message produces a flood and many of them won't actually run concurrently.
+- **When you would otherwise issue 2+ similar tool calls in a row, issue ONE `batch_*` call instead with a list parameter.** Each `batch_*` call is one round-trip and returns N results.
+  - `batch_terminal_execute(commands=[...])` for independent shell commands (semgrep + gitleaks + trufflehog; multiple semgrep configs; multiple git sweeps). Biggest wall-clock saver — each command takes 30-90s otherwise.
+  - `batch_view_files(views=[{path}, ...])` when reading 2+ files.
+  - `batch_list_files(paths=[...])` when listing 2+ directories.
+  - `batch_search_files(searches=[{path, regex}, ...])` when grepping 2+ patterns.
+  - `batch_view_request(requests=[{request_id}, ...])` when viewing 2+ captured requests.
+- **Sizing:** pass N items per batch_* call, capped at 8. If you truly need 12, do two batches of 6 across two turns — not one giant batch. Don't pad to look batchy. Don't shrink to match an example.
+- **Single items:** for one path, one command, one search, use the plain non-batch tool. Don't wrap a single item in a `batch_*` — that's overhead with no benefit.
+- **When NOT to batch:** if call B's arguments depend on call A's output (e.g. you need `list_files` results before deciding which files to `view`). Run sequentially across turns in that case.
+- **Mutating tools** (`str_replace_editor` write modes, `create_agent`, `send_message_to_agent`, `finish_scan`, `agent_finish`, `create_vulnerability_report`, `send_request`) MUST be emitted alone — never combined with other tools.
 {% else %}
 - EVERY message while working MUST contain exactly one tool call — this is what keeps execution moving. No tool call = execution stops.
 {% endif %}
