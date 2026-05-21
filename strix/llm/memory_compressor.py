@@ -3,11 +3,37 @@ import logging
 from typing import Any
 
 import litellm
+from pydantic import ValidationError
 
 from strix.config.config import Config, resolve_llm_config
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_known_bedrock_content_filtered_bug(exc: ValidationError) -> bool:
+    """Detect the known LiteLLM ↔ Bedrock Converse enum mismatch.
+
+    Bedrock's Converse API returns `stopReason: "content_filtered"` when
+    Anthropic guardrails trip. LiteLLM 1.81.x (and upstream main as of
+    2026-05-21) only accepts `"content_filter"` (no `d`) in its
+    `OpenAIChatCompletionFinishReason` Literal, so the response fails
+    Pydantic validation and the entire memory-compression call dies even
+    though the underlying scan is unaffected. Filed against LiteLLM (TODO
+    link); patch upstream is a one-dict-entry addition.
+
+    Until then, treat this specific shape as a known no-op: skip
+    compression this round, scan continues. Other Pydantic errors stay
+    loud so we don't mask new bugs.
+    """
+    for err in exc.errors():
+        if (
+            err.get("type") == "literal_error"
+            and err.get("loc") == ("finish_reason",)
+            and err.get("input") == "content_filtered"
+        ):
+            return True
+    return False
 
 
 DEFAULT_MAX_TOTAL_TOKENS = 100_000
@@ -150,6 +176,18 @@ def _summarize_messages(
             "role": "user",
             "content": summary_msg.format(count=len(messages), text=summary),
         }
+    except ValidationError as exc:
+        if _is_known_bedrock_content_filtered_bug(exc):
+            # Known upstream LiteLLM gap — log a one-liner instead of the
+            # full traceback so it doesn't drown the scan log.
+            logger.info(
+                "Skipping memory compression this round: Bedrock returned "
+                "stopReason=content_filtered, which LiteLLM's finish_reason "
+                "Literal doesn't accept. Known issue, scan continues."
+            )
+            return messages[0]
+        logger.exception("Failed to summarize messages")
+        return messages[0]
     except Exception:
         logger.exception("Failed to summarize messages")
         return messages[0]
