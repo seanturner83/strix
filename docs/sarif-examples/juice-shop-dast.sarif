@@ -1,0 +1,120 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Strix",
+          "informationUri": "https://strix.ai",
+          "rules": []
+        }
+      },
+      "results": [],
+      "properties": {
+        "locationlessFindingCount": 11,
+        "locationlessFindings": [
+          {
+            "id": "vuln-0002",
+            "title": "SQL Injection in Login Endpoint Enables Authentication Bypass for Any User Account",
+            "severity": "critical",
+            "cwe": "CWE-89",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/rest/user/login",
+            "method": "POST"
+          },
+          {
+            "id": "vuln-0007",
+            "title": "JWT Algorithm Confusion Allows Token Forgery via Exposed RSA Public Key",
+            "severity": "critical",
+            "cwe": "CWE-327",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/encryptionkeys/jwt.pub, /api/Users, /rest/admin/application-configuration",
+            "method": "GET"
+          },
+          {
+            "id": "vuln-0008",
+            "title": "Privilege Escalation via Mass Assignment in User Registration",
+            "severity": "critical",
+            "cwe": "CWE-915",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/api/Users",
+            "method": "POST"
+          },
+          {
+            "id": "vuln-0011",
+            "title": "DOM-based Cross-Site Scripting via Search Functionality",
+            "severity": "critical",
+            "cwe": "CWE-79",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/#/search?q=",
+            "method": "GET"
+          },
+          {
+            "id": "vuln-0001",
+            "title": "SQL Injection in Product Search Endpoint Enables Full Database Extraction",
+            "severity": "high",
+            "cwe": "CWE-89",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/rest/products/search",
+            "method": "GET"
+          },
+          {
+            "id": "vuln-0004",
+            "title": "Insecure Direct Object Reference in Basket Items Allows Cross-User Cart Manipulation",
+            "severity": "high",
+            "cwe": "CWE-639",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/api/BasketItems/{id}",
+            "method": "PUT, DELETE"
+          },
+          {
+            "id": "vuln-0009",
+            "title": "Sensitive Password Hashes Leaked in JWT Token Payload",
+            "severity": "high",
+            "cwe": "CWE-916",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/rest/user/login",
+            "method": "POST"
+          },
+          {
+            "id": "vuln-0010",
+            "title": "Insecure Direct Object Reference in Feedback System Allows Impersonation and Cross-User Deletion",
+            "severity": "high",
+            "cwe": "CWE-639",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/api/Feedbacks",
+            "method": "POST, DELETE"
+          },
+          {
+            "id": "vuln-0003",
+            "title": "Insecure Direct Object Reference in Shopping Basket Endpoint Allows Cross-User Data Access",
+            "severity": "medium",
+            "cwe": "CWE-639",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/rest/basket/{id}",
+            "method": "GET"
+          },
+          {
+            "id": "vuln-0005",
+            "title": "Insecure Direct Object Reference in User Profile Endpoint Enables Full User Enumeration",
+            "severity": "medium",
+            "cwe": "CWE-639",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/api/Users/{id}",
+            "method": "GET"
+          },
+          {
+            "id": "vuln-0006",
+            "title": "Insecure Direct Object Reference in Product Reviews Allows Cross-User Review Tampering",
+            "severity": "medium",
+            "cwe": "CWE-639",
+            "target": "http://host.docker.internal:3002",
+            "endpoint": "/rest/products/reviews",
+            "method": "PATCH"
+          }
+        ]
+      }
+    }
+  ]
+}

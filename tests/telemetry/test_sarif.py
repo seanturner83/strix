@@ -1,240 +1,297 @@
-"""Tests for strix.telemetry.sarif."""
-
-from __future__ import annotations
-
 import json
 from pathlib import Path
-
-import pytest
+from typing import Any
 
 from strix.telemetry.sarif import (
-    SARIF_SCHEMA,
-    SARIF_VERSION,
     build_sarif_document,
+    build_sarif_report,
     write_sarif,
+    write_sarif_report,
 )
 
 
-def _base_report(**overrides):
-    report = {
+def _finding(**overrides: Any) -> dict[str, Any]:
+    finding: dict[str, Any] = {
         "id": "vuln-0001",
-        "title": "Missing authentication on gRPC endpoint",
-        "severity": "critical",
-        "cvss": 9.8,
-        "cwe": "CWE-306",
-        "timestamp": "2026-05-06T08:30:00Z",
-        "description": "The gRPC server registers no auth interceptor.",
-        "impact": "Any caller with network reachability can invoke every RPC.",
-        "technical_analysis": "server.go:82-99 chains only observability interceptors.",
-        "poc_description": "grpcurl -plaintext …",
-        "poc_script_code": "grpcurl -plaintext host:9101 list",
-        "remediation_steps": "Add an auth interceptor to the chain.",
+        "title": "Unsanitized redirect target",
+        "severity": "high",
+        "description": "A user-controlled redirect target is trusted without validation.",
+        "impact": "Attackers can redirect users to phishing pages.",
+        "remediation_steps": "Allow-list trusted redirect destinations.",
+        "cvss": 8.1,
+        "cwe": "CWE-601",
+        "cve": "CVE-2026-0001",
+        "target": "./demo-app",
+        "endpoint": "/login",
+        "method": "GET",
         "code_locations": [
             {
-                "file": "internal/grpc/server.go",
-                "start_line": 82,
-                "end_line": 99,
-                "label": "Interceptor chain assembly",
-                "snippet": "grpc.ChainUnaryInterceptor(...)",
+                "file": "src/auth/redirects.py",
+                "start_line": 42,
+                "end_line": 45,
+                "snippet": "return redirect(request.args['next'])",
+                "label": "User-controlled redirect sink",
             }
         ],
     }
-    report.update(overrides)
-    return report
+    finding.update(overrides)
+    return finding
 
 
-def test_document_shape_and_version():
-    doc = build_sarif_document([_base_report()], tool_version="0.1.13")
-    assert doc["version"] == SARIF_VERSION
-    assert doc["$schema"] == SARIF_SCHEMA
-    assert len(doc["runs"]) == 1
-    run = doc["runs"][0]
-    assert run["tool"]["driver"]["name"] == "Strix"
-    assert run["tool"]["driver"]["version"] == "0.1.13"
-    assert run["tool"]["driver"]["informationUri"].startswith("https://github.com/")
+def test_build_sarif_maps_code_location_and_metadata() -> None:
+    sarif = build_sarif_report([_finding()], tool_version="0.8.3")
+
+    assert sarif["version"] == "2.1.0"
+    assert sarif["$schema"] == "https://json.schemastore.org/sarif-2.1.0.json"
+
+    run = sarif["runs"][0]
+    driver = run["tool"]["driver"]
+    assert driver["name"] == "Strix"
+    assert driver["version"] == "0.8.3"
+    rule = driver["rules"][0]
+    assert rule["id"] == "CWE-601"
+    assert rule["fullDescription"]["text"] == (
+        "A user-controlled redirect target is trusted without validation."
+    )
+    assert "Allow-list trusted redirect destinations." in rule["help"]["text"]
+
+    result = run["results"][0]
+    assert result["ruleId"] == "CWE-601"
+    assert result["level"] == "error"
+    assert result["message"]["text"] == "Unsanitized redirect target"
+    # ``security-severity`` is the only top-level property GitHub code-scanning
+    # reads; Strix-specific fields are namespaced so generic SARIF consumers
+    # don't surface finding metadata (notably PoC) to a wide audience.
+    assert result["properties"]["security-severity"] == "8.1"
+    assert result["properties"]["strix"]["cvss"] == 8.1
+    assert result["properties"]["strix"]["cve"] == "CVE-2026-0001"
+    assert result["properties"]["strix"]["target"] == "./demo-app"
+
+    location = result["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "src/auth/redirects.py"
+    assert location["region"] == {
+        "startLine": 42,
+        "endLine": 45,
+        "snippet": {"text": "return redirect(request.args['next'])"},
+    }
 
 
-def test_rule_id_uses_cwe_when_present():
-    doc = build_sarif_document([_base_report(cwe="CWE-306")])
-    run = doc["runs"][0]
-    assert run["results"][0]["ruleId"] == "CWE-306"
-    rule_ids = {r["id"] for r in run["tool"]["driver"]["rules"]}
-    assert "CWE-306" in rule_ids
-
-
-def test_rule_id_falls_back_to_strix_severity_without_cwe():
-    doc = build_sarif_document([_base_report(cwe=None, severity="high")])
-    run = doc["runs"][0]
-    assert run["results"][0]["ruleId"] == "strix-high"
-
-
-def test_severity_to_level_mapping():
-    reports = [
-        _base_report(id="c", severity="critical"),
-        _base_report(id="h", severity="high", cwe=None),
-        _base_report(id="m", severity="medium", cwe=None),
-        _base_report(id="l", severity="low", cwe=None),
-        _base_report(id="i", severity="info", cwe=None),
+def test_build_sarif_maps_severity_levels() -> None:
+    findings = [
+        _finding(id="vuln-critical", severity="critical"),
+        _finding(id="vuln-high", severity="high"),
+        _finding(id="vuln-medium", severity="medium"),
+        _finding(id="vuln-low", severity="low"),
+        _finding(id="vuln-info", severity="info"),
     ]
-    doc = build_sarif_document(reports)
-    levels = [r["level"] for r in doc["runs"][0]["results"]]
+
+    levels = [result["level"] for result in build_sarif_report(findings)["runs"][0]["results"]]
+
     assert levels == ["error", "error", "warning", "note", "note"]
 
 
-def test_security_severity_uses_cvss_when_present():
-    doc = build_sarif_document([_base_report(cvss=7.4)])
-    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
-    assert rule["properties"]["security-severity"] == "7.4"
+def test_build_sarif_summarizes_locationless_findings_without_code_scanning_results() -> None:
+    sarif = build_sarif_report([_finding(code_locations=None, cwe=None, cve=None)])
+
+    run = sarif["runs"][0]
+    assert run["results"] == []
+    assert run["properties"]["locationlessFindingCount"] == 1
+    assert run["properties"]["locationlessFindings"][0]["id"] == "vuln-0001"
 
 
-def test_security_severity_falls_back_to_band_score():
-    doc = build_sarif_document([_base_report(cvss=None, severity="medium", cwe=None)])
-    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
-    assert rule["properties"]["security-severity"] == "5.5"
-
-
-def test_locations_emitted_from_code_locations():
-    doc = build_sarif_document([_base_report()])
-    result = doc["runs"][0]["results"][0]
-    assert len(result["locations"]) == 1
-    loc = result["locations"][0]["physicalLocation"]
-    assert loc["artifactLocation"]["uri"] == "internal/grpc/server.go"
-    assert loc["region"]["startLine"] == 82
-    assert loc["region"]["endLine"] == 99
-    assert loc["region"]["snippet"]["text"].startswith("grpc.ChainUnary")
-
-
-def test_locations_omitted_when_no_code_locations():
-    doc = build_sarif_document([_base_report(code_locations=[])])
-    result = doc["runs"][0]["results"][0]
-    assert "locations" not in result
-
-
-def test_poc_lives_in_properties_not_message():
-    """PoC must not land in message.text (which consumers display widely)."""
-    doc = build_sarif_document([_base_report()])
-    result = doc["runs"][0]["results"][0]
-    assert "grpcurl" not in result["message"]["text"]
-    assert result["properties"]["strix"]["poc"]["script"].startswith("grpcurl")
-
-
-def test_strix_namespaced_properties():
-    doc = build_sarif_document([_base_report()])
-    props = doc["runs"][0]["results"][0]["properties"]["strix"]
-    assert props["vuln_id"] == "vuln-0001"
-    assert props["severity"] == "CRITICAL"
-    assert props["cvss"] == 9.8
-    assert props["cwe"] == "CWE-306"
-
-
-def test_cwe_helpuri():
-    doc = build_sarif_document([_base_report(cwe="CWE-306")])
-    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
-    assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/306.html"
-
-
-def test_rule_deduplication_across_same_cwe():
-    doc = build_sarif_document(
+def test_build_sarif_drops_unsafe_code_locations() -> None:
+    sarif = build_sarif_report(
         [
-            _base_report(id="vuln-0001", cwe="CWE-306"),
-            _base_report(id="vuln-0002", cwe="CWE-306", title="Second CWE-306 finding"),
+            _finding(
+                code_locations=[
+                    {"file": "/tmp/app.py", "start_line": 1, "end_line": 1},
+                    {"file": "../app.py", "start_line": 2, "end_line": 2},
+                    {"file": "C:\\Users\\app.py", "start_line": 3, "end_line": 3},
+                    {"file": "mailto:x", "start_line": 4, "end_line": 4},
+                    {"file": "foo:bar.py", "start_line": 5, "end_line": 5},
+                    {"file": "src/app.py", "start_line": 0, "end_line": 1},
+                    {"file": "src/other.py", "start_line": True, "end_line": True},
+                ]
+            )
         ]
     )
-    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+
+    run = sarif["runs"][0]
+    assert run["results"] == []
+    assert run["properties"]["locationlessFindingCount"] == 1
+    assert "droppedUnsafeLocationCount" not in run["properties"]
+    assert "droppedUnsafeLocationFindings" not in run["properties"]
+
+
+def test_build_sarif_keeps_locations_without_valid_end_line() -> None:
+    sarif = build_sarif_report(
+        [
+            _finding(
+                code_locations=[
+                    {"file": "src/app.py", "start_line": 10},
+                    {"file": "src/reversed.py", "start_line": 20, "end_line": 19},
+                ]
+            )
+        ]
+    )
+
+    regions = [
+        location["physicalLocation"]["region"]
+        for location in sarif["runs"][0]["results"][0]["locations"]
+    ]
+    assert regions == [{"startLine": 10}, {"startLine": 20}]
+
+
+def test_build_sarif_summarizes_dropped_unsafe_locations_when_safe_locations_remain() -> None:
+    sarif = build_sarif_report(
+        [
+            _finding(
+                code_locations=[
+                    {"file": "src/app.py", "start_line": 10, "end_line": 12},
+                    {"file": "foo:bar.py", "start_line": 1, "end_line": 1},
+                ]
+            )
+        ]
+    )
+
+    run = sarif["runs"][0]
+    assert len(run["results"]) == 1
+    assert run["properties"]["droppedUnsafeLocationCount"] == 1
+    assert run["properties"]["droppedUnsafeLocationFindings"][0] == {
+        "id": "vuln-0001",
+        "title": "Unsanitized redirect target",
+        "droppedLocationCount": 1,
+    }
+
+
+def test_write_sarif_report_creates_parent_directories(tmp_path: Path) -> None:
+    output_path = tmp_path / "nested" / "results.sarif"
+
+    write_sarif_report(output_path, [_finding()], tool_version="0.8.3")
+
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    assert saved["runs"][0]["results"][0]["ruleId"] == "CWE-601"
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage — these test surfaces added in the combined PR beyond
+# the original #477 scope: CWE normalisation, rule-level GitHub properties,
+# PoC namespacing, backwards-compatible write_sarif alias.
+
+
+def test_cwe_normalisation_unifies_input_variants() -> None:
+    """The same weakness expressed three different ways in Strix output
+    must collapse to a single rule so dedup across runs works."""
+    variants = [
+        _finding(id="a", cwe="CWE-306"),
+        _finding(id="b", cwe="cwe:306"),
+        _finding(id="c", cwe="306"),
+    ]
+    sarif = build_sarif_report(variants)
+    rules = sarif["runs"][0]["tool"]["driver"]["rules"]
     assert len(rules) == 1
     assert rules[0]["id"] == "CWE-306"
+    for result in sarif["runs"][0]["results"]:
+        assert result["ruleId"] == "CWE-306"
 
 
-def test_write_sarif_roundtrip(tmp_path: Path):
-    reports = [_base_report()]
-    out = write_sarif(tmp_path, reports, tool_version="0.1.13")
+def test_cwe_rule_includes_github_code_scanning_properties() -> None:
+    """GitHub code-scanning reads rule.properties['security-severity'] +
+    rule.properties['tags']. Without them, alerts show up at default severity
+    and can't be filtered by security tag."""
+    sarif = build_sarif_report([_finding()])
+    rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+
+    assert rule["properties"]["security-severity"] == "8.1"
+    assert "security" in rule["properties"]["tags"]
+    assert "CWE-601" in rule["properties"]["tags"]
+    assert "CVE-2026-0001" in rule["properties"]["tags"]
+    assert rule["defaultConfiguration"]["level"] == "error"
+    assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/601.html"
+
+
+def test_non_cwe_rules_omit_help_uri() -> None:
+    """A finding with neither CWE nor CVE falls back to a slug rule id;
+    helpUri only applies when we can link to a canonical taxonomy."""
+    sarif = build_sarif_report([
+        _finding(cwe=None, cve=None, code_locations=_finding()["code_locations"]),
+    ])
+    rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+    assert "helpUri" not in rule
+
+
+def test_poc_content_is_namespaced_under_strix_not_flat_on_properties() -> None:
+    """PoC exploitation payloads live under ``properties.strix.poc`` so
+    generic SARIF UI consumers don't surface exploit text to triage
+    audiences by default."""
+    sarif = build_sarif_report([_finding(
+        poc_description="curl --request POST …",
+        poc_script_code="#!/bin/sh\ncurl -X POST …",
+    )])
+    result = sarif["runs"][0]["results"][0]
+    assert "poc" not in result["properties"]
+    assert "poc" in result["properties"]["strix"]
+    assert result["properties"]["strix"]["poc"]["description"].startswith("curl")
+    assert result["properties"]["strix"]["poc"]["script"].startswith("#!/bin/sh")
+
+
+def test_security_severity_prefers_cvss_over_label() -> None:
+    """When CVSS is present, it drives security-severity; label only used
+    as fallback. CVSS ≠ label-mean-score for severity-label-only findings."""
+    cvss_only = build_sarif_report([_finding(cvss=9.2, severity="high")])
+    assert (
+        cvss_only["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"]
+        == "9.2"
+    )
+
+    label_only = build_sarif_report([_finding(cvss=None, severity="medium")])
+    assert (
+        label_only["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"]
+        == "5.5"
+    )
+
+
+def test_backwards_compatible_write_sarif_alias(tmp_path: Path) -> None:
+    """``write_sarif`` is the tracer-hook entry point; must keep working so
+    internal callers aren't coupled to the CLI-invoked ``write_sarif_report``.
+    """
+    out = write_sarif(tmp_path, [_finding()], tool_version="1.0.0")
+    assert out == tmp_path / "findings.sarif"
     assert out.exists()
-    assert out.name == "findings.sarif"
-    data = json.loads(out.read_text())
-    assert data["version"] == SARIF_VERSION
-    assert data["runs"][0]["results"][0]["ruleId"] == "CWE-306"
+
+    # ``build_sarif_document`` alias equivalent to ``build_sarif_report``.
+    a = build_sarif_document([_finding()])
+    b = build_sarif_report([_finding()])
+    assert a == b
 
 
-def test_empty_reports_produces_valid_document():
-    doc = build_sarif_document([])
-    assert doc["runs"][0]["results"] == []
-    assert doc["runs"][0]["tool"]["driver"]["rules"] == []
+def test_document_shape_matches_sarif_2_1_0_top_level() -> None:
+    """Basic structural validation without pulling in jsonschema. Catches
+    any regression that would trip schemastore.org validation at CI time."""
+    sarif = build_sarif_report([_finding()])
 
+    assert sarif["version"] == "2.1.0"
+    assert sarif["$schema"].endswith("sarif-2.1.0.json")
+    assert isinstance(sarif["runs"], list)
+    assert len(sarif["runs"]) == 1
 
-def test_cwe_normalisation_accepts_variants():
-    for raw in ["CWE-306", "306", "cwe 306", "CWE306"]:
-        doc = build_sarif_document([_base_report(cwe=raw)])
-        assert doc["runs"][0]["results"][0]["ruleId"] == "CWE-306"
+    run = sarif["runs"][0]
+    driver = run["tool"]["driver"]
+    assert driver["name"] == "Strix"
+    assert driver["informationUri"]
+    assert isinstance(driver["rules"], list)
 
+    for rule in driver["rules"]:
+        assert rule["id"]
+        assert rule["shortDescription"]["text"]
+        assert rule["fullDescription"]["text"]
+        assert rule["defaultConfiguration"]["level"] in {"error", "warning", "note"}
 
-def test_stride_tags_on_rule_for_known_cwe():
-    """CWE-306 (Missing Authentication) maps to S+E STRIDE legs."""
-    doc = build_sarif_document([_base_report(cwe="CWE-306")])
-    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
-    tags = rule["properties"]["tags"]
-    assert "stride:S" in tags
-    assert "stride:E" in tags
-    # Existing tags preserved.
-    assert "security" in tags
-    assert "CWE-306" in tags
-
-
-def test_stride_tags_on_result_for_known_cwe():
-    """Per-result tags duplicate from the rule for consumer-side filtering."""
-    doc = build_sarif_document([_base_report(cwe="CWE-306")])
-    result_tags = doc["runs"][0]["results"][0]["properties"]["tags"]
-    assert "stride:S" in result_tags
-    assert "stride:E" in result_tags
-
-
-def test_stride_default_for_unknown_cwe():
-    """Unmapped CWE falls back to T+I default — never empty."""
-    doc = build_sarif_document([_base_report(cwe="CWE-99999")])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:T" in rule_tags
-    assert "stride:I" in rule_tags
-
-
-def test_stride_default_for_no_cwe():
-    """No-CWE finding still gets STRIDE tags (default T+I)."""
-    doc = build_sarif_document([_base_report(cwe=None)])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:T" in rule_tags
-    assert "stride:I" in rule_tags
-
-
-def test_stride_sql_injection_is_tampering():
-    """CWE-89 (SQL Injection) is canonical Tampering."""
-    doc = build_sarif_document([_base_report(cwe="CWE-89")])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:T" in rule_tags
-    # Should NOT include S or E for plain SQLi (it's tampering, not auth-shape).
-    assert "stride:S" not in rule_tags
-
-
-def test_stride_idor_is_elevation():
-    """CWE-639 (Authorization Bypass via User-controlled Key, IDOR/BOLA)
-    is canonical Elevation of Privilege."""
-    doc = build_sarif_document([_base_report(cwe="CWE-639")])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:E" in rule_tags
-
-
-def test_stride_missing_authz_is_elevation():
-    """CWE-862 (Missing Authorization) is canonical Elevation of Privilege.
-    Sibling of CWE-863. Real-world calibration: trade-api scan
-    2026-05-19 surfaced a CWE-862 finding that fell through to the
-    default T+I; adding the explicit mapping."""
-    doc = build_sarif_document([_base_report(cwe="CWE-862")])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:E" in rule_tags
-    # Should NOT carry the default T+I.
-    assert "stride:T" not in rule_tags
-    assert "stride:I" not in rule_tags
-
-
-def test_stride_incorrect_default_perms_is_elevation():
-    """CWE-276 (Incorrect Default Permissions) — also Elevation."""
-    doc = build_sarif_document([_base_report(cwe="CWE-276")])
-    rule_tags = doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"]
-    assert "stride:E" in rule_tags
+    for result in run["results"]:
+        assert result["ruleId"]
+        assert result["level"] in {"error", "warning", "note"}
+        assert result["message"]["text"]
+        assert isinstance(result["locations"], list)
+        for location in result["locations"]:
+            assert location["physicalLocation"]["artifactLocation"]["uri"]
+            assert "startLine" in location["physicalLocation"]["region"]

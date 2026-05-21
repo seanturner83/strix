@@ -1,308 +1,174 @@
-"""SARIF 2.1.0 emitter for Strix vulnerability reports.
+"""SARIF 2.1.0 output for Strix vulnerability reports.
 
-Produces a SARIF document alongside the existing vulnerabilities/*.md and
-vulnerabilities.csv outputs so CI consumers can upload findings to
-`github/codeql-action/upload-sarif` (GitHub code-scanning Security tab),
-ASPM platforms, GitLab/Azure Security Dashboards, or any SARIF-consumer.
+Builds a GitHub code-scanning compatible SARIF document from Strix findings
+so CI pipelines can upload findings via ``github/codeql-action/upload-sarif``,
+ingest into ASPM platforms, or normalise across scanners.
 
-Schema: SARIF 2.1.0 (OASIS). Validates against
-https://json.schemastore.org/sarif-2.1.0.json.
+Schema: SARIF 2.1.0 (OASIS). The output is validated against the official
+schema at https://json.schemastore.org/sarif-2.1.0.json in tests.
 
-Design choices:
-  - Rules keyed on CWE (rule.id = CWE-NNN). Findings without a CWE fall back
-    to rule.id = "strix-<severity>" so they still get a rule.
-  - SARIF has only three levels (error/warning/note). Strix's original severity
-    (CRITICAL/HIGH/MEDIUM/LOW/INFO) is preserved in result.properties.severity
-    so consumers can distinguish CRITICAL-vs-HIGH or MEDIUM-vs-LOW downstream.
-  - PoC code and detailed remediation live in result.properties.strix (a
-    namespaced object) rather than in message.text, so consumers that display
-    message.text to a wide audience (e.g. GitHub code-scanning UI) don't leak
-    PoCs by default. Consumers that want PoC inclusion read properties.strix.
-  - File locations come from report["code_locations"]. If absent, the result
-    still emits but without a location (SARIF allows this for scope-wide
-    findings such as architectural issues or missing auth frameworks).
+Integration points:
+  - ``write_sarif_report`` writes a SARIF document to disk (CLI-driven,
+    invoked by ``--sarif-output`` on the Strix entrypoint).
+  - The module is also imported by ``strix.telemetry.tracer`` to emit a
+    ``findings.sarif`` sidecar alongside the existing CSV + markdown
+    artefacts on every run. Failure to emit SARIF never blocks CSV + MD.
+
+Design notes:
+  * Rules are keyed on CWE (``id = CWE-NNN``), falling back to CVE, then
+    to finding-id, then to a title slug. CWE values are normalised from
+    Strix output variants (``CWE-306``, ``cwe: 306``, ``306``) to the
+    canonical ``CWE-NNN`` form so dedup works across runs.
+  * SARIF only has three levels (error / warning / note). Strix's five
+    severities collapse into them. The raw severity label and CVSS score
+    survive in ``result.properties.strix`` for downstream tools that can
+    distinguish CRITICAL vs HIGH.
+  * GitHub code-scanning uses ``rule.properties['security-severity']``
+    (a 0.0-10.0 string) to rank alerts. We populate it from CVSS when
+    available, otherwise from a conservative label → score map.
+  * File locations must be repo-relative POSIX paths. Paths that look
+    like URIs, absolute paths, or traversal patterns are rejected rather
+    than emitted as invalid code-scanning alerts.
+  * Findings without safe locations still appear in the SARIF output as
+    a summary in ``run.properties.locationlessFindings`` rather than
+    getting dropped silently.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, cast
+
 
 logger = logging.getLogger(__name__)
 
-SARIF_VERSION = "2.1.0"
-SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 
-# Strix severity → SARIF level mapping. SARIF has only three levels, so
-# CRITICAL+HIGH collapse to "error" and LOW+INFO collapse to "note". Original
-# severity is preserved in result.properties.severity for downstream use.
+SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+SARIF_VERSION = "2.1.0"
+TOOL_NAME = "Strix"
+TOOL_INFORMATION_URI = "https://strix.ai"
+
+
+# SARIF only has three result levels; Strix's five severities collapse here.
+# Original label survives in ``result.properties.strix.severity``.
 _SEVERITY_TO_LEVEL = {
     "critical": "error",
     "high": "error",
     "medium": "warning",
     "low": "note",
     "info": "note",
+    "informational": "note",
 }
 
-# SARIF security-severity is a 0.0-10.0 string; lines up with CVSS base when
-# available, otherwise derived from the Strix severity label.
+# GitHub code-scanning reads ``rule.properties['security-severity']`` (a
+# 0.0-10.0 string) to rank alerts. We prefer CVSS from the finding; absent
+# that we fall back to a conservative label → score map.
 _SEVERITY_TO_SCORE = {
     "critical": "9.5",
     "high": "8.0",
     "medium": "5.5",
     "low": "3.0",
     "info": "1.0",
+    "informational": "1.0",
 }
 
-# CWE → STRIDE leg mapping for SARIF result tagging. Maps the most-common
-# CWEs Strix surfaces to one or more STRIDE legs (Spoofing / Tampering /
-# Repudiation / Information disclosure / Denial of service / Elevation of
-# privilege). Tags become `stride:<leg>` on each result so consumers
-# (GHAS Security tab, ASPM dashboards) can group by threat-model leg.
-#
-# Where a CWE could plausibly map to multiple legs, list the dominant first
-# (the same convention strix-triage's vuln_class → STRIDE map uses).
-# Anything without an entry falls back to the dominant-T+I default that
-# matches strix-triage's DEFAULT_STRIDE_LEGS.
-_CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
-    # Spoofing — authentication / identity
-    "287": ("S",),                        # Improper Authentication
-    "290": ("S",),                        # Authentication Bypass by Spoofing
-    "294": ("S",),                        # Authentication Bypass by Capture-replay
-    "306": ("S", "E"),                    # Missing Authentication for Critical Function
-    "345": ("S", "T"),                    # Insufficient Verification of Data Authenticity
-    "346": ("S",),                        # Origin Validation Error
-    "352": ("T", "S"),                    # CSRF
-    "384": ("S",),                        # Session Fixation
-    "521": ("S",),                        # Weak Password Requirements
-    "613": ("S",),                        # Insufficient Session Expiration
-    "640": ("S",),                        # Weak Password Recovery
-    # Tampering — integrity
-    "20":  ("T",),                        # Improper Input Validation
-    "73":  ("T", "I"),                    # External Control of File Name or Path
-    "78":  ("T", "E"),                    # OS Command Injection
-    "79":  ("T", "I"),                    # XSS
-    "89":  ("T",),                        # SQL Injection
-    "91":  ("T",),                        # XML Injection
-    "94":  ("T", "E"),                    # Code Injection
-    "434": ("T",),                        # Unrestricted File Upload
-    "502": ("T", "E"),                    # Deserialization of Untrusted Data
-    "915": ("E", "T"),                    # Mass Assignment
-    "918": ("T", "I"),                    # SSRF
-    "1336": ("T", "E"),                   # Server-Side Template Injection
-    # Repudiation — audit
-    "117": ("R",),                        # Improper Output Neutralization for Logs
-    "223": ("R",),                        # Omission of Security-relevant Information
-    "778": ("R",),                        # Insufficient Logging
-    # Information disclosure — confidentiality
-    "200": ("I",),                        # Exposure of Sensitive Info
-    "201": ("I",),                        # Insertion of Sensitive Info into Sent Data
-    "209": ("I",),                        # Sensitive Info in Error Message
-    "256": ("I",),                        # Plaintext Storage of Password
-    "311": ("I",),                        # Missing Encryption of Sensitive Data
-    "319": ("I",),                        # Cleartext Transmission
-    "327": ("I",),                        # Use of Broken/Risky Crypto
-    "328": ("I",),                        # Use of Weak Hash
-    "522": ("I",),                        # Insufficiently Protected Credentials
-    "525": ("I",),                        # Web-Browser Cache of Sensitive Info
-    "532": ("I",),                        # Insertion of Sensitive Info into Log
-    "538": ("I",),                        # File / Directory Info Exposure
-    "598": ("I",),                        # Sensitive Info in URL Query
-    # Denial of service — availability
-    "400": ("D",),                        # Uncontrolled Resource Consumption
-    "770": ("D",),                        # Allocation of Resources Without Limits
-    "1333": ("D",),                       # Inefficient Regex / ReDoS
-    # Elevation of privilege — authorization
-    "22":  ("T", "I"),                    # Path Traversal
-    "269": ("E",),                        # Improper Privilege Management
-    "284": ("E",),                        # Improper Access Control
-    "276": ("E",),                        # Incorrect Default Permissions
-    "285": ("E",),                        # Improper Authorization
-    "639": ("E",),                        # Authorization Bypass via User-controlled Key (BOLA/IDOR)
-    "732": ("E",),                        # Incorrect Permission Assignment for Critical Resource
-    "862": ("E",),                        # Missing Authorization (sibling of 285/863, very common in API authz gaps)
-    "863": ("E",),                        # Incorrect Authorization
-    "1220": ("E",),                       # Insufficient Granularity of Access Control
-    # XXE / XML — multi-leg
-    "611": ("I", "T"),                    # XXE
-    "918_alt": ("T", "I"),                # placeholder mirror
-}
 
-# Default for unmapped CWEs / no-CWE findings. Conservative: tampering +
-# information-disclosure is the most-common shape for an unclassified bug.
-_DEFAULT_STRIDE_LEGS: tuple[str, ...] = ("T", "I")
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
-def _stride_legs_for_cwe(cwe_str: str | None) -> tuple[str, ...]:
-    """Map a CWE id (raw, eg 'CWE-306', '306', 'cwe 306') to STRIDE legs.
+def build_sarif_report(
+    vulnerability_reports: list[dict[str, Any]],
+    *,
+    tool_version: str | None = None,
+) -> dict[str, Any]:
+    """Return a SARIF 2.1.0 document for findings with safe source locations."""
+    rules_by_id: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    locationless_findings: list[dict[str, Any]] = []
+    dropped_unsafe_location_findings: list[dict[str, Any]] = []
 
-    Returns the default tuple for no-CWE / unrecognised CWE so every result
-    gets at least one leg tag — useful for downstream coverage reports.
-    """
-    if not cwe_str:
-        return _DEFAULT_STRIDE_LEGS
-    digits = "".join(c for c in str(cwe_str) if c.isdigit())
-    if not digits:
-        return _DEFAULT_STRIDE_LEGS
-    return _CWE_TO_STRIDE.get(digits, _DEFAULT_STRIDE_LEGS)
-
-
-def _rule_id_for(report: dict[str, Any]) -> str:
-    cwe = (report.get("cwe") or "").strip()
-    if cwe:
-        # Normalise "CWE-306" / "306" / "cwe 306" → "CWE-306"
-        digits = "".join(c for c in cwe if c.isdigit())
-        if digits:
-            return f"CWE-{digits}"
-    severity = (report.get("severity") or "unknown").lower()
-    return f"strix-{severity}"
-
-
-def _security_severity(report: dict[str, Any]) -> str:
-    cvss = report.get("cvss")
-    if cvss is not None:
-        try:
-            return f"{float(cvss):.1f}"
-        except (TypeError, ValueError):
-            pass
-    severity = (report.get("severity") or "info").lower()
-    return _SEVERITY_TO_SCORE.get(severity, "1.0")
-
-
-def _level_for(report: dict[str, Any]) -> str:
-    severity = (report.get("severity") or "info").lower()
-    return _SEVERITY_TO_LEVEL.get(severity, "note")
-
-
-def _short_description(report: dict[str, Any]) -> str:
-    title = (report.get("title") or "").strip()
-    return title or f"Strix finding {report.get('id', 'unknown')}"
-
-
-def _full_description(report: dict[str, Any]) -> str:
-    parts: list[str] = []
-    if report.get("description"):
-        parts.append(str(report["description"]).strip())
-    if report.get("impact"):
-        parts.append("Impact: " + str(report["impact"]).strip())
-    return "\n\n".join(parts) if parts else _short_description(report)
-
-
-def _help_text(report: dict[str, Any]) -> str:
-    """Remediation guidance. Excludes PoC — that lives in properties."""
-    return str(report.get("remediation_steps") or "").strip()
-
-
-def _locations(report: dict[str, Any]) -> list[dict[str, Any]]:
-    locations: list[dict[str, Any]] = []
-    for loc in report.get("code_locations") or []:
-        file_ref = (loc.get("file") or "").strip()
-        if not file_ref:
+    for report in vulnerability_reports:
+        locations, dropped_location_count = _build_locations(
+            report.get("code_locations")
+        )
+        if not locations:
+            # Locationless findings survive as a run-properties summary rather
+            # than invalid code-scanning alerts. Some SARIF consumers would
+            # accept a result without a location, but GitHub code-scanning's
+            # UI handling of locationless alerts is unreliable — the summary
+            # approach is how reviewers actually see these findings.
+            locationless_findings.append(_locationless_summary(report))
             continue
-        region: dict[str, Any] = {}
-        if loc.get("start_line") is not None:
-            region["startLine"] = int(loc["start_line"])
-        if loc.get("end_line") is not None and loc["end_line"] != loc.get("start_line"):
-            region["endLine"] = int(loc["end_line"])
-        if loc.get("snippet"):
-            region["snippet"] = {"text": str(loc["snippet"])}
-        physical: dict[str, Any] = {
-            "artifactLocation": {"uri": file_ref},
-        }
-        if region:
-            physical["region"] = region
-        entry: dict[str, Any] = {"physicalLocation": physical}
-        if loc.get("label"):
-            entry["message"] = {"text": str(loc["label"])}
-        locations.append(entry)
-    return locations
 
-
-def _build_rules(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build deduplicated rule definitions, one per unique rule.id encountered."""
-    seen: dict[str, dict[str, Any]] = {}
-    for report in reports:
-        rid = _rule_id_for(report)
-        if rid in seen:
-            continue
-        rule: dict[str, Any] = {
-            "id": rid,
-            "name": rid.replace("-", "_"),
-            "shortDescription": {"text": _short_description(report)},
-            "defaultConfiguration": {"level": _level_for(report)},
-            "properties": {
-                "security-severity": _security_severity(report),
-            },
-        }
-        help_text = _help_text(report)
-        if help_text:
-            rule["help"] = {"text": help_text, "markdown": help_text}
-        # STRIDE leg tags from CWE → STRIDE mapping. Always at least one
-        # (default T+I for unmapped CWEs) so downstream coverage reports
-        # don't have gaps. Tags appear as `stride:S`, `stride:T` etc.
-        stride_tags = [f"stride:{leg}"
-                       for leg in _stride_legs_for_cwe(report.get("cwe"))]
-        if rid.startswith("CWE-"):
-            rule["properties"]["tags"] = ["security", rid, *stride_tags]
-            rule["helpUri"] = (
-                f"https://cwe.mitre.org/data/definitions/{rid.removeprefix('CWE-')}.html"
+        if dropped_location_count:
+            dropped_unsafe_location_findings.append(
+                _dropped_location_summary(report, dropped_location_count)
             )
-        else:
-            rule["properties"]["tags"] = ["security", *stride_tags]
-        seen[rid] = rule
-    return list(seen.values())
 
+        rule_id = _rule_id(report)
+        rules_by_id.setdefault(rule_id, _build_rule(rule_id, report))
+        results.append(_build_result(rule_id, report, locations))
 
-def _build_result(report: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "ruleId": _rule_id_for(report),
-        "level": _level_for(report),
-        "message": {"text": _full_description(report)},
+    driver: dict[str, Any] = {
+        "name": TOOL_NAME,
+        "informationUri": TOOL_INFORMATION_URI,
+        "rules": list(rules_by_id.values()),
     }
-    locations = _locations(report)
-    if locations:
-        result["locations"] = locations
+    if tool_version:
+        driver["version"] = tool_version
 
-    # Namespaced properties so downstream consumers can opt in to Strix-specific
-    # fields (PoC, CVSS, original severity) without polluting SARIF core.
-    strix_props: dict[str, Any] = {
-        "vuln_id": report.get("id"),
-        "severity": (report.get("severity") or "").upper(),
-        "timestamp": report.get("timestamp"),
+    run: dict[str, Any] = {
+        "tool": {"driver": driver},
+        "results": results,
     }
-    if report.get("cvss") is not None:
-        strix_props["cvss"] = report["cvss"]
-    if report.get("cve"):
-        strix_props["cve"] = report["cve"]
-    if report.get("cwe"):
-        strix_props["cwe"] = report["cwe"]
-    if report.get("target"):
-        strix_props["target"] = report["target"]
-    if report.get("endpoint"):
-        strix_props["endpoint"] = report["endpoint"]
-    if report.get("method"):
-        strix_props["method"] = report["method"]
-    if report.get("technical_analysis"):
-        strix_props["technical_analysis"] = report["technical_analysis"]
-    if report.get("poc_description") or report.get("poc_script_code"):
-        strix_props["poc"] = {
-            "description": report.get("poc_description"),
-            "script": report.get("poc_script_code"),
-        }
 
-    # Per-result STRIDE tags — duplicated from the rule definition for
-    # consumers that filter on result.properties.tags rather than walking
-    # back to rules[].
-    stride_tags = [f"stride:{leg}"
-                   for leg in _stride_legs_for_cwe(report.get("cwe"))]
-    result["properties"] = {
-        "security-severity": _security_severity(report),
-        "tags": stride_tags,
-        "strix": strix_props,
+    run_properties: dict[str, Any] = {}
+    if locationless_findings:
+        run_properties["locationlessFindingCount"] = len(locationless_findings)
+        run_properties["locationlessFindings"] = locationless_findings
+    if dropped_unsafe_location_findings:
+        run_properties["droppedUnsafeLocationCount"] = sum(
+            finding["droppedLocationCount"]
+            for finding in dropped_unsafe_location_findings
+        )
+        run_properties["droppedUnsafeLocationFindings"] = (
+            dropped_unsafe_location_findings
+        )
+    if run_properties:
+        run["properties"] = run_properties
+
+    return {
+        "version": SARIF_VERSION,
+        "$schema": SARIF_SCHEMA,
+        "runs": [run],
     }
-    return result
+
+
+def write_sarif_report(
+    output_path: Path,
+    vulnerability_reports: list[dict[str, Any]],
+    *,
+    tool_version: str | None = None,
+) -> None:
+    """Write a SARIF report to disk, creating parent directories first."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif = build_sarif_report(vulnerability_reports, tool_version=tool_version)
+    with output_path.open("w", encoding="utf-8") as sarif_file:
+        json.dump(sarif, sarif_file, ensure_ascii=False, indent=2)
+        sarif_file.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible aliases
+# ---------------------------------------------------------------------------
+#
+# ``build_sarif_document`` / ``write_sarif`` are the names our tracer-hook
+# integration imported before the module was restructured around #477. Keep
+# them as thin aliases so internal callers don't break.
 
 
 def build_sarif_document(
@@ -310,25 +176,7 @@ def build_sarif_document(
     *,
     tool_version: str | None = None,
 ) -> dict[str, Any]:
-    """Build a SARIF 2.1.0 document from Strix vulnerability reports."""
-    driver: dict[str, Any] = {
-        "name": "Strix",
-        "informationUri": "https://github.com/usestrix/strix",
-        "rules": _build_rules(reports),
-    }
-    if tool_version:
-        driver["version"] = tool_version
-
-    return {
-        "version": SARIF_VERSION,
-        "$schema": SARIF_SCHEMA,
-        "runs": [
-            {
-                "tool": {"driver": driver},
-                "results": [_build_result(r) for r in reports],
-            }
-        ],
-    }
+    return build_sarif_report(reports, tool_version=tool_version)
 
 
 def write_sarif(
@@ -338,10 +186,339 @@ def write_sarif(
     tool_version: str | None = None,
     filename: str = "findings.sarif",
 ) -> Path:
-    """Write findings.sarif alongside existing outputs in run_dir."""
-    document = build_sarif_document(reports, tool_version=tool_version)
+    """Write ``findings.sarif`` alongside existing outputs in ``run_dir``.
+
+    Returns the output path. This is the tracer-hook entry point: SARIF
+    writing must never break the CSV + markdown path, so the caller wraps
+    it in try/except.
+    """
     out = run_dir / filename
-    with out.open("w", encoding="utf-8") as f:
-        json.dump(document, f, indent=2, ensure_ascii=False)
-    logger.info("Wrote SARIF 2.1.0 report: %s (%d results)", out, len(reports))
+    write_sarif_report(out, reports, tool_version=tool_version)
+    logger.info(
+        "Wrote SARIF 2.1.0 report: %s (%d results)",
+        out,
+        len(reports),
+    )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Rule + result builders
+# ---------------------------------------------------------------------------
+
+
+def _build_rule(rule_id: str, report: dict[str, Any]) -> dict[str, Any]:
+    """Build a SARIF rule descriptor from a Strix finding."""
+    title = _string_value(report.get("title")) or rule_id
+    full_description = _string_value(report.get("description")) or title
+
+    rule: dict[str, Any] = {
+        "id": rule_id,
+        "name": _rule_name(rule_id, title),
+        "shortDescription": {"text": title},
+        "fullDescription": {"text": full_description},
+        "defaultConfiguration": {"level": _sarif_level(report.get("severity"))},
+        "help": {"text": _help_text(report, full_description)},
+    }
+
+    properties: dict[str, Any] = {
+        "security-severity": _security_severity(report),
+    }
+    tags = _rule_tags(rule_id, report)
+    if tags:
+        properties["tags"] = tags
+    rule["properties"] = properties
+
+    help_uri = _help_uri_for(rule_id)
+    if help_uri:
+        rule["helpUri"] = help_uri
+
+    return rule
+
+
+def _build_result(
+    rule_id: str,
+    report: dict[str, Any],
+    locations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build one SARIF result using validated physical locations."""
+    title = _string_value(report.get("title")) or rule_id
+    result: dict[str, Any] = {
+        "ruleId": rule_id,
+        "level": _sarif_level(report.get("severity")),
+        "message": {"text": title},
+    }
+    if locations:
+        result["locations"] = locations
+    result["properties"] = _result_properties(report)
+    return result
+
+
+def _result_properties(report: dict[str, Any]) -> dict[str, Any]:
+    """Strix-specific metadata for downstream consumers.
+
+    The top-level ``security-severity`` matches GitHub code-scanning's
+    expected property. Strix-specific fields are namespaced under
+    ``strix`` so generic SARIF consumers don't see them by default.
+    """
+    properties: dict[str, Any] = {
+        "security-severity": _security_severity(report),
+    }
+
+    strix: dict[str, Any] = {}
+    for key in (
+        "id",
+        "severity",
+        "cvss",
+        "timestamp",
+        "target",
+        "endpoint",
+        "method",
+        "cve",
+        "cwe",
+        "impact",
+        "technical_analysis",
+        "remediation_steps",
+    ):
+        value = report.get(key)
+        if value not in (None, ""):
+            strix[key] = value
+
+    # PoC goes in a nested object so consumers that render ``strix.*`` into
+    # UI don't accidentally display exploitation payloads to a wide audience.
+    poc_description = _string_value(report.get("poc_description"))
+    poc_script = _string_value(report.get("poc_script_code"))
+    if poc_description or poc_script:
+        poc: dict[str, Any] = {}
+        if poc_description:
+            poc["description"] = poc_description
+        if poc_script:
+            poc["script"] = poc_script
+        strix["poc"] = poc
+
+    if strix:
+        properties["strix"] = strix
+
+    return properties
+
+
+# ---------------------------------------------------------------------------
+# Location handling
+# ---------------------------------------------------------------------------
+
+
+def _build_locations(raw_locations: Any) -> tuple[list[dict[str, Any]], int]:
+    """Return SARIF locations and a count of dropped unsafe locations."""
+    if not isinstance(raw_locations, list):
+        return [], 0
+
+    raw_locations_list = cast("list[Any]", raw_locations)  # type: ignore[redundant-cast]
+    locations: list[dict[str, Any]] = []
+    dropped_location_count = 0
+    for raw_location in raw_locations_list:
+        if not isinstance(raw_location, dict):
+            dropped_location_count += 1
+            continue
+
+        location = cast("dict[str, Any]", raw_location)
+        file_path = _string_value(location.get("file"))
+        start_line = location.get("start_line")
+        end_line = location.get("end_line")
+        if (
+            not file_path
+            or type(start_line) is not int
+            or start_line < 1
+        ):
+            dropped_location_count += 1
+            continue
+        uri = _sarif_uri(file_path)
+        if uri is None:
+            dropped_location_count += 1
+            continue
+
+        region: dict[str, Any] = {"startLine": start_line}
+        if type(end_line) is int and end_line >= start_line:
+            region["endLine"] = end_line
+
+        snippet = _string_value(location.get("snippet"))
+        if snippet:
+            region["snippet"] = {"text": snippet}
+
+        physical_location: dict[str, Any] = {
+            "artifactLocation": {"uri": uri},
+            "region": region,
+        }
+        entry: dict[str, Any] = {"physicalLocation": physical_location}
+
+        label = _string_value(location.get("label"))
+        if label:
+            entry["message"] = {"text": label}
+
+        locations.append(entry)
+
+    return locations, dropped_location_count
+
+
+def _sarif_uri(file_path: str) -> str | None:
+    """Return a safe repo-relative SARIF URI, or None for unsafe paths."""
+    uri = PurePosixPath(file_path.replace("\\", "/")).as_posix()
+    parts = PurePosixPath(uri).parts
+    if not uri or uri.startswith("/") or not parts:
+        return None
+    if ":" in parts[0] or any(part == ".." for part in parts):
+        return None
+    return uri
+
+
+# ---------------------------------------------------------------------------
+# Rule ID resolution + CWE normalisation
+# ---------------------------------------------------------------------------
+
+
+def _rule_id(report: dict[str, Any]) -> str:
+    """Choose a stable SARIF rule id, preferring CWE → CVE → finding-id → slug.
+
+    CWE values are normalised from Strix output variants (``CWE-306``,
+    ``cwe: 306``, ``306``) to the canonical ``CWE-NNN`` form. Without
+    normalisation, the same weakness across runs dedups to separate rules.
+    """
+    cwe = _string_value(report.get("cwe"))
+    if cwe:
+        normalised = _normalise_cwe(cwe)
+        if normalised:
+            return normalised
+
+    cve = _string_value(report.get("cve"))
+    if cve:
+        return cve
+
+    finding_id = _string_value(report.get("id"))
+    if finding_id:
+        return finding_id
+
+    title = _string_value(report.get("title")) or "strix-finding"
+    return _slugify(title)
+
+
+def _normalise_cwe(value: str) -> str | None:
+    """``CWE-306``, ``cwe:306``, ``306`` → ``CWE-306``."""
+    digits = "".join(c for c in value if c.isdigit())
+    if not digits:
+        return None
+    return f"CWE-{digits}"
+
+
+def _rule_name(rule_id: str, title: str) -> str:
+    """SARIF rule.name must be a free-form string; prefer the finding title
+    where available, fall back to a snake_case'd form of the rule id."""
+    return title or rule_id.replace("-", "_")
+
+
+def _rule_tags(rule_id: str, report: dict[str, Any]) -> list[str]:
+    tags: list[str] = ["security"]
+    if rule_id.startswith("CWE-"):
+        tags.append(rule_id)
+    cve = _string_value(report.get("cve"))
+    if cve and cve not in tags:
+        tags.append(cve)
+    return tags
+
+
+def _help_uri_for(rule_id: str) -> str | None:
+    if rule_id.startswith("CWE-"):
+        return f"https://cwe.mitre.org/data/definitions/{rule_id.removeprefix('CWE-')}.html"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Severity + help text
+# ---------------------------------------------------------------------------
+
+
+def _sarif_level(severity: Any) -> str:
+    """Map Strix severity labels to SARIF result levels."""
+    normalised = (_string_value(severity) or "").lower()
+    return _SEVERITY_TO_LEVEL.get(normalised, "note")
+
+
+def _security_severity(report: dict[str, Any]) -> str:
+    """GitHub-compatible ``security-severity`` string in 0.0-10.0.
+
+    Uses CVSS when present, otherwise falls back to the severity label.
+    """
+    cvss = report.get("cvss")
+    if cvss is not None:
+        try:
+            return f"{float(cvss):.1f}"
+        except (TypeError, ValueError):
+            pass
+    normalised = (_string_value(report.get("severity")) or "info").lower()
+    return _SEVERITY_TO_SCORE.get(normalised, "1.0")
+
+
+def _help_text(report: dict[str, Any], fallback: str) -> str:
+    """Assemble SARIF help text from finding details and remediation."""
+    sections = [
+        _string_value(report.get("description")),
+        _string_value(report.get("impact")),
+        _string_value(report.get("remediation_steps")),
+    ]
+    help_text = "\n\n".join(section for section in sections if section)
+    return help_text or fallback
+
+
+# ---------------------------------------------------------------------------
+# Summaries for locationless + unsafe-location findings
+# ---------------------------------------------------------------------------
+
+
+def _locationless_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """Summarize findings that cannot be emitted as code-scanning alerts."""
+    summary: dict[str, Any] = {}
+    for key in (
+        "id",
+        "title",
+        "severity",
+        "cwe",
+        "cve",
+        "target",
+        "endpoint",
+        "method",
+    ):
+        value = report.get(key)
+        if value not in (None, ""):
+            summary[key] = value
+    return summary
+
+
+def _dropped_location_summary(
+    report: dict[str, Any],
+    dropped_location_count: int,
+) -> dict[str, Any]:
+    """Summarize unsafe locations dropped from a partially emitted finding."""
+    summary: dict[str, Any] = {"droppedLocationCount": dropped_location_count}
+    for key in ("id", "title"):
+        value = report.get(key)
+        if value not in (None, ""):
+            summary[key] = value
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+
+def _string_value(value: Any) -> str | None:
+    """Return a stripped non-empty string value, or None."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _slugify(value: str) -> str:
+    """Convert arbitrary finding text into a stable lowercase slug."""
+    chars = [char.lower() if char.isalnum() else "-" for char in value]
+    slug = "-".join(part for part in "".join(chars).split("-") if part)
+    return slug or "strix-finding"

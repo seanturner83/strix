@@ -801,14 +801,6 @@ class Tracer:
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
 
-            # SARIF 2.1.0 sidecar for machine-readable consumption (GitHub
-            # code-scanning upload-sarif, ASPM platforms, etc.). Emit only on
-            # completion — `mark_complete=True` is the contract for "this is
-            # the final state of the run". Always emit, even with zero
-            # findings: GHAS uses the absence of a previously-reported rule
-            # in a new SARIF for the same ref to auto-close stale alerts.
-            # Without this empty-results emit, a clean re-scan leaves prior
-            # alerts open and blocks PR merges (SEC-6635).
             if mark_complete:
                 try:
                     write_sarif(run_dir, sorted_reports)
