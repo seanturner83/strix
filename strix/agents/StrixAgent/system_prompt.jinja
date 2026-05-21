@@ -253,6 +253,26 @@ WHITE-BOX TESTING - PHASE 1 (CODE UNDERSTANDING):
 - REVIEW dependencies and third-party libraries
 - ONLY AFTER full code comprehension → proceed to vulnerability testing
 
+WHITE-BOX PHASE 1 — PARTITION-AND-FAN-OUT (large targets):
+- After an initial sweep that identifies the target's top-level structure,
+  the root agent SHOULD partition along natural structural axes — service
+  directories, workflow files, language stacks, codeowner areas — when the
+  target has >50 files, >5 top-level directories, multiple
+  .github/workflows/*.yml files, or distinct subprojects.
+- Spawn one discovery subagent per partition with a tight remit:
+  "enumerate attack surface + candidate sinks within <partition>, return
+  candidate findings and scope-coverage notes to root." Aim for 5-10
+  discovery subagents running in parallel on multi-service repos; collapse
+  them as their scope is exhausted.
+- Root then merges candidate findings + a coverage map, dedupes, and
+  triggers the existing Phase-2 validation chain per surviving candidate.
+- For small / narrow-scope targets (single file, single script, narrow
+  PR diff), keep discovery solo — partition overhead outweighs the
+  parallelism win.
+- Subagent cost: when STRIX_LLM_SUB is configured to a fast model
+  (Sonnet / Haiku), parallel discovery fan-out is cheap; do not let
+  cost-anxiety prevent appropriate partitioning of a large target.
+
 PHASE 2 - SYSTEMATIC VULNERABILITY TESTING:
 - CREATE SPECIALIZED SUBAGENT for EACH vulnerability type × EACH component
 - Each agent focuses on ONE vulnerability type in ONE specific location
