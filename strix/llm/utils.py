@@ -1,4 +1,5 @@
 import html
+import json
 import re
 from typing import Any
 
@@ -6,6 +7,7 @@ from typing import Any
 _INVOKE_OPEN = re.compile(r'<invoke\s+name=["\']([^"\']+)["\']>')
 _PARAM_NAME_ATTR = re.compile(r'<parameter\s+name=["\']([^"\']+)["\']>')
 _FUNCTION_CALLS_TAG = re.compile(r"</?function_calls>")
+_MINIMAX_TOOL_CALL_TAG = re.compile(r"</?minimax:tool_call>")
 _STRIP_TAG_QUOTES = re.compile(r"<(function|parameter)\s*=\s*([^>]*?)>")
 
 
@@ -13,6 +15,7 @@ def normalize_tool_format(content: str) -> str:
     """Convert alternative tool-call XML formats to the expected one.
 
     Handles:
+      <minimax:tool_call>...</minimax:tool_call>  → stripped
       <function_calls>...</function_calls>  → stripped
       <invoke name="X">                     → <function=X>
       <parameter name="X">                  → <parameter=X>
@@ -20,7 +23,14 @@ def normalize_tool_format(content: str) -> str:
       <function="X">                        → <function=X>
       <parameter="X">                       → <parameter=X>
     """
-    if "<invoke" in content or "<function_calls" in content:
+    content = _MINIMAX_TOOL_CALL_TAG.sub("", content)
+
+    if (
+        "<invoke" in content
+        or "<function_calls" in content
+        or '<parameter name="' in content
+        or "<parameter name='" in content
+    ):
         content = _FUNCTION_CALLS_TAG.sub("", content)
         content = _INVOKE_OPEN.sub(r"<function=\1>", content)
         content = _PARAM_NAME_ATTR.sub(r"<parameter=\1>", content)
@@ -101,6 +111,19 @@ def parse_tool_invocations(content: str) -> list[dict[str, Any]] | None:
 
             param_value = html.unescape(param_value)
             args[param_name] = param_value
+
+        if not args:
+            body_stripped = html.unescape(fn_body.strip())
+            if body_stripped.startswith("{"):
+                try:
+                    parsed = json.loads(body_stripped)
+                    if isinstance(parsed, dict):
+                        args = {
+                            k: v if isinstance(v, str) else json.dumps(v)
+                            for k, v in parsed.items()
+                        }
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
         tool_invocations.append({"toolName": fn_name, "args": args})
 

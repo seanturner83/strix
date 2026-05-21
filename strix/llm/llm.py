@@ -11,7 +11,7 @@ from litellm.utils import supports_prompt_caching, supports_vision
 
 from strix.config import Config
 from strix.llm.config import LLMConfig
-from strix.llm.memory_compressor import MemoryCompressor
+from strix.llm.memory_compressor import MemoryCompressor, get_message_tokens
 from strix.llm.utils import (
     _truncate_to_first_function,
     fix_incomplete_tool_call,
@@ -25,6 +25,21 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 litellm.drop_params = True
 litellm.modify_params = True
+
+_THINKING_BLOCK_RE = re.compile(r"<think(?:ing)?[^>]*>.*?</think(?:ing)?>", re.DOTALL)
+_THINKING_BLOCK_OR_OPEN_RE = re.compile(
+    r"<think(?:ing)?[^>]*>.*?(?:</think(?:ing)?>|\Z)", re.DOTALL
+)
+
+
+def _find_end_tag_outside_thinking(content: str, end_tag: str) -> int:
+    thinking_spans = [(m.start(), m.end()) for m in _THINKING_BLOCK_OR_OPEN_RE.finditer(content)]
+    start = 0
+    while (idx := content.find(end_tag, start)) != -1:
+        if not any(s <= idx < e for s, e in thinking_spans):
+            return idx
+        start = idx + 1
+    return -1
 
 
 _TOOL_RESULT_PATTERN = re.compile(
@@ -75,7 +90,12 @@ class LLM:
             getattr(config, "system_prompt_context", {}) or {}
         )
         self._total_stats = RequestStats()
-        self.memory_compressor = MemoryCompressor(model_name=config.litellm_model)
+        self.memory_compressor = MemoryCompressor(
+            model_name=None
+            if Config.get("strix_llm_compressor")
+            else config.litellm_model,
+            on_usage=self._update_compressor_stats,
+        )
         self.system_prompt = self._load_system_prompt(agent_name)
 
         reasoning = Config.get("strix_reasoning_effort")
@@ -247,9 +267,10 @@ class LLM:
             delta = self._get_chunk_content(chunk)
             if delta:
                 accumulated += delta
-                if "</function>" in accumulated or "</invoke>" in accumulated:
-                    end_tag = "</function>" if "</function>" in accumulated else "</invoke>"
-                    pos = accumulated.find(end_tag)
+                check_content = _THINKING_BLOCK_OR_OPEN_RE.sub("", accumulated)
+                if "</function>" in check_content or "</invoke>" in check_content:
+                    end_tag = "</function>" if "</function>" in check_content else "</invoke>"
+                    pos = _find_end_tag_outside_thinking(accumulated, end_tag)
                     accumulated = accumulated[: pos + len(end_tag)]
                     yield LLMResponse(content=accumulated)
                     done_streaming = 1
@@ -259,8 +280,10 @@ class LLM:
         if chunks:
             self._update_usage_stats(stream_chunk_builder(chunks))
 
+        accumulated = _THINKING_BLOCK_RE.sub("", accumulated)
         accumulated = normalize_tool_format(accumulated)
         accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
+
         yield LLMResponse(
             content=accumulated,
             tool_invocations=parse_tool_invocations(accumulated),
@@ -284,7 +307,12 @@ class LLM:
                 }
             )
 
-        compressed = list(self.memory_compressor.compress_history(conversation_history))
+        reserved_tokens = sum(
+            get_message_tokens(msg, self.config.litellm_model) for msg in messages
+        )
+        compressed = list(
+            self.memory_compressor.compress_history(conversation_history, reserved_tokens)
+        )
         conversation_history.clear()
         conversation_history.extend(compressed)
         messages.extend(compressed)
@@ -382,7 +410,7 @@ class LLM:
         except Exception:  # noqa: BLE001, S110  # nosec B110
             pass
 
-    def _extract_cost(self, response: Any) -> float:
+    def _extract_cost(self, response: Any, model: str | None = None) -> float:
         if hasattr(response, "usage") and response.usage:
             direct_cost = getattr(response.usage, "cost", None)
             if direct_cost is not None:
@@ -390,7 +418,9 @@ class LLM:
         try:
             if hasattr(response, "_hidden_params"):
                 response._hidden_params.pop("custom_llm_provider", None)
-            return completion_cost(response, model=self.config.canonical_model) or 0.0
+            return completion_cost(
+                response, model=model or self.config.canonical_model
+            ) or 0.0
         except Exception:  # noqa: BLE001
             return 0.0
 
@@ -463,6 +493,39 @@ class LLM:
             return False
         message = str(e).lower()
         return "thinking" in message and "cannot be modified" in message
+
+    def _update_compressor_stats(self, response: Any, model: str) -> None:
+        """Usage callback for MemoryCompressor.
+
+        Compressor calls hit a different model than the orchestrator (when
+        STRIX_LLM_COMPRESSOR is set), so cost must be priced against that
+        model. Token counts accumulate into the same _total_stats so they
+        appear in the run summary.
+        """
+        try:
+            if hasattr(response, "usage") and response.usage:
+                input_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+
+                cached_tokens = 0
+                if hasattr(response.usage, "prompt_tokens_details"):
+                    prompt_details = response.usage.prompt_tokens_details
+                    if hasattr(prompt_details, "cached_tokens"):
+                        cached_tokens = prompt_details.cached_tokens or 0
+
+                cost = self._extract_cost(response, model=model)
+            else:
+                input_tokens = 0
+                output_tokens = 0
+                cached_tokens = 0
+                cost = 0.0
+
+            self._total_stats.input_tokens += input_tokens
+            self._total_stats.output_tokens += output_tokens
+            self._total_stats.cached_tokens += cached_tokens
+            self._total_stats.cost += cost
+        except Exception:  # noqa: BLE001, S110  # nosec B110
+            pass
 
     def _should_retry(self, e: Exception) -> bool:
         code = getattr(e, "status_code", None) or getattr(

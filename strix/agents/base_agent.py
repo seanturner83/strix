@@ -92,6 +92,7 @@ class BaseAgent(metaclass=AgentMeta):
                 name=self.state.agent_name,
                 task=self.state.task,
                 parent_id=self.state.parent_id,
+                role=getattr(self.llm_config, "role", None),
             )
             if self.state.parent_id is None:
                 scan_config = tracer.scan_config or {}
@@ -298,7 +299,7 @@ class BaseAgent(metaclass=AgentMeta):
 
             return
 
-        await asyncio.sleep(0.5)
+        await self.state.wait_for_wake(timeout=0.5)
 
     async def _enter_waiting_state(
         self,

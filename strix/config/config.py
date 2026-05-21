@@ -13,8 +13,14 @@ class Config:
 
     # LLM Configuration
     strix_llm = None
+    strix_llm_orchestrator = None
+    strix_llm_subagent = None
+    strix_llm_compressor = None
     llm_api_key = None
     llm_api_base = None
+    strix_llm_orchestrator_api_base = None
+    strix_llm_subagent_api_base = None
+    strix_llm_compressor_api_base = None
     openai_api_base = None
     litellm_base_url = None
     ollama_api_base = None
@@ -27,8 +33,14 @@ class Config:
     llm_timeout = "300"
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
+        "strix_llm_orchestrator",
+        "strix_llm_subagent",
+        "strix_llm_compressor",
         "llm_api_key",
         "llm_api_base",
+        "strix_llm_orchestrator_api_base",
+        "strix_llm_subagent_api_base",
+        "strix_llm_compressor_api_base",
         "openai_api_base",
         "litellm_base_url",
         "ollama_api_base",
@@ -47,6 +59,7 @@ class Config:
     strix_runtime_backend = "docker"
     strix_sandbox_execution_timeout = "120"
     strix_sandbox_connect_timeout = "10"
+    strix_sandbox_extra_hosts = None
 
     # Telemetry
     strix_telemetry = "1"
@@ -199,29 +212,81 @@ def save_current_config() -> bool:
     return Config.save_current()
 
 
-def resolve_llm_config() -> tuple[str | None, str | None, str | None]:
-    """Resolve LLM model, api_key, and api_base based on STRIX_LLM prefix.
+_VALID_ROLES = ("orchestrator", "subagent", "compressor")
+
+
+def _resolve_role_model(role: str | None) -> str | None:
+    """Walk the per-role model fallback chain.
+
+    Chain (Option B — compressor does NOT inherit from subagent):
+    - orchestrator: STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    - subagent:     STRIX_LLM_SUBAGENT -> STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    - compressor:   STRIX_LLM_COMPRESSOR -> STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    - None:         STRIX_LLM (legacy behaviour)
+    """
+    if role == "orchestrator":
+        return Config.get("strix_llm_orchestrator") or Config.get("strix_llm")
+    if role == "subagent":
+        return (
+            Config.get("strix_llm_subagent")
+            or Config.get("strix_llm_orchestrator")
+            or Config.get("strix_llm")
+        )
+    if role == "compressor":
+        return (
+            Config.get("strix_llm_compressor")
+            or Config.get("strix_llm_orchestrator")
+            or Config.get("strix_llm")
+        )
+    return Config.get("strix_llm")
+
+
+def _resolve_role_api_base(role: str | None) -> str | None:
+    """Walk the per-role api_base fallback chain (mirrors _resolve_role_model)."""
+    if role == "orchestrator":
+        return Config.get("strix_llm_orchestrator_api_base")
+    if role == "subagent":
+        return Config.get("strix_llm_subagent_api_base") or Config.get(
+            "strix_llm_orchestrator_api_base"
+        )
+    if role == "compressor":
+        return Config.get("strix_llm_compressor_api_base") or Config.get(
+            "strix_llm_orchestrator_api_base"
+        )
+    return None
+
+
+def resolve_llm_config(
+    role: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve LLM model, api_key, and api_base for an optional role.
+
+    role=None preserves legacy behaviour (reads STRIX_LLM directly).
+    Provider-agnostic: per-role _API_BASE env vars allow pointing each role at
+    a different endpoint (Bedrock / Anthropic / local) without LiteLLM in the loop.
 
     Returns:
         tuple: (model_name, api_key, api_base)
         - model_name: Original model name (strix/ prefix preserved for display)
-        - api_key: LLM API key
-        - api_base: API base URL (auto-set to STRIX_API_BASE for strix/ models)
+        - api_key: LLM API key (shared across roles)
+        - api_base: API base URL — role-specific override wins, then legacy chain
     """
-    model = Config.get("strix_llm")
+    if role is not None and role not in _VALID_ROLES:
+        raise ValueError(f"Unknown LLM role: {role!r}. Expected one of {_VALID_ROLES} or None.")
+
+    model = _resolve_role_model(role)
     if not model:
         return None, None, None
 
     api_key = Config.get("llm_api_key")
 
     if model.startswith("strix/"):
-        api_base: str | None = STRIX_API_BASE
-    else:
-        api_base = (
-            Config.get("llm_api_base")
-            or Config.get("openai_api_base")
-            or Config.get("litellm_base_url")
-            or Config.get("ollama_api_base")
-        )
+        return model, api_key, STRIX_API_BASE
 
+    api_base = _resolve_role_api_base(role) or (
+        Config.get("llm_api_base")
+        or Config.get("openai_api_base")
+        or Config.get("litellm_base_url")
+        or Config.get("ollama_api_base")
+    )
     return model, api_key, api_base

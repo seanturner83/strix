@@ -756,6 +756,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             scan_mode=scan_mode,
             interactive=True,
             is_whitebox=bool(getattr(args, "local_sources", [])),
+            role="orchestrator",
         )
 
         config = {

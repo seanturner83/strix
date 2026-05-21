@@ -1,10 +1,14 @@
 import concurrent.futures
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import litellm
 
 from strix.config.config import Config, resolve_llm_config
+
+
+UsageCallback = Callable[[Any, str], None]
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +64,7 @@ def _count_tokens(text: str, model: str) -> int:
         return len(text) // 4  # Rough estimate
 
 
-def _get_message_tokens(msg: dict[str, Any], model: str) -> int:
+def get_message_tokens(msg: dict[str, Any], model: str) -> int:
     content = msg.get("content", "")
     if isinstance(content, str):
         return _count_tokens(content, model)
@@ -95,6 +99,7 @@ def _summarize_messages(
     messages: list[dict[str, Any]],
     model: str,
     timeout: int = 30,
+    on_usage: UsageCallback | None = None,
 ) -> dict[str, Any]:
     if not messages:
         empty_summary = "<context_summary message_count='0'>{text}</context_summary>"
@@ -112,7 +117,7 @@ def _summarize_messages(
     conversation = "\n".join(formatted)
     prompt = SUMMARY_PROMPT_TEMPLATE.format(conversation=conversation)
 
-    _, api_key, api_base = resolve_llm_config()
+    _, api_key, api_base = resolve_llm_config(role="compressor")
 
     try:
         completion_args: dict[str, Any] = {
@@ -142,6 +147,12 @@ def _summarize_messages(
                     f"memory_compressor: litellm.completion exceeded "
                     f"{timeout}s wall-clock budget"
                 ) from exc
+
+        if on_usage is not None:
+            try:
+                on_usage(response, model)
+            except Exception:  # noqa: BLE001
+                logger.exception("Compressor usage callback failed")
         summary = response.choices[0].message.content or ""
         if not summary.strip():
             return messages[0]
@@ -197,10 +208,26 @@ class MemoryCompressor:
         max_images: int = 3,
         model_name: str | None = None,
         timeout: int | None = None,
+        on_usage: UsageCallback | None = None,
     ):
         self.max_images = max_images
-        self.model_name = model_name or Config.get("strix_llm")
+        if model_name is None:
+            resolved, _, _ = resolve_llm_config(role="compressor")
+            self.model_name = resolved
+        else:
+            self.model_name = model_name
         self.timeout = timeout or int(Config.get("strix_memory_compressor_timeout") or "120")
+        self.on_usage = on_usage
+
+        self.max_total_tokens = int(
+            Config.get("strix_max_context_tokens") or str(DEFAULT_MAX_TOTAL_TOKENS)
+        )
+        self.min_recent_messages = int(
+            Config.get("strix_min_recent_messages") or str(DEFAULT_MIN_RECENT_MESSAGES)
+        )
+        self.max_tool_output_chars = int(
+            Config.get("strix_max_tool_output_chars") or str(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+        )
 
         self.max_total_tokens = int(
             Config.get("strix_max_context_tokens") or str(DEFAULT_MAX_TOTAL_TOKENS)
@@ -265,8 +292,15 @@ class MemoryCompressor:
     def compress_history(
         self,
         messages: list[dict[str, Any]],
+        reserved_tokens: int = 0,
     ) -> list[dict[str, Any]]:
         """Compress conversation history to stay within token limits.
+
+        Args:
+            messages: Conversation history messages to compress.
+            reserved_tokens: Tokens already reserved for system prompt and
+                other framing messages outside the conversation history.
+                Subtracted from the budget before checking limits.
 
         Strategy:
         1. Truncate oversized tool outputs first
@@ -302,8 +336,8 @@ class MemoryCompressor:
         # Type assertion since we ensure model_name is not None in __init__
         model_name: str = self.model_name  # type: ignore[assignment]
 
-        total_tokens = sum(
-            _get_message_tokens(msg, model_name) for msg in system_msgs + regular_msgs
+        total_tokens = reserved_tokens + sum(
+            get_message_tokens(msg, model_name) for msg in system_msgs + regular_msgs
         )
 
         if total_tokens <= self.max_total_tokens * 0.9:
@@ -313,7 +347,9 @@ class MemoryCompressor:
         chunk_size = 10
         for i in range(0, len(old_msgs), chunk_size):
             chunk = old_msgs[i : i + chunk_size]
-            summary = _summarize_messages(chunk, model_name, self.timeout)
+            summary = _summarize_messages(
+                chunk, model_name, self.timeout, on_usage=self.on_usage
+            )
             if summary:
                 compressed.append(summary)
 

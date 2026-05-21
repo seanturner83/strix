@@ -14,7 +14,7 @@ class StrixAgent(BaseAgent):
         if state is None or (hasattr(state, "parent_id") and state.parent_id is None):
             default_skills = ["root_agent"]
 
-        self.default_llm_config = LLMConfig(skills=default_skills)
+        self.default_llm_config = LLMConfig(skills=default_skills, role="orchestrator")
 
         super().__init__(config)
 

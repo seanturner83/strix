@@ -1,8 +1,10 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, PrivateAttr
+
 
 if TYPE_CHECKING:
     from strix.telemetry.conversation_log import ConversationLog
@@ -44,6 +46,7 @@ class AgentState(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
     _conversation_log: "ConversationLog | None" = PrivateAttr(default=None)
+    _wake_event: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
 
     def set_conversation_log(self, log: "ConversationLog") -> None:
         self._conversation_log = log
@@ -67,6 +70,8 @@ class AgentState(BaseModel):
                 iteration=self.iteration,
                 thinking_blocks=thinking_blocks,
             )
+        if self.waiting_for_input:
+            self._wake_event.set()
 
     def add_action(self, action: dict[str, Any]) -> None:
         self.actions_taken.append(
@@ -124,6 +129,14 @@ class AgentState(BaseModel):
         if new_task:
             self.task = new_task
         self.last_updated = datetime.now(UTC).isoformat()
+        self._wake_event.set()
+
+    async def wait_for_wake(self, timeout: float = 0.5) -> None:
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
+            self._wake_event.clear()
+        except TimeoutError:
+            pass
 
     def has_reached_max_iterations(self) -> bool:
         return self.iteration >= self.max_iterations

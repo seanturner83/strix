@@ -81,6 +81,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     llm_config = LLMConfig(
         scan_mode=scan_mode,
         is_whitebox=bool(getattr(args, "local_sources", [])),
+        role="orchestrator",
     )
     agent_config = {
         "llm_config": llm_config,
