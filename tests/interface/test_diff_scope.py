@@ -151,3 +151,259 @@ def test_resolve_diff_scope_context_diff_mode_still_raises_on_repo_scope_resolut
             non_interactive=True,
             env={},
         )
+
+
+# ---- Diff-preload tests ----
+
+
+def test_truncate_diff_content_under_cap_returns_unchanged() -> None:
+    content = "diff --git a/x b/x\n+small\n"
+    truncated, was_truncated, original = utils._truncate_diff_content(content, 1000)
+
+    assert truncated == content
+    assert was_truncated is False
+    assert original == len(content.encode("utf-8"))
+
+
+def test_truncate_diff_content_over_cap_keeps_head_and_tail() -> None:
+    content = "HEAD_LINE\n" + ("x" * 5000) + "\nTAIL_LINE\n"
+    truncated, was_truncated, original = utils._truncate_diff_content(content, 200)
+
+    assert was_truncated is True
+    assert original == len(content.encode("utf-8"))
+    assert "HEAD_LINE" in truncated
+    assert "TAIL_LINE" in truncated
+    assert "diff truncated" in truncated
+    assert len(truncated.encode("utf-8")) > 200  # marker added on top of caps
+
+
+def test_capture_file_diffs_respects_total_cap(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path
+
+    big_diff = "+" + ("x" * 100_000) + "\n"
+
+    def fake_run(_repo_path, _args, check=False):
+        class _Result:
+            returncode = 0
+            stdout = big_diff.encode("utf-8")
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr(utils, "_run_git_command_raw", fake_run)
+    monkeypatch.setattr(utils, "_diff_preload_enabled", lambda: True)
+    monkeypatch.setattr(utils, "_diff_preload_max_file_bytes", lambda: 50_000)
+    monkeypatch.setattr(utils, "_diff_preload_max_total_bytes", lambda: 50_000)
+
+    payloads = utils._capture_file_diffs(
+        repo, "merge_base_sha", ["big1.py", "big2.py", "big3.py"]
+    )
+
+    assert len(payloads) == 3
+    # First file fills the budget — inlined and truncated
+    assert payloads[0].path == "big1.py"
+    assert payloads[0].truncated is True
+    assert payloads[0].skipped_reason is None
+    # Second and third files dropped because total cap is exhausted
+    assert payloads[1].path == "big2.py"
+    assert payloads[1].skipped_reason == "total_cap_exceeded"
+    assert payloads[1].content == ""
+    assert payloads[2].path == "big3.py"
+    assert payloads[2].skipped_reason == "total_cap_exceeded"
+
+
+def test_capture_file_diffs_returns_empty_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(utils, "_diff_preload_enabled", lambda: False)
+    payloads = utils._capture_file_diffs(tmp_path, "abc", ["a.py", "b.py"])
+    assert payloads == []
+
+
+def test_capture_file_diffs_handles_binary_or_non_utf8(monkeypatch, tmp_path: Path) -> None:
+    def fake_run(_repo_path, _args, check=False):
+        class _Result:
+            returncode = 0
+            stdout = b"\xff\xfe\xfd binary content"
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr(utils, "_run_git_command_raw", fake_run)
+    monkeypatch.setattr(utils, "_diff_preload_enabled", lambda: True)
+    monkeypatch.setattr(utils, "_diff_preload_max_file_bytes", lambda: 50_000)
+    monkeypatch.setattr(utils, "_diff_preload_max_total_bytes", lambda: 200_000)
+
+    payloads = utils._capture_file_diffs(tmp_path, "abc", ["bin.png"])
+
+    assert len(payloads) == 1
+    assert payloads[0].skipped_reason == "binary_or_non_utf8"
+    assert payloads[0].content == ""
+
+
+def test_capture_file_diffs_skips_files_with_failed_git_diff(monkeypatch, tmp_path: Path) -> None:
+    def fake_run(_repo_path, _args, check=False):
+        class _Result:
+            returncode = 128
+            stdout = b""
+            stderr = b"fatal: bad object"
+
+        return _Result()
+
+    monkeypatch.setattr(utils, "_run_git_command_raw", fake_run)
+    monkeypatch.setattr(utils, "_diff_preload_enabled", lambda: True)
+    monkeypatch.setattr(utils, "_diff_preload_max_file_bytes", lambda: 50_000)
+    monkeypatch.setattr(utils, "_diff_preload_max_total_bytes", lambda: 200_000)
+
+    payloads = utils._capture_file_diffs(tmp_path, "abc", ["broken.py"])
+
+    assert len(payloads) == 1
+    assert payloads[0].skipped_reason == "diff_failed"
+
+
+def test_build_diff_scope_instruction_includes_pr_diff_block_when_payloads_present() -> None:
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="repo",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=["src/added.py"],
+        modified_files=["src/changed.py"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["src/added.py", "src/changed.py"],
+        file_diffs=[
+            utils.FileDiffPayload(
+                path="src/added.py",
+                content="@@ -0,0 +1,3 @@\n+def hello():\n+    pass\n",
+            ),
+            utils.FileDiffPayload(
+                path="src/changed.py",
+                content="@@ -10,3 +10,3 @@\n-old\n+new\n",
+            ),
+        ],
+    )
+
+    instruction = utils.build_diff_scope_instruction([scope])
+
+    assert "<pr_diff>" in instruction
+    assert "</pr_diff>" in instruction
+    assert '<file path="src/added.py">' in instruction
+    assert "+def hello():" in instruction
+    assert "+new" in instruction
+
+
+def test_build_diff_scope_instruction_marks_truncated_files_with_attributes() -> None:
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="repo",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=[],
+        modified_files=["large.go"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["large.go"],
+        file_diffs=[
+            utils.FileDiffPayload(
+                path="large.go",
+                content="HEAD\n[... diff truncated ...]\nTAIL",
+                truncated=True,
+                original_bytes=200_000,
+            ),
+        ],
+    )
+
+    instruction = utils.build_diff_scope_instruction([scope])
+
+    assert 'truncated="true"' in instruction
+    assert 'original_bytes="200000"' in instruction
+
+
+def test_build_diff_scope_instruction_lists_skipped_files_separately() -> None:
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="repo",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=[],
+        modified_files=["small.py", "binary.png"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["small.py", "binary.png"],
+        file_diffs=[
+            utils.FileDiffPayload(
+                path="small.py", content="@@ -1 +1 @@\n-a\n+b\n"
+            ),
+            utils.FileDiffPayload(
+                path="binary.png", content="", skipped_reason="binary_or_non_utf8"
+            ),
+        ],
+    )
+
+    instruction = utils.build_diff_scope_instruction([scope])
+
+    assert "<pr_diff>" in instruction
+    # Inlined file is in the diff block
+    assert '<file path="small.py">' in instruction
+    # Skipped file appears in the separate "NOT preloaded" list
+    assert "binary.png (reason: binary_or_non_utf8)" in instruction
+    # Skipped file should NOT be in the pr_diff block
+    pr_diff_start = instruction.find("<pr_diff>")
+    pr_diff_end = instruction.find("</pr_diff>")
+    pr_diff_block = instruction[pr_diff_start:pr_diff_end]
+    assert "binary.png" not in pr_diff_block
+
+
+def test_build_diff_scope_instruction_omits_pr_diff_block_when_all_skipped() -> None:
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="repo",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=[],
+        modified_files=["binary.png"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["binary.png"],
+        file_diffs=[
+            utils.FileDiffPayload(
+                path="binary.png", content="", skipped_reason="binary_or_non_utf8"
+            ),
+        ],
+    )
+
+    instruction = utils.build_diff_scope_instruction([scope])
+
+    # No pr_diff block when there's nothing to inline
+    assert "<pr_diff>" not in instruction
+    # But the skipped file is still listed
+    assert "binary.png (reason: binary_or_non_utf8)" in instruction
+
+
+def test_repo_diff_scope_to_metadata_reports_inline_truncated_skipped_counts() -> None:
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="repo",
+        base_ref="origin/main",
+        merge_base="abc",
+        added_files=[],
+        modified_files=["a.py", "b.py", "huge.py", "binary.png"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["a.py", "b.py", "huge.py", "binary.png"],
+        file_diffs=[
+            utils.FileDiffPayload(path="a.py", content="@@ -1 +1 @@\n-a\n+b"),
+            utils.FileDiffPayload(path="b.py", content="@@ -1 +1 @@\n-c\n+d"),
+            utils.FileDiffPayload(
+                path="huge.py", content="HEAD..TAIL", truncated=True, original_bytes=99999
+            ),
+            utils.FileDiffPayload(
+                path="binary.png", content="", skipped_reason="binary_or_non_utf8"
+            ),
+        ],
+    )
+
+    md = scope.to_metadata()
+
+    assert md["file_diffs_inlined_count"] == 3  # a.py, b.py, huge.py (truncated still inlined)
+    assert md["file_diffs_truncated_count"] == 1  # huge.py
+    assert md["file_diffs_skipped_count"] == 1  # binary.png
