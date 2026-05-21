@@ -32,7 +32,7 @@ RUN apt-get update && \
     golang-go \
     net-tools dnsutils whois \
     jq parallel ripgrep grep \
-    less man-db procps htop \
+    less procps htop \
     iproute2 iputils-ping netcat-traditional \
     nmap ncat ndiff \
     sqlmap nuclei subfinder naabu ffuf \
@@ -79,7 +79,8 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \
     go install -v github.com/projectdiscovery/cvemap/cmd/vulnx@latest && \
     go install -v github.com/jaeles-project/gospider@latest && \
-    go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+    go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+    go clean -modcache
 
 RUN nuclei -update-templates
 
@@ -165,7 +166,12 @@ USER root
 
 RUN apt-get autoremove -y && \
     apt-get autoclean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    # Purge non-English locales (~160MB)
+    find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
+        ! -name 'en' ! -name 'en_US' ! -name 'C' -exec rm -rf {} + && \
+    # Remove package documentation and man pages not needed at runtime (~95MB)
+    rm -rf /usr/share/doc/* /usr/share/doc-base/* /usr/share/man/*
 
 ENV PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:$PATH"
 ENV VIRTUAL_ENV="/app/.venv"
