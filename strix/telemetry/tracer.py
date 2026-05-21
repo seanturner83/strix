@@ -63,6 +63,14 @@ class Tracer:
 
         self.vulnerability_reports: list[dict[str, Any]] = []
         self.final_scan_result: str | None = None
+        # Canonical orchestrator-clean-exit signal. Set by the agent loop on
+        # clean exit (True) or on bail/abort (False). Stays None until set,
+        # in which case cleanup() falls back to the legacy heuristic
+        # (run_metadata.status / final_scan_result). Once set, this is the
+        # authoritative completion signal for session_meta + SARIF gating;
+        # see SEC-6635 for why final_scan_result alone is too brittle (a
+        # clean zero-findings scan never writes an Executive Summary).
+        self.orchestrator_success: bool | None = None
 
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
@@ -394,6 +402,16 @@ class Tracer:
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
 
+    def mark_orchestrator_success(self, success: bool) -> None:
+        """Record whether the orchestrator exited cleanly.
+
+        Called by the agent loop on clean exit (True) or on bail / abort
+        (False). Authoritative input to cleanup()'s `completed` decision —
+        avoids the brittle `bool(final_scan_result)` fallback which misses
+        clean zero-findings scans that never wrote an Executive Summary.
+        """
+        self.orchestrator_success = success
+
     def update_scan_final_fields(
         self,
         executive_summary: str,
@@ -428,6 +446,7 @@ class Tracer:
 """
 
         logger.info("Updated scan final fields")
+        self.orchestrator_success = True
         self._emit_event(
             "finding.reviewed",
             payload={
@@ -652,6 +671,21 @@ class Tracer:
                     penetration_test_report_file,
                 )
 
+            # Compute sorted_reports unconditionally so the SARIF emit below
+            # can fire even on a zero-findings scan. GHAS auto-closes prior
+            # alerts under tool.driver.name=Strix only when a new SARIF is
+            # uploaded for the same ref — without an empty-results SARIF for
+            # a clean re-scan, stale alerts persist and block PR merges (see
+            # SEC-6635, external-api#97).
+            severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+            sorted_reports = sorted(
+                self.vulnerability_reports,
+                key=lambda report: (
+                    severity_order.get(report["severity"], 5),
+                    report["timestamp"],
+                ),
+            )
+
             if self.vulnerability_reports:
                 vuln_dir = run_dir / "vulnerabilities"
                 vuln_dir.mkdir(exist_ok=True)
@@ -661,15 +695,6 @@ class Tracer:
                     for report in self.vulnerability_reports
                     if report["id"] not in self._saved_vuln_ids
                 ]
-
-                severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-                sorted_reports = sorted(
-                    self.vulnerability_reports,
-                    key=lambda report: (
-                        severity_order.get(report["severity"], 5),
-                        report["timestamp"],
-                    ),
-                )
 
                 for report in new_reports:
                     vuln_file = vuln_dir / f"{report['id']}.md"
@@ -776,9 +801,15 @@ class Tracer:
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
 
-                # SARIF 2.1.0 sidecar for machine-readable consumption (GitHub
-                # code-scanning upload-sarif, ASPM platforms, etc.). Emit-only;
-                # no behaviour change to existing outputs.
+            # SARIF 2.1.0 sidecar for machine-readable consumption (GitHub
+            # code-scanning upload-sarif, ASPM platforms, etc.). Emit only on
+            # completion — `mark_complete=True` is the contract for "this is
+            # the final state of the run". Always emit, even with zero
+            # findings: GHAS uses the absence of a previously-reported rule
+            # in a new SARIF for the same ref to auto-close stale alerts.
+            # Without this empty-results emit, a clean re-scan leaves prior
+            # alerts open and blocks PR merges (SEC-6635).
+            if mark_complete:
                 try:
                     write_sarif(run_dir, sorted_reports)
                 except Exception:  # noqa: BLE001
@@ -908,28 +939,40 @@ class Tracer:
                 "has_conversation_log": True,
             }
             write_session_meta(self.get_run_dir(), meta)
-        except Exception:
-            pass  # metadata is best-effort; never block a scan
+        except Exception:  # noqa: BLE001
+            # session_meta is the gate signal CI uses to decide whether to
+            # upload a (possibly empty) SARIF — silent failure here strands
+            # the run at status="running" and blocks the dismissal flow
+            # (SEC-6635). Log loudly; still don't block the scan itself.
+            logger.exception("Failed to write initial session_meta (non-fatal, but blocks CI gate)")
 
     def _finalize_session_meta(self, completed: bool) -> None:
         try:
             from strix.telemetry.session_meta import write_session_meta
 
+            # NB: per-agent `tool_executions` is a list[int] of execution
+            # IDs (see add_tool_execution); the real execution dicts live in
+            # self.tool_executions. The original genexpr tried `.get()` on
+            # those ints and failed with AttributeError, which was
+            # previously masked by bare `pass`. Iterate the canonical dict
+            # directly.
             write_session_meta(
                 self.get_run_dir(),
                 {
                     "status": "completed" if completed else "errored",
                     "ended_at": datetime.now(UTC).isoformat(),
                     "iteration_count": max(
-                        (a.get("iteration", 0) for ag in self.agents.values()
-                         for a in ag.get("tool_executions", [])), default=0
+                        (e.get("iteration", 0) for e in self.tool_executions.values()),
+                        default=0,
                     ),
                     "vulnerability_count": len(self.vulnerability_reports),
                     "agent_count": len(self.agents),
                 },
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            # Same rationale as _write_initial_session_meta — silent failure
+            # here is the SEC-6635 dismissal-flow blocker.
+            logger.exception("Failed to write final session_meta (non-fatal, but blocks CI gate)")
 
     def cleanup(self) -> None:
         # Idempotency guard: cleanup() is reachable from multiple paths
@@ -942,9 +985,18 @@ class Tracer:
             return
         self._cleanup_emitted = True
 
-        completed = self.run_metadata.get("status") == "completed" or bool(
-            self.final_scan_result
-        )
+        # Canonical signal: orchestrator_success, set by the agent loop on
+        # clean exit (True) or abort (False). Falls back to the legacy
+        # heuristic only when the caller hasn't explicitly marked the run
+        # (older code paths, ad-hoc Tracer instantiation in tests, etc.).
+        # Legacy heuristic is brittle for zero-findings clean exits — see
+        # SEC-6635 and mark_orchestrator_success().
+        if self.orchestrator_success is not None:
+            completed = self.orchestrator_success
+        else:
+            completed = self.run_metadata.get("status") == "completed" or bool(
+                self.final_scan_result
+            )
         if self._conversation_log is not None:
             try:
                 self._conversation_log.write_session_end(

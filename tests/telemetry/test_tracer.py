@@ -533,3 +533,196 @@ def test_cleanup_idempotency_does_not_block_save_run_data(monkeypatch, tmp_path)
     # Direct call after cleanup should still succeed (no exception).
     tracer.save_run_data(mark_complete=True)
     assert tracer.run_metadata["status"] == "completed"
+
+
+# ----------------------------------------------------------------------------
+# SEC-6635: SARIF emit on zero-findings + orchestrator_success completion signal.
+#
+# Background: prior tracer behaviour skipped SARIF emission entirely when
+# vulnerability_reports was empty. GHAS code-scanning needs a Strix-driver
+# SARIF (results may be []) to auto-close prior alerts under the same tool
+# name on the same ref. Without it, stale alerts persist and block PR merges
+# (concrete instance: seedcx/external-api#97 stuck on alerts #294 + #295).
+#
+# Also: the legacy `completed` heuristic in cleanup() relied on
+# `bool(final_scan_result)`, which misses clean zero-findings scans that
+# never write an Executive Summary. orchestrator_success is the explicit
+# signal the agent loop now sets on clean exit.
+# ----------------------------------------------------------------------------
+def test_save_run_data_emits_empty_sarif_on_zero_findings(monkeypatch, tmp_path) -> None:
+    """A completed scan with zero findings must still emit findings.sarif
+    with a Strix driver block + results=[] so GHAS can auto-close stale
+    alerts on the same ref."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("zero-findings")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "zero-findings"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    # No vulnerability_reports added — simulate a clean scan that found
+    # nothing. save_run_data(mark_complete=True) is the contract for
+    # "this is the final state of the run".
+    assert tracer.vulnerability_reports == []
+    tracer.save_run_data(mark_complete=True)
+
+    sarif_path = run_dir / "findings.sarif"
+    assert sarif_path.exists(), "findings.sarif must be written on completion even with zero findings"
+    doc = json.loads(sarif_path.read_text(encoding="utf-8"))
+    assert doc["version"] == "2.1.0"
+    assert doc["runs"][0]["tool"]["driver"]["name"] == "Strix"
+    assert doc["runs"][0]["results"] == []
+
+
+def test_save_run_data_skips_sarif_when_not_mark_complete(monkeypatch, tmp_path) -> None:
+    """Periodic save_run_data() calls during a scan (mark_complete=False)
+    must not emit SARIF — only the final completion writes it. Otherwise
+    a partial mid-scan SARIF could overwrite a populated one on rerun."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("periodic-save")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "periodic-save"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.save_run_data(mark_complete=False)
+    assert not (run_dir / "findings.sarif").exists()
+
+
+def test_orchestrator_success_true_overrides_legacy_heuristic(monkeypatch, tmp_path) -> None:
+    """A clean zero-findings exit with orchestrator_success=True must
+    report completed=True even though final_scan_result is None and
+    run_metadata.status was "running" when cleanup ran."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("clean-zero-findings")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "clean-zero-findings"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    # Agent loop reached clean exit but had nothing to report.
+    tracer.mark_orchestrator_success(True)
+    assert tracer.final_scan_result is None  # legacy heuristic would say errored
+    tracer.cleanup()
+
+    events = _read_session_end_events(run_dir)
+    assert len(events) == 1
+    assert events[0]["completed"] is True, (
+        "orchestrator_success=True must win over the legacy "
+        "bool(final_scan_result) heuristic for clean zero-findings exits"
+    )
+
+
+def test_orchestrator_success_false_overrides_legacy_heuristic(monkeypatch, tmp_path) -> None:
+    """An explicit orchestrator_success=False must report completed=False
+    even if final_scan_result happens to be populated (e.g. partial
+    summary written before abort)."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("aborted-with-summary")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "aborted-with-summary"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.final_scan_result = "# Partial summary written before abort"
+    tracer.mark_orchestrator_success(False)
+    tracer.cleanup()
+
+    events = _read_session_end_events(run_dir)
+    assert len(events) == 1
+    assert events[0]["completed"] is False, (
+        "orchestrator_success=False must override truthy final_scan_result"
+    )
+
+
+def test_orchestrator_success_unset_falls_back_to_legacy(monkeypatch, tmp_path) -> None:
+    """When the agent loop hasn't set orchestrator_success (older callers,
+    ad-hoc Tracer instantiation, etc.), cleanup() falls back to the
+    legacy run_metadata.status / final_scan_result heuristic — preserving
+    backward compatibility with the existing test_cleanup_* suite."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("legacy-unset")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "legacy-unset"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    assert tracer.orchestrator_success is None
+    tracer.final_scan_result = "# Executive Summary\n\nLegacy success path."
+    tracer.cleanup()
+
+    events = _read_session_end_events(run_dir)
+    assert len(events) == 1
+    assert events[0]["completed"] is True
+
+
+def test_finalize_session_meta_with_populated_tool_executions(monkeypatch, tmp_path) -> None:
+    """Regression: _finalize_session_meta computes iteration_count over
+    self.tool_executions.values() — not over per-agent tool_executions
+    (which is a list[int] of execution IDs, not dicts). The original
+    expression tried `.get("iteration")` on those ints and failed with
+    AttributeError; bare `pass` masked it in production. Surfaced once
+    the bare-pass was replaced with logger.exception (SEC-6635 dispatch
+    on external-api, run 26188539567)."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("finalize-iter-count")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "finalize-iter-count"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    # Mirror the production shape: agents indexed by int execution IDs
+    # into a separate tool_executions dict.
+    tracer.agents["agent-1"] = {"name": "subagent", "tool_executions": [1, 2, 3]}
+    tracer.tool_executions[1] = {"tool": "read", "iteration": 5}
+    tracer.tool_executions[2] = {"tool": "grep", "iteration": 7}
+    tracer.tool_executions[3] = {"tool": "edit", "iteration": 11}
+
+    # Must not raise. Side effect: session_meta.json gets written.
+    tracer.mark_orchestrator_success(True)
+    tracer._finalize_session_meta(True)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "completed"
+    assert meta["iteration_count"] == 11, (
+        f"iteration_count should be the max iteration across tool_executions; "
+        f"got {meta['iteration_count']}"
+    )
+
+
+def test_finalize_session_meta_with_no_tool_executions(monkeypatch, tmp_path) -> None:
+    """Empty tool_executions (e.g. scan exited before any tool ran) must
+    not raise; iteration_count defaults to 0."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("finalize-no-tools")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "finalize-no-tools"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    assert tracer.tool_executions == {}
+    tracer._finalize_session_meta(True)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["iteration_count"] == 0
+
+
+def test_update_scan_final_fields_sets_orchestrator_success(monkeypatch, tmp_path) -> None:
+    """The canonical 'scan finished cleanly' hook (update_scan_final_fields)
+    must set orchestrator_success=True so cleanup() reports completed=True
+    via the new signal, not just the legacy heuristic."""
+    monkeypatch.chdir(tmp_path)
+
+    tracer = Tracer("update-final-fields")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "update-final-fields"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    assert tracer.orchestrator_success is None
+    tracer.update_scan_final_fields(
+        executive_summary="Done.",
+        methodology="Read code.",
+        technical_analysis="N/A.",
+        recommendations="None.",
+    )
+    assert tracer.orchestrator_success is True
