@@ -39,6 +39,13 @@ class Config:
     perplexity_api_key = None
     strix_disable_browser = "false"
 
+    # PR diff-preload (inlines per-file unified-diff content into the agent's
+    # initial task description for diff-scope scans, eliminating sequential
+    # str_replace_editor view round-trips for changed files).
+    strix_diff_preload = "true"
+    strix_diff_preload_max_file_bytes = "51200"
+    strix_diff_preload_max_total_bytes = "204800"
+
     # Runtime Configuration
     strix_image = "ghcr.io/usestrix/strix-sandbox:0.1.13"
     strix_runtime_backend = "docker"

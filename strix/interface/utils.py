@@ -476,6 +476,24 @@ class DiffEntry:
 
 
 @dataclass
+class FileDiffPayload:
+    """Per-file unified-diff payload for inline preload into agent context.
+
+    `content` is the raw `git diff` patch text for the file. If the file's diff
+    exceeded the per-file byte cap, `content` is a head + tail truncation and
+    `truncated` is True with `original_bytes` recording the pre-truncation size.
+    If the file was skipped entirely (total cap exceeded), `content` is empty
+    and `skipped_reason` explains why; the agent falls back to existing tools.
+    """
+
+    path: str
+    content: str
+    truncated: bool = False
+    original_bytes: int = 0
+    skipped_reason: str | None = None
+
+
+@dataclass
 class RepoDiffScope:
     source_path: str
     workspace_subdir: str | None
@@ -487,6 +505,7 @@ class RepoDiffScope:
     deleted_files: list[str]
     analyzable_files: list[str]
     truncated_sections: dict[str, bool] = field(default_factory=dict)
+    file_diffs: list[FileDiffPayload] = field(default_factory=list)
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -505,6 +524,15 @@ class RepoDiffScope:
             "deleted_files_count": len(self.deleted_files),
             "analyzable_files_count": len(self.analyzable_files),
             "truncated_sections": self.truncated_sections,
+            "file_diffs_inlined_count": sum(
+                1 for fd in self.file_diffs if not fd.skipped_reason
+            ),
+            "file_diffs_truncated_count": sum(
+                1 for fd in self.file_diffs if fd.truncated and not fd.skipped_reason
+            ),
+            "file_diffs_skipped_count": sum(
+                1 for fd in self.file_diffs if fd.skipped_reason
+            ),
         }
 
 
@@ -535,6 +563,166 @@ def _run_git_command_raw(
         capture_output=True,
         check=check,
     )
+
+
+# Diff-preload defaults. Per-file 50KB head + tail truncation, total 200KB
+# inline cap across the whole PR. These are conservative against typical
+# Bedrock/Anthropic 200K context windows: a 50KB diff ≈ ~12K tokens, and the
+# 200K total leaves room for system prompt, tool definitions, and conversation
+# growth. Override via env vars; set STRIX_DIFF_PRELOAD=false to disable.
+DIFF_PRELOAD_DEFAULT_MAX_FILE_BYTES = 51_200
+DIFF_PRELOAD_DEFAULT_MAX_TOTAL_BYTES = 204_800
+
+
+def _diff_preload_enabled() -> bool:
+    from strix.config import Config
+
+    val = Config.get("strix_diff_preload")
+    if val is None:
+        return True
+    return val.lower() not in ("false", "0", "no", "off")
+
+
+def _diff_preload_max_file_bytes() -> int:
+    from strix.config import Config
+
+    raw = Config.get("strix_diff_preload_max_file_bytes")
+    if raw is None:
+        return DIFF_PRELOAD_DEFAULT_MAX_FILE_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DIFF_PRELOAD_DEFAULT_MAX_FILE_BYTES
+
+
+def _diff_preload_max_total_bytes() -> int:
+    from strix.config import Config
+
+    raw = Config.get("strix_diff_preload_max_total_bytes")
+    if raw is None:
+        return DIFF_PRELOAD_DEFAULT_MAX_TOTAL_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DIFF_PRELOAD_DEFAULT_MAX_TOTAL_BYTES
+
+
+def _truncate_diff_content(content: str, max_bytes: int) -> tuple[str, bool, int]:
+    """Apply head + tail truncation to one file's diff content.
+
+    Returns (truncated_text, was_truncated, original_byte_length).
+    Head 90% / tail 10% — head holds file header + first hunks, tail catches
+    end-of-file changes. Marker line preserves git-diff readability.
+    """
+    encoded = content.encode("utf-8")
+    original_bytes = len(encoded)
+    if original_bytes <= max_bytes or max_bytes <= 0:
+        return content, False, original_bytes
+
+    head_bytes = int(max_bytes * 0.9)
+    tail_bytes = max_bytes - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="replace")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="replace")
+    marker = (
+        f"\n[... diff truncated: showing first {head_bytes} and last {tail_bytes} "
+        f"bytes of {original_bytes}-byte diff (limit: {max_bytes}). "
+        "Use str_replace_editor view or git diff <path> for the full content if needed.]\n"
+    )
+    return head + marker + tail, True, original_bytes
+
+
+def _capture_file_diffs(
+    repo_path: Path, merge_base: str, files: list[str]
+) -> list[FileDiffPayload]:
+    """Capture per-file unified diffs against merge_base, applying size caps.
+
+    Files are processed in input order. Each file's diff is fetched via
+    `git diff <merge_base>...HEAD -- <path>` and truncated against the
+    per-file cap. Once the running total reaches the total-bytes cap, all
+    remaining files are added with skipped_reason='total_cap_exceeded' and
+    empty content.
+
+    Files that fail to diff (binary, encoding errors, etc.) get a payload
+    with skipped_reason set; the agent can still see the file is in the diff
+    and use existing tools to inspect it.
+    """
+    if not files or not _diff_preload_enabled():
+        return []
+
+    max_file = _diff_preload_max_file_bytes()
+    max_total = _diff_preload_max_total_bytes()
+    if max_file == 0 or max_total == 0:
+        return []
+
+    payloads: list[FileDiffPayload] = []
+    running_bytes = 0
+    for file_path in files:
+        if running_bytes >= max_total:
+            payloads.append(
+                FileDiffPayload(
+                    path=file_path,
+                    content="",
+                    skipped_reason="total_cap_exceeded",
+                )
+            )
+            continue
+
+        result = _run_git_command_raw(
+            repo_path,
+            [
+                "diff",
+                "--no-color",
+                "-U3",
+                f"{merge_base}...HEAD",
+                "--",
+                file_path,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            payloads.append(
+                FileDiffPayload(
+                    path=file_path,
+                    content="",
+                    skipped_reason="diff_failed",
+                )
+            )
+            continue
+
+        try:
+            content = result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            payloads.append(
+                FileDiffPayload(
+                    path=file_path,
+                    content="",
+                    skipped_reason="binary_or_non_utf8",
+                )
+            )
+            continue
+
+        if not content.strip():
+            # Genuinely empty diff (rare — e.g. mode-only change). Skip silently.
+            continue
+
+        # Per-file cap: budget for this file is min(per-file cap, remaining-of-total).
+        per_file_budget = min(max_file, max_total - running_bytes)
+        truncated_content, was_truncated, original_bytes = _truncate_diff_content(
+            content, per_file_budget
+        )
+
+        payload_bytes = len(truncated_content.encode("utf-8"))
+        running_bytes += payload_bytes
+        payloads.append(
+            FileDiffPayload(
+                path=file_path,
+                content=truncated_content,
+                truncated=was_truncated,
+                original_bytes=original_bytes,
+            )
+        )
+
+    return payloads
 
 
 def _is_ci_environment(env: dict[str, str]) -> bool:
@@ -889,6 +1077,34 @@ def build_diff_scope_instruction(scopes: list[RepoDiffScope]) -> str:  # noqa: P
             if deleted_truncated:
                 lines.append(f"- ... ({len(scope.deleted_files) - len(deleted_files)} more files)")
 
+        if scope.file_diffs:
+            inlined = [fd for fd in scope.file_diffs if not fd.skipped_reason]
+            skipped = [fd for fd in scope.file_diffs if fd.skipped_reason]
+            if inlined:
+                lines.append("")
+                lines.append(
+                    "Pull-request diff content (preloaded — review this before opening "
+                    "individual files):"
+                )
+                lines.append("<pr_diff>")
+                for fd in inlined:
+                    truncated_attr = ' truncated="true"' if fd.truncated else ""
+                    original_attr = (
+                        f' original_bytes="{fd.original_bytes}"' if fd.truncated else ""
+                    )
+                    lines.append(f'<file path="{fd.path}"{truncated_attr}{original_attr}>')
+                    lines.append(fd.content.rstrip())
+                    lines.append("</file>")
+                lines.append("</pr_diff>")
+            if skipped:
+                lines.append("")
+                lines.append(
+                    "Files in this PR whose diff was NOT preloaded (use str_replace_editor "
+                    "view or git diff to inspect if needed):"
+                )
+                for fd in skipped:
+                    lines.append(f"- {fd.path} (reason: {fd.skipped_reason})")
+
     return "\n".join(lines).strip()
 
 
@@ -972,6 +1188,10 @@ def _resolve_repo_diff_scope(
     entries = _parse_name_status_z(diff_result.stdout)
     classified = _classify_diff_entries(entries)
 
+    file_diffs = _capture_file_diffs(
+        repo_path, merge_base, classified["analyzable_files"]
+    )
+
     return RepoDiffScope(
         source_path=source_path,
         workspace_subdir=workspace_subdir,
@@ -982,6 +1202,7 @@ def _resolve_repo_diff_scope(
         renamed_files=classified["renamed_files"],
         deleted_files=classified["deleted_files"],
         analyzable_files=classified["analyzable_files"],
+        file_diffs=file_diffs,
     )
 
 
