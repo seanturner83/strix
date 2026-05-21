@@ -412,6 +412,7 @@ def create_agent(
         scan_mode = "deep"
         is_whitebox = False
         interactive = False
+        tool_mode: str | None = None
         if parent_agent and hasattr(parent_agent, "llm_config"):
             if hasattr(parent_agent.llm_config, "timeout"):
                 timeout = parent_agent.llm_config.timeout
@@ -420,6 +421,7 @@ def create_agent(
             if hasattr(parent_agent.llm_config, "is_whitebox"):
                 is_whitebox = parent_agent.llm_config.is_whitebox
             interactive = getattr(parent_agent.llm_config, "interactive", False)
+            tool_mode = getattr(parent_agent.llm_config, "tool_mode", None)
 
         if is_whitebox:
             whitebox_guidance = (
@@ -438,6 +440,18 @@ def create_agent(
             if "White-box execution guidance (recommended when source is available):" not in task:
                 task = f"{task.rstrip()}{whitebox_guidance}"
 
+        if tool_mode == "parallel":
+            parallel_guidance = (
+                "\n\nPARALLEL MODE — when fanning out, USE the batch_* tools:\n"
+                "- batch_terminal_execute(commands=[...]) for independent shell commands.\n"
+                "- batch_view_files(views=[...]) when reading more than one file.\n"
+                "- batch_list_files(paths=[...]) when listing more than one directory.\n"
+                "- batch_search_files(searches=[...]) when grepping for more than one pattern.\n"
+                "Pass N items where N matches need (up to 8). Default to batch_* whenever about to do the same read twice in a row."
+            )
+            if "PARALLEL MODE — when fanning out" not in task:
+                task = f"{task.rstrip()}{parallel_guidance}"
+
         state = AgentState(
             task=task,
             agent_name=name,
@@ -445,13 +459,16 @@ def create_agent(
             max_iterations=300,
             waiting_timeout=300 if interactive else 600,
         )
-        llm_config = LLMConfig(
-            skills=skill_list,
-            timeout=timeout,
-            scan_mode=scan_mode,
-            is_whitebox=is_whitebox,
-            interactive=interactive,
-        )
+        llm_config_kwargs: dict[str, Any] = {
+            "skills": skill_list,
+            "timeout": timeout,
+            "scan_mode": scan_mode,
+            "is_whitebox": is_whitebox,
+            "interactive": interactive,
+        }
+        if tool_mode is not None:
+            llm_config_kwargs["tool_mode"] = tool_mode
+        llm_config = LLMConfig(**llm_config_kwargs)
 
         agent_config = {
             "llm_config": llm_config,

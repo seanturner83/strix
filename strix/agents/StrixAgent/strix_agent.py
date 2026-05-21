@@ -148,4 +148,18 @@ class StrixAgent(BaseAgent):
         if user_instructions:
             task_description += f"\n\nSpecial instructions: {user_instructions}"
 
+        if getattr(self.llm_config, "tool_mode", "serial") == "parallel":
+            task_description += (
+                "\n\nPARALLEL MODE — when fanning out, USE the batch_* tools:\n"
+                "- batch_terminal_execute(commands=[...]) is the biggest wall-clock saver. "
+                "Whenever you would run more than one independent shell command in series "
+                "(e.g. semgrep + gitleaks + trufflehog, or multiple semgrep configs, or git "
+                "metadata sweeps), run them all in one batch_terminal_execute call.\n"
+                "- batch_view_files(views=[...]) when reading more than one file.\n"
+                "- batch_list_files(paths=[...]) when listing more than one directory.\n"
+                "- batch_search_files(searches=[...]) when grepping for more than one pattern.\n"
+                "Sizing: pass N where N matches your actual need (up to 8). Don't pad. Don't shrink to N=3.\n"
+                "Default to the batch tool whenever you catch yourself about to do the same kind of read twice in a row."
+            )
+
         return await self.agent_loop(task=task_description)
