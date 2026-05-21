@@ -11,29 +11,46 @@ from strix.config.config import Config, resolve_llm_config
 logger = logging.getLogger(__name__)
 
 
-def _is_known_bedrock_content_filtered_bug(exc: ValidationError) -> bool:
+def _is_known_bedrock_content_filtered_bug(exc: BaseException) -> bool:
     """Detect the known LiteLLM ↔ Bedrock Converse enum mismatch.
 
     Bedrock's Converse API returns `stopReason: "content_filtered"` when
     Anthropic guardrails trip. LiteLLM 1.81.x (and upstream main as of
     2026-05-21) only accepts `"content_filter"` (no `d`) in its
     `OpenAIChatCompletionFinishReason` Literal, so the response fails
-    Pydantic validation and the entire memory-compression call dies even
-    though the underlying scan is unaffected. Filed against LiteLLM (TODO
-    link); patch upstream is a one-dict-entry addition.
+    Pydantic validation. LiteLLM then wraps the ValidationError as
+    `litellm.exceptions.APIConnectionError` before it propagates to our
+    `_summarize_messages` call site — see strix-targeted-rescan run
+    26242905324 (cc-apps infra scan) where the wrapping caused this
+    detector to miss in production despite passing in unit tests that
+    raised ValidationError directly.
 
-    Until then, treat this specific shape as a known no-op: skip
-    compression this round, scan continues. Other Pydantic errors stay
-    loud so we don't mask new bugs.
+    Detector is exception-type-agnostic: inspects str(exc) for the
+    `finish_reason` + `literal_error` + `content_filtered` signature.
+    Catches both the bare Pydantic form (rare — only in tests / direct
+    construction) and the LiteLLM-wrapped form (the actual prod shape).
+    Other ValidationErrors / APIConnectionErrors stay loud.
     """
-    for err in exc.errors():
-        if (
-            err.get("type") == "literal_error"
-            and err.get("loc") == ("finish_reason",)
-            and err.get("input") == "content_filtered"
-        ):
-            return True
-    return False
+    # Fast path: bare Pydantic ValidationError exposes structured .errors().
+    if isinstance(exc, ValidationError):
+        for err in exc.errors():
+            if (
+                err.get("type") == "literal_error"
+                and err.get("loc") == ("finish_reason",)
+                and err.get("input") == "content_filtered"
+            ):
+                return True
+        return False
+    # Wrapped form (LiteLLM APIConnectionError or any other re-raise that
+    # preserves the original Pydantic message): match on the signature
+    # substring. All three tokens must appear so we don't match unrelated
+    # APIConnectionErrors that happen to mention one of these words.
+    msg = str(exc)
+    return (
+        "literal_error" in msg
+        and "finish_reason" in msg
+        and "content_filtered" in msg
+    )
 
 
 DEFAULT_MAX_TOTAL_TOKENS = 100_000
@@ -176,19 +193,22 @@ def _summarize_messages(
             "role": "user",
             "content": summary_msg.format(count=len(messages), text=summary),
         }
-    except ValidationError as exc:
+    except Exception as exc:
+        # The known LiteLLM ↔ Bedrock Converse content_filtered enum mismatch
+        # can surface in two shapes:
+        #   - Direct pydantic.ValidationError (rare; mostly in tests)
+        #   - litellm.exceptions.APIConnectionError wrapping the ValidationError
+        #     message (the actual production shape — observed on
+        #     strix-targeted-rescan run 26242905324 / cc-apps infra scan)
+        # The detector inspects either form and returns True only for the
+        # exact signature. Anything else falls through to the loud log.
         if _is_known_bedrock_content_filtered_bug(exc):
-            # Known upstream LiteLLM gap — log a one-liner instead of the
-            # full traceback so it doesn't drown the scan log.
             logger.info(
                 "Skipping memory compression this round: Bedrock returned "
                 "stopReason=content_filtered, which LiteLLM's finish_reason "
                 "Literal doesn't accept. Known issue, scan continues."
             )
             return messages[0]
-        logger.exception("Failed to summarize messages")
-        return messages[0]
-    except Exception:
         logger.exception("Failed to summarize messages")
         return messages[0]
 
