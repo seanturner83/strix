@@ -5,6 +5,9 @@ from strix.config.config import resolve_llm_config
 from strix.llm.utils import resolve_strix_model
 
 
+VALID_TOOL_MODES = ("serial", "parallel")
+
+
 class LLMConfig:
     def __init__(
         self,
@@ -18,6 +21,7 @@ class LLMConfig:
         reasoning_effort: str | None = None,
         system_prompt_context: dict[str, Any] | None = None,
         role: str | None = None,
+        tool_mode: str | None = None,
     ):
         self.role = role
         resolved_model, self.api_key, self.api_base = resolve_llm_config(role=role)
@@ -40,3 +44,12 @@ class LLMConfig:
         self.interactive = interactive
         self.reasoning_effort = reasoning_effort
         self.system_prompt_context = system_prompt_context or {}
+
+        if tool_mode is None:
+            tool_mode = Config.get("strix_tool_mode") or "serial"
+        if tool_mode not in VALID_TOOL_MODES:
+            raise ValueError(
+                f"Invalid tool_mode: {tool_mode!r}. "
+                f"Expected one of {VALID_TOOL_MODES}."
+            )
+        self.tool_mode = tool_mode

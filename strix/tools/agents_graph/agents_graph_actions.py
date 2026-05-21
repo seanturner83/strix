@@ -298,7 +298,7 @@ def _run_agent_in_thread(
         return {"result": result}
 
 
-@register_tool(sandbox_execution=False)
+@register_tool(sandbox_execution=False, parallel_safe=True)
 def view_agent_graph(agent_state: Any) -> dict[str, Any]:
     try:
         structure_lines = ["=== AGENT GRAPH STRUCTURE ==="]
@@ -412,6 +412,7 @@ def create_agent(
         scan_mode = "deep"
         is_whitebox = False
         interactive = False
+        tool_mode: str | None = None
         if parent_agent and hasattr(parent_agent, "llm_config"):
             if hasattr(parent_agent.llm_config, "timeout"):
                 timeout = parent_agent.llm_config.timeout
@@ -420,6 +421,7 @@ def create_agent(
             if hasattr(parent_agent.llm_config, "is_whitebox"):
                 is_whitebox = parent_agent.llm_config.is_whitebox
             interactive = getattr(parent_agent.llm_config, "interactive", False)
+            tool_mode = getattr(parent_agent.llm_config, "tool_mode", None)
 
         if is_whitebox:
             whitebox_guidance = (
@@ -438,6 +440,24 @@ def create_agent(
             if "White-box execution guidance (recommended when source is available):" not in task:
                 task = f"{task.rstrip()}{whitebox_guidance}"
 
+        if tool_mode == "parallel":
+            parallel_guidance = (
+                "\n\nPARALLEL MODE — tool batching guidance:\n"
+                "Still ONE tool call per message. The parallelism comes from inside the "
+                "batch_* tools (a list parameter), NOT from emitting multiple <function> "
+                "blocks per turn. Do NOT emit multiple <function> blocks in one message.\n\n"
+                "When you would otherwise issue 2+ similar tool calls in a row, issue ONE "
+                "batch_* call instead with a list:\n"
+                "- batch_terminal_execute(commands=[...]) for independent shell commands.\n"
+                "- batch_view_files(views=[{path}, ...]) when reading 2+ files.\n"
+                "- batch_list_files(paths=[...]) when listing 2+ directories.\n"
+                "- batch_search_files(searches=[{path,regex}, ...]) when grepping 2+ patterns.\n\n"
+                "Cap N at 8 per call. For single items use the plain non-batch tool — don't "
+                "wrap one item in a batch_*."
+            )
+            if "PARALLEL MODE — tool batching guidance" not in task:
+                task = f"{task.rstrip()}{parallel_guidance}"
+
         state = AgentState(
             task=task,
             agent_name=name,
@@ -445,14 +465,17 @@ def create_agent(
             max_iterations=300,
             waiting_timeout=300 if interactive else 600,
         )
-        llm_config = LLMConfig(
-            skills=skill_list,
-            timeout=timeout,
-            scan_mode=scan_mode,
-            is_whitebox=is_whitebox,
-            interactive=interactive,
-            role="subagent",
-        )
+        llm_config_kwargs: dict[str, Any] = {
+            "skills": skill_list,
+            "timeout": timeout,
+            "scan_mode": scan_mode,
+            "is_whitebox": is_whitebox,
+            "interactive": interactive,
+            "role": "subagent",
+        }
+        if tool_mode is not None:
+            llm_config_kwargs["tool_mode"] = tool_mode
+        llm_config = LLMConfig(**llm_config_kwargs)
 
         agent_config = {
             "llm_config": llm_config,

@@ -503,6 +503,7 @@ class Tracer:
         agent_id: str,
         tool_name: str,
         args: dict[str, Any],
+        batch_id: str | None = None,
     ) -> int:
         execution_id = self._next_execution_id
         self._next_execution_id += 1
@@ -513,6 +514,7 @@ class Tracer:
             "agent_id": agent_id,
             "tool_name": tool_name,
             "args": args,
+            "batch_id": batch_id,
             "status": "running",
             "result": None,
             "timestamp": now,
@@ -531,8 +533,9 @@ class Tracer:
                 "agent_id": agent_id,
                 "tool_name": tool_name,
                 "execution_id": execution_id,
+                "batch_id": batch_id,
             },
-            payload={"args": args},
+            payload={"args": args, "batch_id": batch_id},
             status="running",
             source="strix.tools",
         )

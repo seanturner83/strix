@@ -148,4 +148,29 @@ class StrixAgent(BaseAgent):
         if user_instructions:
             task_description += f"\n\nSpecial instructions: {user_instructions}"
 
+        if getattr(self.llm_config, "tool_mode", "serial") == "parallel":
+            task_description += (
+                "\n\nPARALLEL MODE — tool batching guidance:\n"
+                "Still ONE tool call per message. The parallelism comes from inside the "
+                "batch_* tools (a list parameter), NOT from emitting multiple <function> "
+                "blocks per turn. Do NOT emit multiple <function> blocks in one message — "
+                "that produces a flood and many of them won't actually run in parallel.\n\n"
+                "When you would otherwise issue two or more similar tool calls in a row, "
+                "issue ONE batch_* call instead with a list:\n"
+                "- batch_terminal_execute(commands=[...]) for independent shell commands "
+                "(semgrep + gitleaks + trufflehog; multiple semgrep configs; multiple git "
+                "sweeps). This is the biggest wall-clock saver because each command takes "
+                "30-90s otherwise.\n"
+                "- batch_view_files(views=[{path}, ...]) when reading 2+ files.\n"
+                "- batch_list_files(paths=[...]) when listing 2+ directories.\n"
+                "- batch_search_files(searches=[{path,regex}, ...]) when grepping 2+ patterns.\n\n"
+                "Sizing: pass N items per call where N matches your actual need, capped at 8. "
+                "If you truly need 12, do two batches of 6 across two turns — not one giant "
+                "batch and not one tool flood. Don't pad to look batchy. Don't shrink to "
+                "match an example.\n\n"
+                "Single tool calls (one path, one command, one search) stay as plain "
+                "list_files / terminal_execute / etc. Don't wrap a single item in a batch_* "
+                "tool — that's overhead with no benefit."
+            )
+
         return await self.agent_loop(task=task_description)

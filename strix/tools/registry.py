@@ -193,6 +193,7 @@ def register_tool(
     sandbox_execution: bool = True,
     requires_browser_mode: bool = False,
     requires_web_search_mode: bool = False,
+    parallel_safe: bool = False,
 ) -> Callable[..., Any]:
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
         if not _should_register_tool(
@@ -208,6 +209,7 @@ def register_tool(
             "function": f,
             "module": _get_module_name(f),
             "sandbox_execution": sandbox_execution,
+            "parallel_safe": parallel_safe,
         }
 
         if not sandbox_mode:
@@ -268,6 +270,14 @@ def needs_agent_state(tool_name: str) -> bool:
         return False
     sig = signature(tool_func)
     return "agent_state" in sig.parameters
+
+
+def is_tool_parallel_safe(tool_name: str) -> bool:
+    """True if the tool is side-effect-free and safe to run concurrently with siblings."""
+    for tool in tools:
+        if tool.get("name") == tool_name:
+            return bool(tool.get("parallel_safe", False))
+    return False
 
 
 def should_execute_in_sandbox(tool_name: str) -> bool:

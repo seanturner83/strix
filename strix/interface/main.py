@@ -383,6 +383,21 @@ Examples:
     )
 
     parser.add_argument(
+        "--tool-mode",
+        type=str,
+        choices=["serial", "parallel"],
+        default=None,
+        help=(
+            "Tool execution mode: "
+            "'serial' emits one tool call per agent turn; "
+            "'parallel' lets the agent batch multiple side-effect-free tool "
+            "calls in a single turn for faster scans. "
+            "Precedence: this flag > STRIX_TOOL_MODE env var > 'serial' default. "
+            "Omit to honour STRIX_TOOL_MODE."
+        ),
+    )
+
+    parser.add_argument(
         "--scope-mode",
         type=str,
         choices=["auto", "diff", "full"],

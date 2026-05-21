@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Literal
 
 from strix.tools.registry import register_tool
@@ -6,7 +7,56 @@ from strix.tools.registry import register_tool
 RequestPart = Literal["request", "response"]
 
 
-@register_tool
+@register_tool(parallel_safe=True)
+async def batch_view_request(
+    requests: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """View multiple captured requests/responses concurrently.
+
+    Each entry in `requests` is a dict with keys: request_id (required),
+    part (optional, "request" or "response", default "request"),
+    search_pattern (optional), page (optional, default 1),
+    page_size (optional, default 50).
+    """
+    if not requests:
+        return {"error": "requests must be a non-empty list"}
+
+    if not isinstance(requests, list):
+        return {"error": f"requests must be a list, got {type(requests).__name__}"}
+
+    for i, entry in enumerate(requests):
+        if not isinstance(entry, dict):
+            return {"error": f"requests[{i}] must be a dict"}
+        if "request_id" not in entry:
+            return {"error": f"requests[{i}] missing required key 'request_id'"}
+
+    results = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                view_request,
+                request_id=r["request_id"],
+                part=r.get("part", "request"),
+                search_pattern=r.get("search_pattern"),
+                page=r.get("page", 1),
+                page_size=r.get("page_size", 50),
+            )
+            for r in requests
+        ],
+        return_exceptions=True,
+    )
+
+    out: list[dict[str, Any]] = []
+    for entry, result in zip(requests, results, strict=True):
+        item = {"request_id": entry["request_id"], "part": entry.get("part", "request")}
+        if isinstance(result, BaseException):
+            item["error"] = f"{type(result).__name__}: {result!s}"
+        else:
+            item.update(result if isinstance(result, dict) else {"output": str(result)})
+        out.append(item)
+    return {"results": out, "count": len(requests)}
+
+
+@register_tool(parallel_safe=True)
 def list_requests(
     httpql_filter: str | None = None,
     start_page: int = 1,
@@ -33,7 +83,7 @@ def list_requests(
     )
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def view_request(
     request_id: str,
     part: RequestPart = "request",
@@ -90,7 +140,7 @@ def scope_rules(
     return manager.scope_rules(action, allowlist, denylist, scope_id, scope_name)
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def list_sitemap(
     scope_id: str | None = None,
     parent_id: str | None = None,
@@ -103,7 +153,7 @@ def list_sitemap(
     return manager.list_sitemap(scope_id, parent_id, depth, page)
 
 
-@register_tool
+@register_tool(parallel_safe=True)
 def view_sitemap_entry(
     entry_id: str,
 ) -> dict[str, Any]:

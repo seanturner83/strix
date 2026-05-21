@@ -128,6 +128,7 @@ class LLM:
                 get_tools_prompt=get_tools_prompt,
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
+                tool_mode=self.config.tool_mode,
                 system_prompt_context=self._system_prompt_context,
                 **skill_content,
             )
@@ -267,9 +268,17 @@ class LLM:
             delta = self._get_chunk_content(chunk)
             if delta:
                 accumulated += delta
+                # In both modes, stop streaming as soon as the first tool call closes.
+                # Parallel mode achieves concurrency via batch_* tools (which take a
+                # list parameter), NOT via multiple <function> blocks in one message.
+                # Sandbox tool-server semantics serialise concurrent same-agent calls
+                # anyway (per-agent task cancellation), so multi-block emission was
+                # at best no-op and at worst encouraged tool floods.
                 check_content = _THINKING_BLOCK_OR_OPEN_RE.sub("", accumulated)
                 if "</function>" in check_content or "</invoke>" in check_content:
-                    end_tag = "</function>" if "</function>" in check_content else "</invoke>"
+                    end_tag = (
+                        "</function>" if "</function>" in check_content else "</invoke>"
+                    )
                     pos = _find_end_tag_outside_thinking(accumulated, end_tag)
                     accumulated = accumulated[: pos + len(end_tag)]
                     yield LLMResponse(content=accumulated)
