@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -7,6 +8,34 @@ import litellm
 from pydantic import ValidationError
 
 from strix.config.config import Config, resolve_llm_config
+
+
+_TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_TRANSIENT_MESSAGE_MARKERS = (
+    "serviceunavailable",
+    "throttl",
+    "ratelimit",
+    "rate limit",
+    "toomanyrequests",
+    "too many requests",
+)
+
+
+def _is_transient_bedrock_error(exc: BaseException) -> bool:
+    """Heuristic: Bedrock capacity / throttling errors that warrant a retry.
+
+    Compressor calls go through litellm's sync path (not the orchestrator's
+    streaming path), so we can't reuse `LLM._should_retry`. Match by status
+    code first; fall back to message-substring checks for cases where the
+    status code isn't surfaced on the exception (we've seen both shapes).
+    """
+    code = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if code in _TRANSIENT_HTTP_CODES:
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TRANSIENT_MESSAGE_MARKERS)
 
 
 UsageCallback = Callable[[Any, str], None]
@@ -164,15 +193,47 @@ def _summarize_messages(
         # The abandoned future's HTTP call continues in the background thread
         # until the AWS SDK gives up, but we return to the caller promptly
         # and the fallback path logs the failure and returns messages[0].
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(litellm.completion, **completion_args)
+        #
+        # Retry on transient Bedrock errors (503/429/throttling). Without
+        # this, a single capacity blip during a Sonnet-as-compressor run
+        # silently drops the chunk to messages[0], losing 9/10 messages of
+        # context. Budget: 4 attempts, 2s/4s/8s backoff (~14s ceiling).
+        # Wall-clock TimeoutError isn't retried (would compound the budget).
+        max_attempts = 4
+        last_exc: BaseException | None = None
+        response = None
+        for attempt in range(max_attempts):
             try:
-                response = future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError as exc:
-                raise TimeoutError(
-                    f"memory_compressor: litellm.completion exceeded "
-                    f"{timeout}s wall-clock budget"
-                ) from exc
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(litellm.completion, **completion_args)
+                    try:
+                        response = future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError as exc:
+                        raise TimeoutError(
+                            f"memory_compressor: litellm.completion exceeded "
+                            f"{timeout}s wall-clock budget"
+                        ) from exc
+                break
+            except TimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < max_attempts - 1 and _is_transient_bedrock_error(exc):
+                    wait = min(30, 2 * (2 ** attempt))
+                    logger.info(
+                        "Compressor transient %s on attempt %d/%d; retrying in %ds",
+                        type(exc).__name__,
+                        attempt + 1,
+                        max_attempts,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+        else:
+            if last_exc is not None:
+                raise last_exc
+        assert response is not None  # noqa: S101 (loop guarantees on success)
 
         if on_usage is not None:
             try:

@@ -185,7 +185,11 @@ class LLM:
         self, conversation_history: list[dict[str, Any]]
     ) -> AsyncIterator[LLMResponse]:
         messages = self._prepare_messages(conversation_history)
-        max_retries = int(Config.get("strix_llm_max_retries") or "5")
+        # Default 8 retries with the existing exp backoff (cap raised below)
+        # gives ~5min of cumulative wait, which rides out typical Bedrock
+        # capacity blips on hot models (e.g. Sonnet 4.6 immediately post-
+        # release). Configurable via STRIX_LLM_MAX_RETRIES.
+        max_retries = int(Config.get("strix_llm_max_retries") or "8")
 
         bad_request_retried = False
         transient_thinking_retries = 0
@@ -238,7 +242,10 @@ class LLM:
                         continue
                 if attempt >= max_retries or not self._should_retry(e):
                     self._raise_error(e)
-                wait = min(90, 2 * (2**attempt))
+                # Cap at 120s (was 90) so attempt-6+ contributes meaningful
+                # wait time during prolonged Bedrock throttling rather than
+                # spinning at the cap.
+                wait = min(120, 2 * (2**attempt))
                 await asyncio.sleep(wait)
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[LLMResponse]:
