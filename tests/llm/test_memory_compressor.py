@@ -68,7 +68,7 @@ def test_summarize_messages_returns_fallback_on_content_filtered(
     import strix.llm.memory_compressor as mc
     monkeypatch.setattr(mc.litellm, "completion", raise_content_filtered)
     monkeypatch.setattr(
-        mc, "resolve_llm_config", lambda: (None, None, None)
+        mc, "resolve_llm_config", lambda **kwargs: (None, None, None)
     )
 
     messages = [{"role": "user", "content": "hello"}]
@@ -90,7 +90,7 @@ def test_summarize_messages_logs_known_bug_at_info_not_exception(
     import strix.llm.memory_compressor as mc
     monkeypatch.setattr(mc.litellm, "completion", raise_content_filtered)
     monkeypatch.setattr(
-        mc, "resolve_llm_config", lambda: (None, None, None)
+        mc, "resolve_llm_config", lambda **kwargs: (None, None, None)
     )
 
     messages = [{"role": "user", "content": "hello"}]
@@ -121,7 +121,7 @@ def test_summarize_messages_still_loud_on_unknown_validation_error(
     import strix.llm.memory_compressor as mc
     monkeypatch.setattr(mc.litellm, "completion", raise_other)
     monkeypatch.setattr(
-        mc, "resolve_llm_config", lambda: (None, None, None)
+        mc, "resolve_llm_config", lambda **kwargs: (None, None, None)
     )
 
     messages = [{"role": "user", "content": "hello"}]
