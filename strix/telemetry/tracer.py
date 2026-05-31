@@ -110,6 +110,17 @@ class Tracer:
         self.vulnerability_found_callback: Callable[[dict[str, Any]], None] | None = None
 
         self._setup_telemetry()
+        # SEC-6802: rehydrate per-iteration state from disk if the run dir
+        # already exists with persisted findings. Strix's --continue resume
+        # path reconstructs AgentState (messages + iteration) from
+        # conversation.jsonl but doesn't touch the Tracer's structured
+        # vulnerability_reports view. Without this rehydration each
+        # resumed iteration starts with an empty in-memory finding list,
+        # so add_vulnerability_report assigns colliding IDs and the final
+        # SARIF emit sees only the last iteration's runs. By reading the
+        # canonical on-disk index (vulnerabilities.csv + per-finding .md)
+        # at init, we make multi-iteration scans correctly cumulative.
+        self._rehydrate_findings_from_disk()
         self._emit_run_started_event()
 
     @property
@@ -325,6 +336,151 @@ class Tracer:
             self._run_dir.mkdir(exist_ok=True)
 
         return self._run_dir
+
+    def _rehydrate_findings_from_disk(self) -> None:
+        """Populate vulnerability_reports + _saved_vuln_ids from on-disk
+        artefacts when the run dir already has them (SEC-6802).
+
+        Resume path (--continue) creates a fresh Tracer for the new
+        iteration. ResumeBundle reconstructs AgentState (messages,
+        iteration, context) from conversation.jsonl but doesn't restore
+        the findings index. Without rehydration, the new iteration's
+        add_vulnerability_report calls would assign vuln-0001 again
+        (colliding with iteration 1's writeup) and the final SARIF emit
+        would see only this iteration's reports.
+
+        Rehydration source-of-truth is vulnerabilities.csv — it's the
+        compact structured index already maintained by save_run_data on
+        every report. Per-finding .md files supply the body content for
+        the in-memory dict shape that add_vulnerability_report would
+        produce. Fields the SARIF emitter cares about (id, title,
+        severity, cwe, cvss, target, endpoint) round-trip cleanly;
+        code_locations doesn't round-trip from markdown and is left
+        unset — those findings appear in
+        properties.locationlessFindings on emit, same as natively
+        locationless ones.
+
+        Best-effort: any parse failure on individual writeups logs a
+        warning and continues. Missing CSV or missing run dir → no-op.
+        """
+        run_dir = self._compute_run_dir_if_exists()
+        if run_dir is None:
+            return
+
+        csv_path = run_dir / "vulnerabilities.csv"
+        vuln_dir = run_dir / "vulnerabilities"
+        if not csv_path.exists() or not vuln_dir.is_dir():
+            return
+
+        import csv as _csv
+
+        rehydrated: list[dict[str, Any]] = []
+        try:
+            with csv_path.open(encoding="utf-8", newline="") as fh:
+                rows = list(_csv.DictReader(fh))
+        except OSError:
+            logger.exception("Failed to read vulnerabilities.csv during rehydration")
+            return
+
+        for row in rows:
+            vuln_id = row.get("id")
+            if not vuln_id:
+                continue
+            md_path = run_dir / (row.get("file") or f"vulnerabilities/{vuln_id}.md")
+            try:
+                report = self._parse_writeup_to_report(md_path, row)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "SEC-6802: failed to rehydrate %s from %s (continuing); "
+                    "the finding will be missing from this iteration's "
+                    "Tracer view but stays on disk",
+                    vuln_id, md_path,
+                )
+                continue
+            rehydrated.append(report)
+            self._saved_vuln_ids.add(vuln_id)
+
+        if rehydrated:
+            self.vulnerability_reports = rehydrated
+            logger.info(
+                "SEC-6802: rehydrated %d vulnerability report(s) from %s",
+                len(rehydrated), csv_path,
+            )
+
+    def _compute_run_dir_if_exists(self) -> Path | None:
+        """Return the run dir Path if it already exists on disk, else None.
+        Unlike get_run_dir() this does NOT create the directory — we
+        only want to rehydrate from a pre-existing run dir."""
+        if self._run_dir is not None and self._run_dir.exists():
+            return self._run_dir
+        runs_dir = Path.cwd() / "strix_runs"
+        if not runs_dir.exists():
+            return None
+        run_dir_name = self.run_name if self.run_name else self.run_id
+        candidate = runs_dir / run_dir_name
+        return candidate if candidate.exists() else None
+
+    @staticmethod
+    def _parse_writeup_to_report(
+        md_path: Path, csv_row: dict[str, str]
+    ) -> dict[str, Any]:
+        """Parse a vulnerabilities/vuln-XXXX.md back into a report dict
+        matching add_vulnerability_report's output shape (the subset of
+        fields SARIF emission cares about).
+
+        CSV row supplies id + title + severity + timestamp as fallbacks;
+        the .md header supplies CWE / CVSS / endpoint / method / target.
+        """
+        import re as _re
+
+        text = md_path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+
+        report: dict[str, Any] = {
+            "id": csv_row.get("id", md_path.stem),
+            "title": csv_row.get("title", ""),
+            "severity": (csv_row.get("severity") or "medium").lower(),
+            "timestamp": csv_row.get("timestamp", ""),
+        }
+
+        # Title (override CSV with .md H1 if present — handles CSV
+        # truncation on long titles).
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                report["title"] = stripped[2:].strip()
+                break
+
+        # Bold header fields: `**Key:** value`. Scan only the top 40
+        # lines to bound parse cost on huge writeups.
+        header_re = _re.compile(r"^\*\*([A-Za-z]+):\*\*\s+(.+?)\s*$")
+        for line in lines[:40]:
+            m = header_re.match(line)
+            if not m:
+                continue
+            key, value = m.group(1).lower(), m.group(2)
+            if key == "severity":
+                report["severity"] = value.lower()
+            elif key == "target":
+                report["target"] = value
+            elif key == "endpoint":
+                report["endpoint"] = value
+            elif key == "method":
+                report["method"] = value
+            elif key == "cwe":
+                report["cwe"] = value
+            elif key == "cvss":
+                # SARIF expects a float for security-severity ranking;
+                # parse defensively (Strix sometimes emits "7.5" plain,
+                # sometimes "CVSS 7.5", sometimes a vector).
+                try:
+                    report["cvss"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "cve":
+                report["cve"] = value
+
+        return report
 
     def add_vulnerability_report(  # noqa: PLR0912
         self,
@@ -801,11 +957,18 @@ class Tracer:
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
 
-            if mark_complete:
-                try:
-                    write_sarif(run_dir, sorted_reports)
-                except Exception:  # noqa: BLE001
-                    logger.exception("Failed to write SARIF report (non-fatal)")
+            # SEC-6802: emit SARIF on every save_run_data call, not only
+            # at mark_complete=True. Per-finding writeups (.md + CSV) are
+            # already incremental — SARIF should track them.  Gating
+            # SARIF on mark_complete meant iteration-exhausted scans (or
+            # any non-clean-exit path) left SARIF at the last successful
+            # mark_complete state, sometimes stale by N reports, sometimes
+            # empty because no iteration reached mark_complete=True.
+            # The .md + CSV + SARIF triplet is now consistent on disk.
+            try:
+                write_sarif(run_dir, sorted_reports)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to write SARIF report (non-fatal)")
 
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
