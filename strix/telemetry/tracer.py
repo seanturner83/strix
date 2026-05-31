@@ -1111,16 +1111,35 @@ class Tracer:
             # those ints and failed with AttributeError, which was
             # previously masked by bare `pass`. Iterate the canonical dict
             # directly.
+            iteration_count = max(
+                (e.get("iteration", 0) for e in self.tool_executions.values()),
+                default=0,
+            )
+            vulnerability_count = len(self.vulnerability_reports)
+
+            # Three-state status. "completed" requires explicit success from
+            # mark_orchestrator_success(True) — i.e. the agent loop reached
+            # the Executive Summary. "partial" means the run made forward
+            # progress (found vulns OR ran at least one iteration) but did
+            # not reach a clean Exec Summary — typically iteration-budget
+            # exhaustion, a late-iteration OTel-threading race in litellm's
+            # memory_compressor, or a signal mid-run. Findings on disk are
+            # real and should be ingested by CI. "errored" stays the true
+            # failure state: no progress, no findings, no iterations.
+            if completed:
+                status = "completed"
+            elif vulnerability_count > 0 or iteration_count > 0:
+                status = "partial"
+            else:
+                status = "errored"
+
             write_session_meta(
                 self.get_run_dir(),
                 {
-                    "status": "completed" if completed else "errored",
+                    "status": status,
                     "ended_at": datetime.now(UTC).isoformat(),
-                    "iteration_count": max(
-                        (e.get("iteration", 0) for e in self.tool_executions.values()),
-                        default=0,
-                    ),
-                    "vulnerability_count": len(self.vulnerability_reports),
+                    "iteration_count": iteration_count,
+                    "vulnerability_count": vulnerability_count,
                     "agent_count": len(self.agents),
                 },
             )

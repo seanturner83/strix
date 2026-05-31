@@ -707,6 +707,91 @@ def test_finalize_session_meta_with_no_tool_executions(monkeypatch, tmp_path) ->
     assert meta["iteration_count"] == 0
 
 
+# ---------------------------------------------------------------------------
+# Three-state status classification: completed / partial / errored
+#
+# Prior behaviour collapsed everything that wasn't completed=True into
+# "errored" — losing the distinction between "scan crashed before doing
+# anything" and "scan ran out of iteration budget but found CVSS-9.9 stuff".
+# The latter is shippable; the former isn't. Tested here to keep that
+# semantic stable.
+# ---------------------------------------------------------------------------
+
+
+def test_status_completed_on_clean_orchestrator_success(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("status-completed")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "status-completed"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.add_vulnerability_report(title="finding 1", severity="high")
+    tracer._finalize_session_meta(True)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "completed"
+
+
+def test_status_partial_when_findings_but_no_clean_exit(monkeypatch, tmp_path) -> None:
+    """Iteration-budget exhaustion / OTel-threading race after findings
+    persisted = 'partial'. Findings are real; CI should ingest them."""
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("status-partial-findings")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "status-partial-findings"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.add_vulnerability_report(title="finding 1", severity="critical")
+    tracer.add_vulnerability_report(title="finding 2", severity="high")
+
+    tracer._finalize_session_meta(False)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "partial"
+    assert meta["vulnerability_count"] == 2
+
+
+def test_status_partial_when_iterations_but_no_findings(monkeypatch, tmp_path) -> None:
+    """Forward progress (iterations ran) without findings is still 'partial' —
+    distinguishes 'scan ran clean and found nothing real' from 'scan never
+    started'. Both deserve different operator responses."""
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("status-partial-iters")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "status-partial-iters"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    tracer.tool_executions[1] = {"tool": "grep", "iteration": 3}
+    tracer.tool_executions[2] = {"tool": "read", "iteration": 4}
+
+    tracer._finalize_session_meta(False)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "partial"
+    assert meta["iteration_count"] == 4
+    assert meta["vulnerability_count"] == 0
+
+
+def test_status_errored_when_no_progress_no_findings(monkeypatch, tmp_path) -> None:
+    """True failure: orchestrator did not succeed, no tools ran, no findings.
+    The only state where 'errored' is the right signal."""
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("status-errored")
+    set_global_tracer(tracer)
+    run_dir = tmp_path / "strix_runs" / "status-errored"
+    _attach_real_conversation_log(tracer, run_dir)
+
+    assert tracer.tool_executions == {}
+    assert tracer.vulnerability_reports == []
+
+    tracer._finalize_session_meta(False)
+
+    meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "errored"
+    assert meta["iteration_count"] == 0
+    assert meta["vulnerability_count"] == 0
+
+
 def test_update_scan_final_fields_sets_orchestrator_success(monkeypatch, tmp_path) -> None:
     """The canonical 'scan finished cleanly' hook (update_scan_final_fields)
     must set orchestrator_success=True so cleanup() reports completed=True
