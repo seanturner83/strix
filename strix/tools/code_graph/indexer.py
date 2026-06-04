@@ -20,11 +20,15 @@ single .sqlite handle answers cross-language queries.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from .cache import CacheKey, CodeGraphCache, from_env as _cache_from_env
 
 
 logger = logging.getLogger(__name__)
@@ -143,3 +147,71 @@ def load_index(sqlite_path: Path) -> Path:
     if not sqlite_path.exists():
         raise IndexerError(f"code_graph index missing at {sqlite_path}")
     return sqlite_path
+
+
+def build_index_cached(
+    target_dir: Path,
+    out_dir: Path,
+    *,
+    repo: str | None = None,
+    head_sha: str | None = None,
+    cache: CodeGraphCache | None = None,
+) -> IndexResult:
+    """Build the index, but consult the cache first when (repo, head_sha)
+    are known. Cache miss falls through to a full build and a put."""
+    cache = cache if cache is not None else _cache_from_env()
+    sqlite_path = out_dir / "code_graph.sqlite"
+
+    cache_key: CacheKey | None = None
+    if repo and head_sha:
+        try:
+            cache_key = CacheKey(repo=repo, head_sha=head_sha)
+        except ValueError as exc:
+            logger.warning("code_graph: invalid cache key (%s); proceeding uncached", exc)
+
+    if cache_key is not None and cache.get(cache_key, sqlite_path):
+        return IndexResult(
+            target_dir=target_dir,
+            scip_paths=(),
+            sqlite_path=sqlite_path,
+        )
+
+    result = build_index(target_dir, out_dir)
+    if cache_key is not None:
+        cache.put(cache_key, result.sqlite_path)
+    return result
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """Sandbox-side CLI: invoked by docker_runtime.create_sandbox after the
+    target repo is copied into the container. Failure must not break the
+    scan — exit 0 even on indexer error, just leave the SQLite missing and
+    let the tools layer handle the absence (W2)."""
+    parser = argparse.ArgumentParser(
+        prog="python -m strix.tools.code_graph.indexer",
+        description="Build SCIP code-graph index for the target repo (SEC-6848 W1).",
+    )
+    parser.add_argument("--target", required=True, type=Path)
+    parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--repo", default=None, help="owner/name, for cache key")
+    parser.add_argument("--head-sha", default=None, help="full commit SHA, for cache key")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    try:
+        result = build_index_cached(
+            args.target,
+            args.out_dir,
+            repo=args.repo,
+            head_sha=args.head_sha,
+        )
+        logger.info("code_graph: built index at %s", result.sqlite_path)
+    except IndexerError as exc:
+        # Warn-and-continue: a missing index means W2 graph tools degrade
+        # to no-ops; it does not break the scan.
+        logger.warning("code_graph: index build skipped (%s)", exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

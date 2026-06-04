@@ -4,7 +4,16 @@
 # get_symbol_at) against the SQLite-converted SCIP index produced at
 # sandbox-setup time.
 
-from .indexer import build_index, load_index
+from .cache import CacheKey, CodeGraphCache, FilesystemCache, NullCache
+from .indexer import build_index, build_index_cached, load_index
 
 
-__all__ = ["build_index", "load_index"]
+__all__ = [
+    "CacheKey",
+    "CodeGraphCache",
+    "FilesystemCache",
+    "NullCache",
+    "build_index",
+    "build_index_cached",
+    "load_index",
+]

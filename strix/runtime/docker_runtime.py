@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 import secrets
 import socket
@@ -27,6 +28,8 @@ HOST_GATEWAY_HOSTNAME = "host.docker.internal"
 DOCKER_TIMEOUT = 60
 CONTAINER_TOOL_SERVER_PORT = 48081
 CONTAINER_CAIDO_PORT = 48080
+
+logger = logging.getLogger(__name__)
 
 
 class DockerRuntime(AbstractRuntime):
@@ -344,6 +347,81 @@ class DockerRuntime(AbstractRuntime):
         except (OSError, DockerException):
             pass
 
+    def _build_code_graph_index(
+        self,
+        container: Container,
+        target_name: str,
+        *,
+        repo: str | None = None,
+        head_sha: str | None = None,
+    ) -> None:
+        """Pre-build the SCIP code-graph index for a target. Invoked once
+        per source after copy-into-container; failure warn-and-continues.
+
+        Runs as `pentester` user inside the container. The indexer module
+        is part of strix/tools/code_graph/ which is COPYed into /app at
+        build time. Cache key is consulted when (repo, head_sha) are
+        supplied by the dispatcher; otherwise build is uncached.
+
+        SEC-6848 W1.3.
+        """
+        target_path = f"/workspace/{target_name}"
+        out_dir = f"/app/runtime/code_graph/{target_name}"
+        cmd_parts = [
+            "/app/.venv/bin/python",
+            "-m",
+            "strix.tools.code_graph.indexer",
+            "--target",
+            target_path,
+            "--out-dir",
+            out_dir,
+        ]
+        if repo:
+            cmd_parts += ["--repo", repo]
+        if head_sha:
+            cmd_parts += ["--head-sha", head_sha]
+        try:
+            container.exec_run(
+                ["sh", "-c", f"mkdir -p {out_dir}"],
+                user="pentester",
+            )
+            # Pre-LLM-loop step: cap at 10 min so a runaway indexer can't
+            # stall the scan. scip-typescript ran in ~0.5s on portal-api
+            # and scip-go in ~32s on payment-orchestrator during W1 smoke;
+            # the cap is generous headroom for monorepo-shaped targets we
+            # haven't yet measured.
+            exit_code, output = container.exec_run(
+                cmd_parts,
+                user="pentester",
+                workdir="/app",
+                environment={
+                    # Surface the env-keyed cache root to the indexer
+                    # subprocess. Default unset → NullCache; the GHA
+                    # workflow sets this to a host-mounted dir it syncs
+                    # to/from S3 if cross-run caching is desired.
+                    "STRIX_CODE_GRAPH_CACHE_DIR": os.environ.get(
+                        "STRIX_CODE_GRAPH_CACHE_DIR", ""
+                    ),
+                },
+            )
+            if exit_code != 0:
+                # Indexer's own _main already swallows IndexerError and
+                # exits 0; any non-zero is an infra issue (image missing
+                # binaries, OOM, etc). Surface but don't raise.
+                output_str = (
+                    output.decode("utf-8", errors="replace") if output else ""
+                )[:500]
+                logger.warning(
+                    "code_graph index build exited %d for target=%s: %s",
+                    exit_code,
+                    target_name,
+                    output_str,
+                )
+        except (OSError, DockerException) as exc:
+            logger.warning(
+                "code_graph index build failed for target=%s: %s", target_name, exc
+            )
+
     async def create_sandbox(
         self,
         agent_id: str,
@@ -363,6 +441,17 @@ class DockerRuntime(AbstractRuntime):
                     source.get("workspace_subdir") or Path(source_path).name or f"target_{index}"
                 )
                 self._copy_local_directory_to_container(container, source_path, target_name)
+                # SEC-6848 W1.3: pre-build the SCIP code-graph index for the
+                # target. Cache key is (repo, head_sha) when the dispatcher
+                # provides them; otherwise build uncached. Failure here
+                # warn-and-continues — a missing index degrades the W2
+                # graph tools to no-ops but does not break the scan.
+                self._build_code_graph_index(
+                    container,
+                    target_name=target_name,
+                    repo=source.get("repo"),
+                    head_sha=source.get("head_sha"),
+                )
             setattr(self, source_copied_key, True)
 
         if container.id is None:
