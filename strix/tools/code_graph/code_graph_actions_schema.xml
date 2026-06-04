@@ -1,0 +1,123 @@
+<tools>
+  <tool name="code_graph_find_definition">
+    <description>Find where a symbol is defined in the indexed source tree. Returns file:line for each matching declaration. Use this BEFORE grepping when you need to navigate from a usage to the implementation — one tool call instead of repository-wide search. Symbol matching uses substring containment, so partial names work (e.g. "checkCustomerAccountPermission" matches the full SCIP moniker).</description>
+    <parameters>
+      <parameter name="symbol" type="string" required="true">
+        <description>Symbol name to locate (function, class, type, exported binding). Bare identifier preferred.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "&lt;name&gt; defined at file:line:col"} for each match. {"output": "code graph not available..."} when the indexer was skipped for this target. {"output": "no definition matches found..."} when the symbol isn't in the index.</description>
+    </returns>
+    <notes>
+  - The index is pre-built at sandbox setup; queries are read-only and fast.
+  - Returns up to 50 matches.
+  - Falls back to chunk-range location for re-exports / barrel files where SCIP doesn't record a precise enclosing range.
+  - On missing index (eg. unsupported language), output explains the situation — proceed with search_files / read_file instead.
+    </notes>
+    <examples>
+  # Locate the implementation of a middleware
+  <function=code_graph_find_definition>
+  <parameter=symbol>checkCustomerAccountPermission</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="code_graph_find_references">
+    <description>Return every place a symbol is referenced in the indexed tree. This is the highest-value query for structural security review: "which routes mount this middleware", "everywhere this auth helper is called", "what depends on this config flag". One call replaces an org-wide grep + manual sift.</description>
+    <parameters>
+      <parameter name="symbol" type="string" required="true">
+        <description>Symbol name to find references for. Bare identifier preferred.</description>
+      </parameter>
+      <parameter name="include_definition" type="boolean" required="false">
+        <description>Include the definition site in the results. Default false (most callers want references only).</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "&lt;name&gt; — N occurrence(s):\n  file:line\n  file:line\n..."} grouped by matched name (substring matches that resolved to different symbols are listed separately). Capped at 50 results.</description>
+    </returns>
+    <notes>
+  - Use for "find all callers of X" questions. Don't grep first if you can ask this.
+  - Locations are chunk-level (line ranges) rather than column-precise — read the file for the specific line if needed.
+  - When the symbol appears in multiple SCIP monikers (eg. similarly-named exports across files), results are grouped by display name so you can see each cluster.
+    </notes>
+    <examples>
+  # Find every place a middleware is mounted on a route
+  <function=code_graph_find_references>
+  <parameter=symbol>authorizeToParticipantAndAdminRole</parameter>
+  </function>
+
+  # Include the def site too
+  <function=code_graph_find_references>
+  <parameter=symbol>authorizeToParticipantAndAdminRole</parameter>
+  <parameter=include_definition>true</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="code_graph_find_implementations">
+    <description>Return implementations / subtypes of an interface or abstract type. NOT YET SUPPORTED (SCIP relationship blob parsing pending). Tool returns a clear unsupported message; use code_graph_find_references on the interface name as a workaround.</description>
+    <parameters>
+      <parameter name="interface" type="string" required="true">
+        <description>Interface or abstract type name.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "find_implementations is not yet supported..."} — stub message in W2; W3 will fill this in.</description>
+    </returns>
+    <notes>
+  - W2 stub. Calling this won't produce useful results; prefer code_graph_find_references.
+    </notes>
+    <examples>
+  <function=code_graph_find_implementations>
+  <parameter=interface>AuthorizationStrategy</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="code_graph_get_imports">
+    <description>List the symbols referenced from a given source file. Approximates "what does this file depend on" without reading the whole file. Useful for triaging a router or middleware file before drilling in.</description>
+    <parameters>
+      <parameter name="file" type="string" required="true">
+        <description>Relative path from the repo root (eg. src/withdrawals/router.ts).</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "&lt;file&gt; references:\n  name1\n  name2\n..."} — distinct symbols mentioned in the file, sorted.</description>
+    </returns>
+    <notes>
+  - Superset of declared imports (includes in-file uses of globals).
+  - Capped at 50 distinct symbols.
+    </notes>
+    <examples>
+  <function=code_graph_get_imports>
+  <parameter=file>src/withdrawals/router.ts</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="code_graph_get_symbol_at">
+    <description>Return symbols mentioned in the chunk containing a given line in a file. Coarser than IDE go-to-symbol (chunk-level, not cursor-precise) but useful for "what does this code reference" lookups.</description>
+    <parameters>
+      <parameter name="file" type="string" required="true">
+        <description>Relative path from the repo root.</description>
+      </parameter>
+      <parameter name="line" type="integer" required="true">
+        <description>Line number (0-indexed, matching how SCIP encodes positions).</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "&lt;file&gt;:&lt;line&gt; mentions:\n  name1\n  name2\n..."} — distinct symbols in the same chunk as that line.</description>
+    </returns>
+    <notes>
+  - SCIP chunks are line ranges, not individual lines — expect multiple symbols per call.
+  - Use code_graph_find_references afterwards to drill into a specific symbol's other usages.
+    </notes>
+    <examples>
+  <function=code_graph_get_symbol_at>
+  <parameter=file>src/withdrawals/router.ts</parameter>
+  <parameter=line>139</parameter>
+  </function>
+    </examples>
+  </tool>
+</tools>
