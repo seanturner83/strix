@@ -80,6 +80,7 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/projectdiscovery/cvemap/cmd/vulnx@latest && \
     go install -v github.com/jaeles-project/gospider@latest && \
     go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+    go install -v github.com/scip-code/scip-go/cmd/scip-go@v0.2.7 && \
     go clean -modcache
 
 RUN nuclei -update-templates
@@ -96,7 +97,24 @@ RUN npm install -g retire@latest && \
     npm install -g eslint@latest && \
     npm install -g js-beautify@latest && \
     npm install -g @ast-grep/cli@latest && \
-    npm install -g tree-sitter-cli@latest
+    npm install -g tree-sitter-cli@latest && \
+    npm install -g @sourcegraph/scip-typescript@0.4.0
+
+# SEC-6848 W1: scip CLI for converting SCIP indexes to queryable SQLite. Pinned
+# to v0.8.0 — matches the version validated against portal-api + payment-
+# orchestrator local smoke tests on 2026-06-04. amd64 binary; build supports
+# linux/amd64 only.
+RUN ARCH="$(uname -m)" && \
+    case "$ARCH" in \
+        x86_64)  SCIP_ARCH="linux-amd64" ;; \
+        aarch64) SCIP_ARCH="linux-arm64" ;; \
+        *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fLsS "https://github.com/sourcegraph/scip/releases/download/v0.8.0/scip-${SCIP_ARCH}.tar.gz" \
+        -o /tmp/scip.tar.gz && \
+    sudo tar -xzf /tmp/scip.tar.gz -C /usr/local/bin scip && \
+    rm /tmp/scip.tar.gz && \
+    scip --version
 
 RUN set -eux; \
     TS_PARSER_DIR="/home/pentester/.tree-sitter/parsers"; \
