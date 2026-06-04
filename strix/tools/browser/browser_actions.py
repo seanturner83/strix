@@ -180,7 +180,7 @@ def _handle_utility_actions(
     raise ValueError(f"Unknown utility action: {action}")
 
 
-@register_tool(requires_browser_mode=True)
+@register_tool(requires_browser_mode=True, requires_dynamic_target=True)
 def browser_action(
     action: BrowserAction,
     url: str | None = None,

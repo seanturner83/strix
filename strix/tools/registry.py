@@ -193,6 +193,7 @@ def register_tool(
     sandbox_execution: bool = True,
     requires_browser_mode: bool = False,
     requires_web_search_mode: bool = False,
+    requires_dynamic_target: bool = False,
     parallel_safe: bool = False,
 ) -> Callable[..., Any]:
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -210,6 +211,7 @@ def register_tool(
             "module": _get_module_name(f),
             "sandbox_execution": sandbox_execution,
             "parallel_safe": parallel_safe,
+            "requires_dynamic_target": requires_dynamic_target,
         }
 
         if not sandbox_mode:
@@ -287,9 +289,20 @@ def should_execute_in_sandbox(tool_name: str) -> bool:
     return True
 
 
-def get_tools_prompt() -> str:
+def get_tools_prompt(exclude_dynamic_target: bool = False) -> str:
+    """Render the tools section of the system prompt.
+
+    Args:
+        exclude_dynamic_target: When True, skip tools registered with
+            ``requires_dynamic_target=True`` (browser, proxy, web_search).
+            Used by whitebox/SAST scans where the target is local source code
+            only and these dynamic-target tools have no useful invocation.
+            Saves ~28k chars of system prompt per turn — see SEC-6848.
+    """
     tools_by_module: dict[str, list[dict[str, Any]]] = {}
     for tool in tools:
+        if exclude_dynamic_target and tool.get("requires_dynamic_target"):
+            continue
         module = tool.get("module", "unknown")
         if module not in tools_by_module:
             tools_by_module[module] = []

@@ -124,8 +124,20 @@ class LLM:
             skill_content = load_skills(skills_to_load)
             env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 
+            # SEC-6848: when scanning local source only, skip tools that
+            # presume a running HTTP target (browser/proxy/web_search). Saves
+            # ~28k chars (~7k tokens) of system prompt per turn — the bulk of
+            # which is the proxy + browser + reporting XML schemas. The cache-
+            # creation pass + every uncached-input increment benefits.
+            exclude_dynamic_target = bool(self.config.is_whitebox)
+            tools_prompt_renderer = (
+                (lambda: get_tools_prompt(exclude_dynamic_target=True))
+                if exclude_dynamic_target
+                else get_tools_prompt
+            )
+
             result = env.get_template("system_prompt.jinja").render(
-                get_tools_prompt=get_tools_prompt,
+                get_tools_prompt=tools_prompt_renderer,
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
                 tool_mode=self.config.tool_mode,

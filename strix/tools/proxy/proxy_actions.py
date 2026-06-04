@@ -7,7 +7,7 @@ from strix.tools.registry import register_tool
 RequestPart = Literal["request", "response"]
 
 
-@register_tool(parallel_safe=True)
+@register_tool(parallel_safe=True, requires_dynamic_target=True)
 async def batch_view_request(
     requests: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -56,7 +56,7 @@ async def batch_view_request(
     return {"results": out, "count": len(requests)}
 
 
-@register_tool(parallel_safe=True)
+@register_tool(parallel_safe=True, requires_dynamic_target=True)
 def list_requests(
     httpql_filter: str | None = None,
     start_page: int = 1,
@@ -83,7 +83,7 @@ def list_requests(
     )
 
 
-@register_tool(parallel_safe=True)
+@register_tool(parallel_safe=True, requires_dynamic_target=True)
 def view_request(
     request_id: str,
     part: RequestPart = "request",
@@ -97,7 +97,7 @@ def view_request(
     return manager.view_request(request_id, part, search_pattern, page, page_size)
 
 
-@register_tool
+@register_tool(requires_dynamic_target=True)
 def send_request(
     method: str,
     url: str,
@@ -113,7 +113,7 @@ def send_request(
     return manager.send_simple_request(method, url, headers, body, timeout)
 
 
-@register_tool
+@register_tool(requires_dynamic_target=True)
 def repeat_request(
     request_id: str,
     modifications: dict[str, Any] | None = None,
@@ -126,7 +126,7 @@ def repeat_request(
     return manager.repeat_request(request_id, modifications)
 
 
-@register_tool
+@register_tool(requires_dynamic_target=True)
 def scope_rules(
     action: Literal["get", "list", "create", "update", "delete"],
     allowlist: list[str] | None = None,
@@ -140,7 +140,7 @@ def scope_rules(
     return manager.scope_rules(action, allowlist, denylist, scope_id, scope_name)
 
 
-@register_tool(parallel_safe=True)
+@register_tool(parallel_safe=True, requires_dynamic_target=True)
 def list_sitemap(
     scope_id: str | None = None,
     parent_id: str | None = None,
@@ -153,7 +153,7 @@ def list_sitemap(
     return manager.list_sitemap(scope_id, parent_id, depth, page)
 
 
-@register_tool(parallel_safe=True)
+@register_tool(parallel_safe=True, requires_dynamic_target=True)
 def view_sitemap_entry(
     entry_id: str,
 ) -> dict[str, Any]:
