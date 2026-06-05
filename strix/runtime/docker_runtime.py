@@ -411,28 +411,23 @@ class DockerRuntime(AbstractRuntime):
             # from inside the container, with the same env+user as the
             # indexer subprocess.
             try:
-                # SEC-6848 probe v3: NO PATH env override. We want to
-                # see the container's default PATH for the pentester
-                # user and confirm whether scip-typescript is reachable.
-                # Previous probes were rigged with PATH=/home/pentester/
-                # go/bin:/usr/local/bin:/usr/bin:/bin which stripped
-                # whatever npm-global path holds scip-typescript.
+                # SEC-6848 probe v4: invoke scip-typescript directly on
+                # the target — confirms whether the binary works on a
+                # checked-out-but-not-npm-installed tree (no
+                # node_modules/) and what stderr it produces.
                 _probe_code, _probe_out = container.exec_run(
                     [
                         "sh",
                         "-c",
-                        "echo '--- container default PATH ---'; echo \"PATH=$PATH\"; "
-                        "echo '--- which scip-typescript (default PATH) ---'; "
-                        "which scip-typescript 2>&1 || echo 'not on PATH'; "
-                        "echo '--- find scip-typescript anywhere ---'; "
-                        "find / -name 'scip-typescript' -type f -o -name 'scip-typescript' -type l 2>/dev/null | head -10; "
-                        "echo '--- npm config get prefix (pentester) ---'; "
-                        "npm config get prefix 2>&1 || true; "
-                        "echo '--- with Go bin prepended ---'; "
-                        "PATH=/home/pentester/go/bin:$PATH which scip-typescript scip-go scip python3 2>&1",
+                        f"echo '--- node_modules present? ---'; "
+                        f"ls -la /workspace/{target_name}/node_modules/ 2>&1 | head -3 || echo 'no node_modules'; "
+                        f"echo '--- scip-typescript direct invocation ---'; "
+                        f"cd /workspace/{target_name} && scip-typescript index --output /tmp/probe-ts.scip 2>&1 | head -40; "
+                        f"echo '--- /tmp/probe-ts.scip ---'; "
+                        f"ls -la /tmp/probe-ts.scip 2>&1 || true",
                     ],
                     user="pentester",
-                    # NO PATH override — show container default
+                    # NO PATH override — container default has all 4 binaries
                 )
                 print(
                     f"[code_graph hook] probe target={target_name} "
