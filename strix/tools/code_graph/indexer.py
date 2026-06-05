@@ -21,7 +21,9 @@ single .sqlite handle answers cross-language queries.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -72,6 +74,85 @@ def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 600) -> None:
         )
 
 
+def _ensure_node_version(target: Path) -> str | None:
+    """Resolve the Node version pinned by package.json's `engines.node` and
+    install it into /tmp on demand if the sandbox's default node doesn't
+    match. Returns the absolute path to the resolved node bin dir (suitable
+    for prepending to PATH), or None if no version pin is found or current
+    node already satisfies it.
+
+    Background: many TS repos pin engines.node to a specific major (e.g.
+    "22.15.0"). npm install fails with EBADENGINE if the sandbox's bundled
+    node is older. Rather than baking every required node version into the
+    Strix sandbox image, fetch the requested version from nodejs.org on
+    demand and stage it under /tmp.
+    """
+    pkg = target / "package.json"
+    if not pkg.exists():
+        return None
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("code_graph: package.json unparseable (%s); skipping node pin", exc)
+        return None
+    desired_raw = (data.get("engines") or {}).get("node", "")
+    if not isinstance(desired_raw, str):
+        return None
+    # Strip semver-range prefixes / whitespace ("^22", "~22.15", ">=22.15.0").
+    # For simple ranges we pick the lower bound; for an exact pin we use as-is.
+    # Multi-clause ranges ("^22 || ^20") fall through to "use whatever exists";
+    # nodejs.org doesn't serve range-resolution.
+    match = re.match(r'^\s*[\^~>=<]*\s*(\d+(?:\.\d+){0,2})', desired_raw)
+    if not match:
+        return None
+    desired = match.group(1)
+    # Pad to full M.m.p — nodejs.org only serves complete tarball names.
+    parts = desired.split(".")
+    if len(parts) == 1:
+        # "22" → resolve to a known-LTS minor.patch. For simplicity pin to
+        # the latest *known stable* for the major. Default to .0.0 and let
+        # nodejs.org redirect; if that doesn't exist we'll fall through.
+        desired = f"{parts[0]}.0.0"
+    elif len(parts) == 2:
+        desired = f"{desired}.0"
+
+    # Skip download if the system node already matches.
+    try:
+        rc = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5)
+        if rc.returncode == 0 and rc.stdout.strip().lstrip("v") == desired:
+            return None  # system node already matches; nothing to do
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    node_dir = Path(f"/tmp/node-v{desired}-linux-x64")
+    if node_dir.exists() and (node_dir / "bin" / "node").exists():
+        logger.info("code_graph: using cached node v%s at %s", desired, node_dir)
+        return str(node_dir / "bin")
+
+    url = f"https://nodejs.org/dist/v{desired}/node-v{desired}-linux-x64.tar.xz"
+    logger.info("code_graph: fetching node v%s from nodejs.org", desired)
+    try:
+        _run(
+            ["sh", "-c", f"curl -fLsS {url} | tar -xJ -C /tmp/"],
+            timeout=180,
+        )
+    except IndexerError as exc:
+        logger.warning(
+            "code_graph: node v%s install failed (%s); falling back to system node",
+            desired,
+            exc,
+        )
+        return None
+    if not (node_dir / "bin" / "node").exists():
+        logger.warning(
+            "code_graph: node v%s tarball extracted but no node binary at %s",
+            desired,
+            node_dir / "bin" / "node",
+        )
+        return None
+    return str(node_dir / "bin")
+
+
 def _index_typescript(target: Path, out_dir: Path) -> Path | None:
     if not _has_files_matching(target, "tsconfig.json", "package.json"):
         return None
@@ -96,21 +177,61 @@ def _index_typescript(target: Path, out_dir: Path) -> Path | None:
     # hook after the indexer returns, so downstream tools (agent
     # loop, etc.) never see the installed deps.
     if not (target / "node_modules").exists() and (target / "package.json").exists():
-        try:
-            _run(
-                [
-                    "npm",
-                    "install",
-                    "--ignore-scripts",
-                    "--no-audit",
-                    "--no-fund",
-                    "--prefer-offline",
-                ],
-                cwd=target,
-                timeout=300,
+        # Fallback chain for npm install:
+        #   1. Try to match Node version from package.json engines.node.
+        #      Many repos pin a specific node (e.g. "22.15.0") and npm
+        #      refuses install with EBADENGINE on mismatch.
+        #   2. If install still fails, retry with --engine-strict=false
+        #      to bypass the engine check entirely.
+        #   3. If THAT also fails, log + proceed without deps;
+        #      scip-typescript will run on the bare tree and produce
+        #      partial output (or fail; indexer module exits 0 either
+        #      way per SEC-6848 warn-and-continue policy).
+        node_bin = _ensure_node_version(target)
+        base_args = [
+            "npm",
+            "install",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "--prefer-offline",
+        ]
+        # If we resolved a node bin, wrap cmd in sh -c to prepend its
+        # bin dir to PATH for the subprocess (subprocess.run env doesn't
+        # shell-expand $PATH).
+        if node_bin:
+            wrapped = (
+                f"export PATH={node_bin}:$PATH; "
+                + " ".join(base_args)
             )
+            install_cmd = ["sh", "-c", wrapped]
+        else:
+            install_cmd = base_args
+        try:
+            _run(install_cmd, cwd=target, timeout=300)
         except IndexerError as exc:
-            logger.warning("code_graph: npm install failed (%s); indexing without deps", exc)
+            logger.warning(
+                "code_graph: npm install (engine-strict default) failed (%s); "
+                "retrying with --engine-strict=false",
+                exc,
+            )
+            fallback_args = base_args + ["--engine-strict=false"]
+            if node_bin:
+                fallback_cmd = [
+                    "sh",
+                    "-c",
+                    f"export PATH={node_bin}:$PATH; " + " ".join(fallback_args),
+                ]
+            else:
+                fallback_cmd = fallback_args
+            try:
+                _run(fallback_cmd, cwd=target, timeout=300)
+            except IndexerError as exc2:
+                logger.warning(
+                    "code_graph: npm install fallback (--engine-strict=false) also "
+                    "failed (%s); indexing without deps",
+                    exc2,
+                )
     out = out_dir / "ts.scip"
     _run(["scip-typescript", "index", "--output", str(out)], cwd=target)
     return out if out.exists() else None
