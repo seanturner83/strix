@@ -4,6 +4,7 @@ import os
 import secrets
 import socket
 import subprocess
+import sys
 import tarfile
 import time
 from io import BytesIO
@@ -355,6 +356,15 @@ class DockerRuntime(AbstractRuntime):
         repo: str | None = None,
         head_sha: str | None = None,
     ) -> None:
+        # SEC-6848 dev diagnostic: stderr print bypasses strix's root-logger
+        # ERROR-level suppression (set in strix/interface/main.py). Confirms
+        # the hook is reached on every scan; remove once integration is
+        # stable and ship a real verdict line via logger.error or events.
+        print(
+            f"[code_graph hook] entry target={target_name} repo={repo} head_sha={head_sha}",
+            file=sys.stderr,
+            flush=True,
+        )
         """Pre-build the SCIP code-graph index for a target. Invoked once
         per source after copy-into-container; failure warn-and-continues.
 
@@ -425,17 +435,19 @@ class DockerRuntime(AbstractRuntime):
                 )[:500]
             except (OSError, DockerException):
                 ls_str = "(ls failed)"
-            log_level = logger.warning if exit_code != 0 else logger.info
-            log_level(
-                "code_graph index build for target=%s exit=%d out=%r ls=%r",
-                target_name,
-                exit_code,
-                output_str,
-                ls_str,
+            # SEC-6848 dev diagnostic: stderr print bypasses log-level
+            # suppression. Always visible in GHA `tee -a run.log` output.
+            print(
+                f"[code_graph hook] exit={exit_code} target={target_name} "
+                f"out={output_str[:600]!r} ls={ls_str!r}",
+                file=sys.stderr,
+                flush=True,
             )
         except (OSError, DockerException) as exc:
-            logger.warning(
-                "code_graph index build failed for target=%s: %s", target_name, exc
+            print(
+                f"[code_graph hook] EXCEPTION target={target_name} exc={exc!r}",
+                file=sys.stderr,
+                flush=True,
             )
 
     async def create_sandbox(
