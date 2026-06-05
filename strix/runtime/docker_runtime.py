@@ -411,25 +411,28 @@ class DockerRuntime(AbstractRuntime):
             # from inside the container, with the same env+user as the
             # indexer subprocess.
             try:
-                # SEC-6848: probe go.mod first (most likely cause of
-                # _index_go silent fallback), then run scip-go directly
-                # to capture its own error output (the indexer module
-                # swallows IndexerError and exits 0).
+                # SEC-6848 probe v3: NO PATH env override. We want to
+                # see the container's default PATH for the pentester
+                # user and confirm whether scip-typescript is reachable.
+                # Previous probes were rigged with PATH=/home/pentester/
+                # go/bin:/usr/local/bin:/usr/bin:/bin which stripped
+                # whatever npm-global path holds scip-typescript.
                 _probe_code, _probe_out = container.exec_run(
                     [
                         "sh",
                         "-c",
-                        f"echo '--- go.mod / tsconfig.json / package.json under target ---'; "
-                        f"find /workspace/{target_name} -maxdepth 4 \\( -name 'go.mod' -o -name 'tsconfig.json' -o -name 'package.json' \\) 2>&1 | head -20; "
-                        f"echo '--- scip-go direct invocation ---'; "
-                        f"cd /workspace/{target_name} && scip-go --output /tmp/probe-go.scip 2>&1 | head -40; "
-                        f"echo '--- /tmp/probe-go.scip ---'; "
-                        f"ls -la /tmp/probe-go.scip 2>&1 || true",
+                        "echo '--- container default PATH ---'; echo \"PATH=$PATH\"; "
+                        "echo '--- which scip-typescript (default PATH) ---'; "
+                        "which scip-typescript 2>&1 || echo 'not on PATH'; "
+                        "echo '--- find scip-typescript anywhere ---'; "
+                        "find / -name 'scip-typescript' -type f -o -name 'scip-typescript' -type l 2>/dev/null | head -10; "
+                        "echo '--- npm config get prefix (pentester) ---'; "
+                        "npm config get prefix 2>&1 || true; "
+                        "echo '--- with Go bin prepended ---'; "
+                        "PATH=/home/pentester/go/bin:$PATH which scip-typescript scip-go scip python3 2>&1",
                     ],
                     user="pentester",
-                    environment={
-                        "PATH": "/home/pentester/go/bin:/usr/local/bin:/usr/bin:/bin",
-                    },
+                    # NO PATH override — show container default
                 )
                 print(
                     f"[code_graph hook] probe target={target_name} "
