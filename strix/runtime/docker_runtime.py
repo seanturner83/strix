@@ -406,6 +406,45 @@ class DockerRuntime(AbstractRuntime):
                 ["sh", "-c", f"mkdir -p {out_dir}"],
                 user="pentester",
             )
+            # SEC-6848 diagnostic: probe which scip-* binaries exist
+            # and where. funding-service whitebox runs are exiting with
+            # ls='total 0' even with venv-python pinned — the indexer
+            # falls through silently when scip-go isn't on PATH. Print
+            # the probe results so we can see what shutil.which sees
+            # from inside the container, with the same env+user as the
+            # indexer subprocess.
+            try:
+                _probe_code, _probe_out = container.exec_run(
+                    [
+                        "sh",
+                        "-c",
+                        "echo '--- which ---'; "
+                        "which python3 scip scip-go scip-typescript 2>&1 || true; "
+                        "echo '--- /home/pentester/go/bin ---'; "
+                        "ls -la /home/pentester/go/bin/ 2>&1 || true; "
+                        "echo '--- GOPATH/GOBIN ---'; "
+                        "echo \"GOPATH=$GOPATH GOBIN=$GOBIN PATH=$PATH\"; "
+                        "echo '--- target tree probe ---'; "
+                        f"ls -la /workspace/{target_name} 2>&1 | head -20; "
+                        f"find /workspace/{target_name} -maxdepth 2 -name 'go.mod' -o -name 'tsconfig.json' -o -name 'package.json' 2>&1 | head -5",
+                    ],
+                    user="pentester",
+                    environment={
+                        "PATH": "/home/pentester/go/bin:/usr/local/bin:/usr/bin:/bin",
+                    },
+                )
+                print(
+                    f"[code_graph hook] probe target={target_name} "
+                    f"out={(_probe_out.decode('utf-8', errors='replace') if _probe_out else '')[:1500]!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except (OSError, DockerException) as exc:
+                print(
+                    f"[code_graph hook] probe FAILED target={target_name} exc={exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             # Pre-LLM-loop step: cap at 10 min so a runaway indexer can't
             # stall the scan. scip-typescript ran in ~0.5s on portal-api
             # and scip-go in ~32s on payment-orchestrator during W1 smoke;
