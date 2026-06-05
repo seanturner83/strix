@@ -377,14 +377,19 @@ class DockerRuntime(AbstractRuntime):
         """
         target_path = f"/workspace/{target_name}"
         out_dir = f"/app/runtime/code_graph/{target_name}"
-        # Use `python3` on PATH instead of a hardcoded venv interpreter
-        # path. Upstream Strix sandbox image (0.1.13) doesn't ship a
-        # .venv at /app/.venv — exec-127 confirmed via stderr probe on
-        # trade-api whitebox run 27028953402. PYTHONPATH=/app puts the
-        # baked-in strix module on the import path; mirrors how the
-        # upstream image runs `python -m strix.runtime.tool_server`.
+        # Upstream Strix sandbox image (0.1.13) ships a venv at
+        # /app/venv/ (no dot). My earlier "/app/.venv/bin/python" was
+        # a typo — the dot prefix doesn't exist; "python3" on PATH
+        # worked accidentally because the container's default PATH
+        # includes /app/venv/bin. Then setting PATH explicitly for
+        # the Go-bin prepend stripped /app/venv/bin and broke the
+        # venv-aware python resolution: registry.py's transitive
+        # imports (pydantic / defusedxml / textblob) failed because
+        # system python3 doesn't have those deps. Confirmed by exit=1
+        # traceback on funding-service whitebox v2 (2026-06-05).
+        # Use the venv python directly: full path, no PATH dependency.
         cmd_parts = [
-            "python3",
+            "/app/venv/bin/python3",
             "-m",
             "strix.tools.code_graph.indexer",
             "--target",
