@@ -221,6 +221,10 @@ def _main(argv: list[str] | None = None) -> int:
     target repo is copied into the container. Failure must not break the
     scan — exit 0 even on indexer error, just leave the SQLite missing and
     let the tools layer handle the absence (W2)."""
+    # SEC-6848 diag: print() to stderr bypasses log-config no-op risk
+    # (basicConfig is a no-op if any import already configured logging).
+    # Keep these prints until SCIP is end-to-end-validated in GHA.
+    print("INDEXER: _main entered", file=sys.stderr, flush=True)
     parser = argparse.ArgumentParser(
         prog="python -m strix.tools.code_graph.indexer",
         description="Build SCIP code-graph index for the target repo (SEC-6848 W1).",
@@ -230,6 +234,20 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default=None, help="owner/name, for cache key")
     parser.add_argument("--head-sha", default=None, help="full commit SHA, for cache key")
     args = parser.parse_args(argv)
+    print(
+        f"INDEXER: args target={args.target} out_dir={args.out_dir} "
+        f"repo={args.repo} head_sha={args.head_sha}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"INDEXER: target.exists={args.target.exists()} "
+        f"tsconfig={(args.target / 'tsconfig.json').exists()} "
+        f"package.json={(args.target / 'package.json').exists()} "
+        f"go.mod={(args.target / 'go.mod').exists()}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
@@ -239,11 +257,26 @@ def _main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             head_sha=args.head_sha,
         )
-        logger.info("code_graph: built index at %s", result.sqlite_path)
+        print(
+            f"INDEXER: SUCCESS sqlite={result.sqlite_path} "
+            f"scip_paths={[str(p) for p in result.scip_paths]}",
+            file=sys.stderr,
+            flush=True,
+        )
     except IndexerError as exc:
         # Warn-and-continue: a missing index means W2 graph tools degrade
         # to no-ops; it does not break the scan.
-        logger.warning("code_graph: index build skipped (%s)", exc)
+        print(f"INDEXER: SKIPPED ({exc})", file=sys.stderr, flush=True)
+    except Exception as exc:  # noqa: BLE001
+        # Diagnostic: surface any non-IndexerError exceptions to stderr
+        # before re-raising. Without this they'd disappear silently.
+        import traceback
+        print(
+            f"INDEXER: UNEXPECTED {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
     return 0
 
 
