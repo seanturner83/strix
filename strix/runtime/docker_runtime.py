@@ -378,29 +378,26 @@ class DockerRuntime(AbstractRuntime):
         target_path = f"/workspace/{target_name}"
         out_dir = f"/app/runtime/code_graph/{target_name}"
         # Upstream Strix sandbox image (0.1.13) ships a venv at
-        # /app/venv/ (no dot). My earlier "/app/.venv/bin/python" was
-        # a typo — the dot prefix doesn't exist; "python3" on PATH
-        # worked accidentally because the container's default PATH
-        # includes /app/venv/bin. Then setting PATH explicitly for
-        # the Go-bin prepend stripped /app/venv/bin and broke the
-        # venv-aware python resolution: registry.py's transitive
-        # imports (pydantic / defusedxml / textblob) failed because
-        # system python3 doesn't have those deps. Confirmed by exit=1
-        # traceback on funding-service whitebox v2 (2026-06-05).
-        # Use the venv python directly: full path, no PATH dependency.
-        cmd_parts = [
-            "/app/venv/bin/python3",
-            "-m",
-            "strix.tools.code_graph.indexer",
-            "--target",
-            target_path,
-            "--out-dir",
-            out_dir,
-        ]
+        # /app/venv/ (no dot). We pin the python interpreter directly
+        # via full path, and wrap the cmd in `sh -c` so PATH only gets
+        # /home/pentester/go/bin PREPENDED (for scip-go) without
+        # stripping the container's default PATH — which is what holds
+        # the npm-global bin where scip-typescript lives. Confirmed
+        # via funding-service probe v2 (2026-06-05): scip-typescript
+        # disappeared from `which` when PATH was set explicitly.
+        indexer_cmd = (
+            "/app/venv/bin/python3 -m strix.tools.code_graph.indexer "
+            f"--target {target_path} --out-dir {out_dir}"
+        )
         if repo:
-            cmd_parts += ["--repo", repo]
+            indexer_cmd += f" --repo {repo}"
         if head_sha:
-            cmd_parts += ["--head-sha", head_sha]
+            indexer_cmd += f" --head-sha {head_sha}"
+        cmd_parts = [
+            "sh",
+            "-c",
+            f"export PATH=/home/pentester/go/bin:$PATH; {indexer_cmd}",
+        ]
         try:
             container.exec_run(
                 ["sh", "-c", f"mkdir -p {out_dir}"],
@@ -462,18 +459,14 @@ class DockerRuntime(AbstractRuntime):
                     # resolves regardless of how the upstream image's
                     # Python is configured.
                     "PYTHONPATH": "/app",
-                    # scip-go is `go install`-ed during sandbox image
-                    # build to /home/pentester/go/bin/, which isn't on
-                    # the default PATH that docker exec_run inherits.
-                    # Without this, _binary_exists("scip-go") returns
-                    # False, _index_go raises IndexerError, _main
-                    # catches and exits 0 silently → no .sqlite produced,
-                    # query layer falls back to "graph not available."
-                    # scip-typescript via npm-global already lands on
-                    # the upstream image's pentester PATH; only Go needs
-                    # the explicit prepend. Confirmed via funding-service
-                    # whitebox run 27036652581 (2026-06-05) — exit=0 ls=empty.
-                    "PATH": "/home/pentester/go/bin:/usr/local/bin:/usr/bin:/bin",
+                    # NOTE: PATH is no longer set explicitly. The cmd
+                    # is wrapped in `sh -c "export PATH=/home/pentester/
+                    # go/bin:$PATH; ..."` which prepends the Go-bin to
+                    # the container's default PATH rather than replacing
+                    # it. This preserves the npm-global bin dir where
+                    # scip-typescript lives. Confirmed via probe v2 on
+                    # funding-service (2026-06-05): explicit PATH=... in
+                    # env dict stripped scip-typescript visibility.
                     # Surface the env-keyed cache root to the indexer
                     # subprocess. Default unset → NullCache; the GHA
                     # workflow sets this to a host-mounted dir it syncs
