@@ -404,19 +404,35 @@ class DockerRuntime(AbstractRuntime):
                     ),
                 },
             )
-            if exit_code != 0:
-                # Indexer's own _main already swallows IndexerError and
-                # exits 0; any non-zero is an infra issue (image missing
-                # binaries, OOM, etc). Surface but don't raise.
-                output_str = (
-                    output.decode("utf-8", errors="replace") if output else ""
-                )[:500]
-                logger.warning(
-                    "code_graph index build exited %d for target=%s: %s",
-                    exit_code,
-                    target_name,
-                    output_str,
+            # SEC-6848 dev-loop visibility: surface stdout+stderr and an
+            # ls of the output dir on EVERY run, regardless of exit code.
+            # The indexer's _main swallows IndexerError and exits 0 even
+            # when no SCIP is produced (eg. tsconfig.json/package.json
+            # absent at repo root, or scip-typescript off-PATH for
+            # pentester). Without this the query layer's
+            # _render_unavailable() fallback fires silently and the
+            # integration looks like it's working when it isn't.
+            output_str = (
+                output.decode("utf-8", errors="replace") if output else ""
+            )[:2000]
+            try:
+                ls_code, ls_output = container.exec_run(
+                    ["sh", "-c", f"ls -la {out_dir} 2>&1 || true"],
+                    user="pentester",
                 )
+                ls_str = (
+                    ls_output.decode("utf-8", errors="replace") if ls_output else ""
+                )[:500]
+            except (OSError, DockerException):
+                ls_str = "(ls failed)"
+            log_level = logger.warning if exit_code != 0 else logger.info
+            log_level(
+                "code_graph index build for target=%s exit=%d out=%r ls=%r",
+                target_name,
+                exit_code,
+                output_str,
+                ls_str,
+            )
         except (OSError, DockerException) as exc:
             logger.warning(
                 "code_graph index build failed for target=%s: %s", target_name, exc
