@@ -77,6 +77,40 @@ def _index_typescript(target: Path, out_dir: Path) -> Path | None:
         return None
     if not _binary_exists("scip-typescript"):
         raise IndexerError("scip-typescript missing from sandbox")
+    # scip-typescript invokes the TypeScript compiler under the hood,
+    # which refuses to proceed if `tsconfig.json` has an extends chain
+    # it can't resolve. The common idiom of extending a package config
+    # (e.g. `"extends": "@some-org/tsconfig-node"`) requires that
+    # package to be present under node_modules — relative-path extends
+    # (e.g. `"./tsconfig.base.json"`) don't.
+    #
+    # Most CI checkouts don't run `npm install`, so package-named
+    # extends are unresolvable at index time and scip-typescript
+    # fails with "error TS6053: File '<pkg>' not found" → no SCIP
+    # produced.
+    #
+    # Install deps minimally to make the compiler happy: skip lifecycle
+    # scripts + audit + funding for speed, use prefer-offline so repeat
+    # scans of the same repo hit the npm cache warm. Cleanup of
+    # node_modules + package-lock.json happens in the docker_runtime
+    # hook after the indexer returns, so downstream tools (agent
+    # loop, etc.) never see the installed deps.
+    if not (target / "node_modules").exists() and (target / "package.json").exists():
+        try:
+            _run(
+                [
+                    "npm",
+                    "install",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                    "--prefer-offline",
+                ],
+                cwd=target,
+                timeout=300,
+            )
+        except IndexerError as exc:
+            logger.warning("code_graph: npm install failed (%s); indexing without deps", exc)
     out = out_dir / "ts.scip"
     _run(["scip-typescript", "index", "--output", str(out)], cwd=target)
     return out if out.exists() else None

@@ -410,37 +410,11 @@ class DockerRuntime(AbstractRuntime):
             # the probe results so we can see what shutil.which sees
             # from inside the container, with the same env+user as the
             # indexer subprocess.
-            try:
-                # SEC-6848 probe v4: invoke scip-typescript directly on
-                # the target — confirms whether the binary works on a
-                # checked-out-but-not-npm-installed tree (no
-                # node_modules/) and what stderr it produces.
-                _probe_code, _probe_out = container.exec_run(
-                    [
-                        "sh",
-                        "-c",
-                        f"echo '--- node_modules present? ---'; "
-                        f"ls -la /workspace/{target_name}/node_modules/ 2>&1 | head -3 || echo 'no node_modules'; "
-                        f"echo '--- scip-typescript direct invocation ---'; "
-                        f"cd /workspace/{target_name} && scip-typescript index --output /tmp/probe-ts.scip 2>&1 | head -40; "
-                        f"echo '--- /tmp/probe-ts.scip ---'; "
-                        f"ls -la /tmp/probe-ts.scip 2>&1 || true",
-                    ],
-                    user="pentester",
-                    # NO PATH override — container default has all 4 binaries
-                )
-                print(
-                    f"[code_graph hook] probe target={target_name} "
-                    f"out={(_probe_out.decode('utf-8', errors='replace') if _probe_out else '')[:2500]!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            except (OSError, DockerException) as exc:
-                print(
-                    f"[code_graph hook] probe FAILED target={target_name} exc={exc!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            # SEC-6848 probe v1-v4 retired — root cause identified
+            # (scip-typescript needs npm install for tsconfig extends
+            # chain resolution on zh repos extending seed-tsconfig-*).
+            # Fix lives in strix/tools/code_graph/indexer.py:_index_typescript.
+            # Cleanup happens post-indexer below.
             # Pre-LLM-loop step: cap at 10 min so a runaway indexer can't
             # stall the scan. scip-typescript ran in ~0.5s on portal-api
             # and scip-go in ~32s on payment-orchestrator during W1 smoke;
@@ -503,6 +477,29 @@ class DockerRuntime(AbstractRuntime):
                 file=sys.stderr,
                 flush=True,
             )
+            # SEC-6848: clean up TS indexer scaffolding so the LLM scan
+            # loop sees a pristine target tree. _index_typescript runs
+            # `npm install` inside /workspace/<target>/ to resolve the
+            # tsconfig extends chain — that leaves a multi-GB
+            # node_modules + package-lock.json behind. Strip both
+            # before the agent loop starts so list_files / search_files
+            # don't drown in vendored code.
+            try:
+                container.exec_run(
+                    [
+                        "sh",
+                        "-c",
+                        f"rm -rf /workspace/{target_name}/node_modules "
+                        f"/workspace/{target_name}/package-lock.json 2>&1 || true",
+                    ],
+                    user="pentester",
+                )
+            except (OSError, DockerException) as exc:
+                print(
+                    f"[code_graph hook] cleanup FAILED target={target_name} exc={exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except (OSError, DockerException) as exc:
             print(
                 f"[code_graph hook] EXCEPTION target={target_name} exc={exc!r}",
