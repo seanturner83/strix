@@ -488,12 +488,22 @@ class DockerRuntime(AbstractRuntime):
             # before the agent loop starts so list_files / search_files
             # don't drown in vendored code.
             try:
+                # Sweep indexer-side scaffolding so the agent loop sees a
+                # pristine target tree:
+                #   - node_modules + package-lock.json (TS path)
+                #   - .venv / venv / __pycache__ (Python path)
+                #   - target/ + Cargo.lock if untracked (Rust path)
+                # Don't remove tsconfig.json/package.json/pyproject.toml/
+                # go.mod/Cargo.toml — those are real source artifacts the
+                # LLM may need to read.
                 container.exec_run(
                     [
                         "sh",
                         "-c",
-                        f"rm -rf /workspace/{target_name}/node_modules "
-                        f"/workspace/{target_name}/package-lock.json 2>&1 || true",
+                        f"cd /workspace/{target_name} && "
+                        "rm -rf node_modules package-lock.json "
+                        ".venv venv __pycache__ "
+                        "target 2>&1 || true",
                     ],
                     user="pentester",
                 )

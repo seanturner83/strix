@@ -247,6 +247,150 @@ def _index_go(target: Path, out_dir: Path) -> Path | None:
     return out if out.exists() else None
 
 
+def _index_python(target: Path, out_dir: Path) -> Path | None:
+    """SCIP index for Python projects via @sourcegraph/scip-python.
+
+    Detection: pyproject.toml / setup.py / setup.cfg / requirements.txt.
+    Dependency install: scip-python uses Pyright under the hood; for
+    accurate import resolution we install deps when an obvious
+    install path exists (uv.lock → uv, pyproject.toml → uv if
+    available else pip-install -e, requirements.txt → pip install -r).
+    If the install fails or the toolchain is missing we proceed
+    without — scip-python emits a partial index rather than failing.
+    Cleanup of .venv/ + venv/ + __pycache__/ happens in the
+    docker_runtime hook.
+    """
+    py_markers = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt")
+    if not _has_files_matching(target, *py_markers):
+        return None
+    if not _binary_exists("scip-python"):
+        raise IndexerError("scip-python missing from sandbox")
+
+    has_venv = (target / ".venv").exists() or (target / "venv").exists()
+    has_pyproject = (target / "pyproject.toml").exists()
+    has_requirements = (target / "requirements.txt").exists()
+
+    if not has_venv:
+        try:
+            if has_pyproject and _binary_exists("uv"):
+                # uv is 10-100x faster than pip; prefer it when present.
+                _run(
+                    ["uv", "sync", "--no-dev", "--frozen"],
+                    cwd=target,
+                    timeout=300,
+                )
+            elif has_pyproject:
+                _run(
+                    ["pip", "install", "--no-deps", "-e", "."],
+                    cwd=target,
+                    timeout=300,
+                )
+            elif has_requirements:
+                _run(
+                    ["pip", "install", "-r", "requirements.txt"],
+                    cwd=target,
+                    timeout=300,
+                )
+        except IndexerError as exc:
+            logger.warning(
+                "code_graph: python deps install failed (%s); "
+                "indexing without resolved imports",
+                exc,
+            )
+
+    out = out_dir / "py.scip"
+    _run(["scip-python", "index", "--output", str(out)], cwd=target)
+    return out if out.exists() else None
+
+
+def _ensure_rust_toolchain() -> str | None:
+    """Lazy-install rustup + rust-analyzer component on first use.
+
+    Rust toolchain is ~500MB which we don't want to bake into the
+    sandbox image — most scans don't touch Rust. Install on demand
+    into /home/pentester/.cargo + /home/pentester/.rustup; cached
+    across scans in the same sandbox lifetime.
+
+    Returns the bin dir containing rust-analyzer + cargo + rustc, or
+    None if install fails (caller logs + degrades to no-index).
+    """
+    cargo_bin = Path("/home/pentester/.cargo/bin")
+    if (cargo_bin / "rust-analyzer").exists():
+        return str(cargo_bin)
+    logger.info("code_graph: lazy-installing rust toolchain for first Rust target")
+    try:
+        # rustup-init script: minimal profile (no docs/clippy/rustfmt),
+        # stable channel, then add rust-analyzer component explicitly.
+        _run(
+            [
+                "sh",
+                "-c",
+                "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs "
+                "| sh -s -- -y --default-toolchain stable --profile minimal "
+                "--no-modify-path",
+            ],
+            timeout=600,
+        )
+        _run(
+            [
+                "sh",
+                "-c",
+                "/home/pentester/.cargo/bin/rustup component add rust-analyzer",
+            ],
+            timeout=300,
+        )
+    except IndexerError as exc:
+        logger.warning("code_graph: rust toolchain lazy-install failed (%s)", exc)
+        return None
+    if not (cargo_bin / "rust-analyzer").exists():
+        logger.warning(
+            "code_graph: rustup install reported success but rust-analyzer "
+            "not at %s; check toolchain",
+            cargo_bin,
+        )
+        return None
+    return str(cargo_bin)
+
+
+def _index_rust(target: Path, out_dir: Path) -> Path | None:
+    """SCIP index for Rust projects via rust-analyzer's built-in `scip`
+    subcommand (rust-analyzer >= 2024.x ships SCIP support natively).
+
+    Detection: Cargo.toml. rust-analyzer is lazy-installed on first
+    use to keep the sandbox image lean — see _ensure_rust_toolchain.
+    Cleanup of target/ happens in the docker_runtime hook.
+    """
+    if not _has_files_matching(target, "Cargo.toml"):
+        return None
+    cargo_bin = _ensure_rust_toolchain()
+    if not cargo_bin:
+        raise IndexerError("rust toolchain unavailable for indexing")
+
+    rust_analyzer = f"{cargo_bin}/rust-analyzer"
+    cargo = f"{cargo_bin}/cargo"
+
+    # Pre-fetch the crate graph. rust-analyzer's metadata pass would
+    # otherwise stall on network; pulling crates explicitly with a
+    # tight timeout fails fast on network issues without blocking
+    # the indexer indefinitely.
+    try:
+        _run([cargo, "fetch"], cwd=target, timeout=300)
+    except IndexerError as exc:
+        logger.warning(
+            "code_graph: cargo fetch failed (%s); rust-analyzer may emit "
+            "partial scip without dep resolution",
+            exc,
+        )
+
+    out = out_dir / "rs.scip"
+    _run(
+        [rust_analyzer, "scip", str(target), "--output", str(out)],
+        cwd=target,
+        timeout=600,
+    )
+    return out if out.exists() else None
+
+
 def _convert_to_sqlite(scip_paths: tuple[Path, ...], out_dir: Path) -> Path:
     if not _binary_exists("scip"):
         raise IndexerError("scip CLI missing from sandbox")
@@ -275,12 +419,23 @@ def build_index(target_dir: Path, out_dir: Path) -> IndexResult:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     scip_paths: list[Path] = []
+    # Indexer order = priority. _convert_to_sqlite only consumes
+    # scip_paths[0] today (W1 single-language path), so the first
+    # language detected wins. TS first to match the common shape of
+    # zh services (TS auth/business-logic with Python scripts);
+    # multi-language merge is W5 follow-up.
     ts_index = _index_typescript(target_dir, out_dir)
     if ts_index is not None:
         scip_paths.append(ts_index)
     go_index = _index_go(target_dir, out_dir)
     if go_index is not None:
         scip_paths.append(go_index)
+    py_index = _index_python(target_dir, out_dir)
+    if py_index is not None:
+        scip_paths.append(py_index)
+    rs_index = _index_rust(target_dir, out_dir)
+    if rs_index is not None:
+        scip_paths.append(rs_index)
 
     if not scip_paths:
         raise IndexerError(
