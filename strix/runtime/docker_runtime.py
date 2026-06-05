@@ -377,8 +377,14 @@ class DockerRuntime(AbstractRuntime):
         """
         target_path = f"/workspace/{target_name}"
         out_dir = f"/app/runtime/code_graph/{target_name}"
+        # Use `python3` on PATH instead of a hardcoded venv interpreter
+        # path. Upstream Strix sandbox image (0.1.13) doesn't ship a
+        # .venv at /app/.venv — exec-127 confirmed via stderr probe on
+        # trade-api whitebox run 27028953402. PYTHONPATH=/app puts the
+        # baked-in strix module on the import path; mirrors how the
+        # upstream image runs `python -m strix.runtime.tool_server`.
         cmd_parts = [
-            "/app/.venv/bin/python",
+            "python3",
             "-m",
             "strix.tools.code_graph.indexer",
             "--target",
@@ -405,6 +411,12 @@ class DockerRuntime(AbstractRuntime):
                 user="pentester",
                 workdir="/app",
                 environment={
+                    # Strix module is at /app/strix from the build-time
+                    # COPY overlay. Put /app on the import path so
+                    # `python3 -m strix.tools.code_graph.indexer`
+                    # resolves regardless of how the upstream image's
+                    # Python is configured.
+                    "PYTHONPATH": "/app",
                     # Surface the env-keyed cache root to the indexer
                     # subprocess. Default unset → NullCache; the GHA
                     # workflow sets this to a host-mounted dir it syncs
