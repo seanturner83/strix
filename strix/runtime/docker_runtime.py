@@ -414,19 +414,20 @@ class DockerRuntime(AbstractRuntime):
             # from inside the container, with the same env+user as the
             # indexer subprocess.
             try:
+                # SEC-6848: probe go.mod first (most likely cause of
+                # _index_go silent fallback), then run scip-go directly
+                # to capture its own error output (the indexer module
+                # swallows IndexerError and exits 0).
                 _probe_code, _probe_out = container.exec_run(
                     [
                         "sh",
                         "-c",
-                        "echo '--- which ---'; "
-                        "which python3 scip scip-go scip-typescript 2>&1 || true; "
-                        "echo '--- /home/pentester/go/bin ---'; "
-                        "ls -la /home/pentester/go/bin/ 2>&1 || true; "
-                        "echo '--- GOPATH/GOBIN ---'; "
-                        "echo \"GOPATH=$GOPATH GOBIN=$GOBIN PATH=$PATH\"; "
-                        "echo '--- target tree probe ---'; "
-                        f"ls -la /workspace/{target_name} 2>&1 | head -20; "
-                        f"find /workspace/{target_name} -maxdepth 2 -name 'go.mod' -o -name 'tsconfig.json' -o -name 'package.json' 2>&1 | head -5",
+                        f"echo '--- go.mod / tsconfig.json / package.json under target ---'; "
+                        f"find /workspace/{target_name} -maxdepth 4 \\( -name 'go.mod' -o -name 'tsconfig.json' -o -name 'package.json' \\) 2>&1 | head -20; "
+                        f"echo '--- scip-go direct invocation ---'; "
+                        f"cd /workspace/{target_name} && scip-go --output /tmp/probe-go.scip 2>&1 | head -40; "
+                        f"echo '--- /tmp/probe-go.scip ---'; "
+                        f"ls -la /tmp/probe-go.scip 2>&1 || true",
                     ],
                     user="pentester",
                     environment={
@@ -435,7 +436,7 @@ class DockerRuntime(AbstractRuntime):
                 )
                 print(
                     f"[code_graph hook] probe target={target_name} "
-                    f"out={(_probe_out.decode('utf-8', errors='replace') if _probe_out else '')[:1500]!r}",
+                    f"out={(_probe_out.decode('utf-8', errors='replace') if _probe_out else '')[:2500]!r}",
                     file=sys.stderr,
                     flush=True,
                 )
