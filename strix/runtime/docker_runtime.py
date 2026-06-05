@@ -471,9 +471,12 @@ class DockerRuntime(AbstractRuntime):
                 ls_str = "(ls failed)"
             # SEC-6848 dev diagnostic: stderr print bypasses log-level
             # suppression. Always visible in GHA `tee -a run.log` output.
+            # output_str captures up to 2000 chars; print all of it
+            # (textblob/runpy module warnings alone fill ~600 chars on
+            # import, so we need to surface what comes after them).
             print(
                 f"[code_graph hook] exit={exit_code} target={target_name} "
-                f"out={output_str[:600]!r} ls={ls_str!r}",
+                f"out={output_str!r} ls={ls_str!r}",
                 file=sys.stderr,
                 flush=True,
             )
