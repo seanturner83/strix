@@ -417,6 +417,18 @@ class DockerRuntime(AbstractRuntime):
                     # resolves regardless of how the upstream image's
                     # Python is configured.
                     "PYTHONPATH": "/app",
+                    # scip-go is `go install`-ed during sandbox image
+                    # build to /home/pentester/go/bin/, which isn't on
+                    # the default PATH that docker exec_run inherits.
+                    # Without this, _binary_exists("scip-go") returns
+                    # False, _index_go raises IndexerError, _main
+                    # catches and exits 0 silently → no .sqlite produced,
+                    # query layer falls back to "graph not available."
+                    # scip-typescript via npm-global already lands on
+                    # the upstream image's pentester PATH; only Go needs
+                    # the explicit prepend. Confirmed via funding-service
+                    # whitebox run 27036652581 (2026-06-05) — exit=0 ls=empty.
+                    "PATH": "/home/pentester/go/bin:/usr/local/bin:/usr/bin:/bin",
                     # Surface the env-keyed cache root to the indexer
                     # subprocess. Default unset → NullCache; the GHA
                     # workflow sets this to a host-mounted dir it syncs
