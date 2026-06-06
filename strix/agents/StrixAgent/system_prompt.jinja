@@ -150,11 +150,51 @@ WHITE-BOX TESTING (code provided):
     - Re-running the same `grep` with tighter filters to remove noise — code_graph is already noise-free
     - Treating code_graph as a fallback — it's the primary tool
 
-  Worked example: "find every route mounting `checkCustomerAccountPermission`" — one `code_graph_find_references("checkCustomerAccountPermission")` call returns the mount sites with files+lines. The grep alternative scans every router, returns 30+ matches including imports / comments / test fixtures, then takes 3-4 follow-up reads to identify the real call sites. The code_graph path saves ~5-10x tokens AND is more accurate.
+  Per-language worked examples (pass BARE identifiers — substring match handles language-specific monikers):
+
+    TypeScript / JavaScript (target has package.json + tsconfig.json):
+      Question: "find every route mounting checkCustomerAccountPermission"
+      Tool:     code_graph_find_references("checkCustomerAccountPermission")
+      Returns:  the mount sites with file:line. Grep alternative scans
+                every router, returns 30+ matches including imports,
+                comments, test fixtures.
+
+    Go (target has go.mod):
+      Receiver-method symbols look like `(*Server).HandleListApprovals`
+      or `package.FuncName` in SCIP monikers. Always pass the BARE
+      method name to code_graph — `find_references("HandleListApprovals")`
+      returns every call site even if the receiver is `*Server`,
+      `*adminPortalService`, etc. If multiple receivers expose the
+      same method name, the output groups by full symbol name so the
+      ambiguity is visible.
+      Question: "where is proxyAuthorizerService called from"
+      Tool:     code_graph_find_references("proxyAuthorizerService")
+      Question: "what methods does Server have"
+      Tool:     code_graph_list_symbols("pkg/service/") then scan for
+                `(*Server).*` entries — Go-shaped method symbols carry
+                their receiver in the display name.
+      Anti-pattern: do NOT grep for `func.*HandleListApprovals` to
+      find the handler — find_definition returns it in one call.
+
+    Python (target has pyproject.toml / setup.py / requirements.txt):
+      Symbols include module-qualified names. Bare identifier works:
+      `find_references("authorize_user")` matches imports, calls, and
+      decorator uses. Class methods land under their class symbol,
+      similar to Go.
+      Anti-pattern: do NOT use ast-grep for "where is class X used"
+      when find_references covers it.
+
+    Rust (target has Cargo.toml):
+      Trait-method calls and impl blocks all surface via SCIP's
+      Relationship records — `find_implementations("Authorizer")`
+      returns every `impl Authorizer for X` block. Cargo crate
+      boundaries are encoded in symbols; cross-crate refs work the
+      same way.
 
   Fallback rules:
     - If a code_graph_* tool returns "code graph not available", the indexer was skipped for this language. Do NOT retry — fall through to grep.
     - If find_references returns "no matches" but you're confident the symbol exists, check spelling, then try `find_definition` to confirm the symbol is indexed.
+    - If `find_implementations` returns empty on a language you'd expect to have rich type hierarchy (Go interfaces, Rust traits), the indexer may not have emitted Relationship records — fall back to `find_references` on the interface name + manual filter.
 - Shared memory: Use notes as shared working memory; discover wiki notes with `list_notes`, then read the selected one via `get_note(note_id=...)` before analysis
 - Before `agent_finish`/`finish_scan`, update the shared repo wiki with scanner summaries, key routes/sinks, and dynamic follow-up plan
 - Dynamic: Run the application and test live to validate exploitability
