@@ -356,15 +356,6 @@ class DockerRuntime(AbstractRuntime):
         repo: str | None = None,
         head_sha: str | None = None,
     ) -> None:
-        # SEC-6848 dev diagnostic: stderr print bypasses strix's root-logger
-        # ERROR-level suppression (set in strix/interface/main.py). Confirms
-        # the hook is reached on every scan; remove once integration is
-        # stable and ship a real verdict line via logger.error or events.
-        print(
-            f"[code_graph hook] entry target={target_name} repo={repo} head_sha={head_sha}",
-            file=sys.stderr,
-            flush=True,
-        )
         """Pre-build the SCIP code-graph index for a target. Invoked once
         per source after copy-into-container; failure warn-and-continues.
 
@@ -375,6 +366,37 @@ class DockerRuntime(AbstractRuntime):
 
         SEC-6848 W1.3.
         """
+        # SEC-6848 + SEC-6671: short-circuit when the sandbox image
+        # doesn't carry our code_graph overlay. Weekly-merges runs on
+        # GH-hosted runners that can't pull the private ECR image, so
+        # they fall back to the upstream public sandbox (per
+        # strix-weekly-merges.yml comment). The upstream image has no
+        # /app/strix/tools/code_graph, so the indexer subprocess would
+        # crash with ModuleNotFoundError and emit a giant stderr block
+        # on every cron scan. Detect the overlay's absence and skip
+        # silently — code_graph_* tools degrade to "graph not available"
+        # which is the correct fallback for those scans.
+        try:
+            probe_rc, _ = container.exec_run(
+                ["sh", "-c", "test -d /app/strix/tools/code_graph"],
+                user="pentester",
+            )
+        except (OSError, DockerException):
+            probe_rc = 1
+        if probe_rc != 0:
+            # Image doesn't have the overlay — common on the upstream
+            # public sandbox. Quiet exit; the scan continues normally.
+            return
+
+        # SEC-6848 dev diagnostic: stderr print bypasses strix's root-logger
+        # ERROR-level suppression (set in strix/interface/main.py). Confirms
+        # the hook is reached on every scan; remove once integration is
+        # stable and ship a real verdict line via logger.error or events.
+        print(
+            f"[code_graph hook] entry target={target_name} repo={repo} head_sha={head_sha}",
+            file=sys.stderr,
+            flush=True,
+        )
         target_path = f"/workspace/{target_name}"
         out_dir = f"/app/runtime/code_graph/{target_name}"
         # Upstream Strix sandbox image (0.1.13) ships a venv at
