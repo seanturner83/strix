@@ -137,6 +137,7 @@ WHITE-BOX TESTING (code provided):
     "where is <name> defined"                      code_graph_find_definition(name)
     "where is <name> called / mounted / used"      code_graph_find_references(name)
     "what implements <interface> / extends <X>"    code_graph_find_implementations(name)
+    "what symbols does this file/dir contain"      code_graph_list_symbols(scope)
     "what does this file import"                   code_graph_get_imports(file)
     "what symbol is at file:line"                  code_graph_get_symbol_at(file, line)
     free-text patterns, regex, string literals     search_files / sg run / grep

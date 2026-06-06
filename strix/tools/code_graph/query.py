@@ -57,6 +57,83 @@ ROLE_REFERENCE = 0
 ROLE_DEFINITION = 1
 
 
+def _read_varint(blob: bytes, start: int) -> tuple[int, int]:
+    """Decode one proto varint at offset `start`. Returns (value, next_offset)."""
+    result = 0
+    shift = 0
+    i = start
+    n = len(blob)
+    while i < n:
+        b = blob[i]
+        result |= (b & 0x7F) << shift
+        i += 1
+        if not (b & 0x80):
+            return result, i
+        shift += 7
+    return result, i
+
+
+def _parse_one_relationship(blob: bytes, start: int, end: int) -> tuple[str | None, bool]:
+    """Parse fields of one SCIP Relationship message from blob[start:end]."""
+    symbol: str | None = None
+    is_impl = False
+    pos = start
+    while pos < end:
+        tag, pos = _read_varint(blob, pos)
+        field_num = tag >> 3
+        wire_type = tag & 0x7
+        if wire_type == 0:  # varint
+            val, pos = _read_varint(blob, pos)
+            if field_num == 3:  # is_implementation
+                is_impl = bool(val)
+            # is_reference (2), is_type_definition (4), is_definition (5):
+            # ignored — we only care about is_implementation
+        elif wire_type == 2:  # length-delimited
+            length, pos = _read_varint(blob, pos)
+            field_end = pos + length
+            if field_end > end:
+                break
+            if field_num == 1:  # symbol string
+                symbol = blob[pos:field_end].decode("utf-8", errors="replace")
+            pos = field_end
+        else:
+            # Unknown wire type — bail safely
+            break
+    return symbol, is_impl
+
+
+def _parse_scip_relationships(blob: bytes) -> Iterator[tuple[str, bool]]:
+    """Hand-rolled minimal parser for SCIP's `relationships` column —
+    a repeated Relationship submessage serialized inline.
+
+    SCIP Relationship (proto3):
+      string symbol           = 1;   // wire tag 0x0a, length-delimited
+      bool   is_reference     = 2;   // wire tag 0x10, varint
+      bool   is_implementation= 3;   // wire tag 0x18, varint
+      bool   is_type_definition=4;   // wire tag 0x20, varint
+      bool   is_definition    = 5;   // wire tag 0x28, varint
+
+    The container field on global_symbols' parent is a `repeated
+    Relationship`. proto3 serialises that as a sequence of
+    length-delimited submessage chunks (each Relationship preceded by
+    its own varint length).
+
+    Yields (symbol, is_implementation) per Relationship. Robust to
+    unknown fields and ragged tails (returns what it has and stops).
+    """
+    pos = 0
+    n = len(blob)
+    while pos < n:
+        length, pos = _read_varint(blob, pos)
+        msg_end = pos + length
+        if msg_end > n or length == 0:
+            break
+        symbol, is_impl = _parse_one_relationship(blob, pos, msg_end)
+        if symbol:
+            yield symbol, is_impl
+        pos = msg_end
+
+
 @dataclass(frozen=True)
 class Location:
     """A file + line range. For find_definition we have precise start_char
@@ -265,12 +342,125 @@ class CodeGraphIndex:
     def find_implementations(
         self, name: str, *, limit: int = MAX_ROWS
     ) -> list[tuple[SymbolMatch, Location]]:
-        """W2 stub: SCIP encodes implementor/subtype relationships in the
-        `global_symbols.relationships` BLOB (protobuf-encoded). Parsing
-        the blob is W3 territory; for W2 the tool returns no results and
-        the W2.2 wrapper communicates this clearly."""
-        del name, limit  # Intentionally unused until W3.
-        return []
+        """Return symbols that implement / subtype the given name.
+
+        SCIP encodes inheritance relationships in
+        `global_symbols.relationships`, a protobuf-encoded repeated
+        `Relationship` message:
+
+          message Relationship {
+            string symbol           = 1;   // wire tag 0x0a, length-delimited
+            bool   is_reference     = 2;   // wire tag 0x10, varint
+            bool   is_implementation= 3;   // wire tag 0x18, varint
+            bool   is_type_definition=4;   // wire tag 0x20, varint
+            bool   is_definition    = 5;   // wire tag 0x28, varint
+          }
+
+        A symbol with a Relationship pointing at `name` with
+        is_implementation=true is one of name's implementors.
+        We scan all global_symbols, parse their relationships blob,
+        and return rows whose blob references our target with the
+        implementation flag set.
+        """
+        if not name:
+            return []
+        matches = self._resolve_symbol(name)
+        if not matches:
+            return []
+        target_symbols = {m.symbol for m in matches}
+
+        results: list[tuple[SymbolMatch, Location]] = []
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT id, symbol, relationships FROM global_symbols "
+                "WHERE relationships IS NOT NULL"
+            )
+            rows = cur.fetchall()
+        for row in rows:
+            blob = row["relationships"]
+            if not blob:
+                continue
+            for rel_target, is_impl in _parse_scip_relationships(blob):
+                if not is_impl:
+                    continue
+                if rel_target in target_symbols:
+                    # Look up definition location of the implementor row
+                    with self._cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT d.relative_path, der.start_line,
+                                   der.start_character, der.end_line, der.end_character
+                            FROM defn_enclosing_ranges der
+                            JOIN documents d ON d.id = der.document_id
+                            WHERE der.symbol_id = ?
+                            LIMIT 1
+                            """,
+                            (row["id"],),
+                        )
+                        loc_row = cur.fetchone()
+                    if not loc_row:
+                        continue
+                    results.append(
+                        (
+                            SymbolMatch(
+                                symbol=row["symbol"],
+                                display_name=self._extract_display_name(row["symbol"]),
+                            ),
+                            Location(
+                                relative_path=loc_row["relative_path"],
+                                start_line=loc_row["start_line"],
+                                start_character=loc_row["start_character"],
+                                end_line=loc_row["end_line"],
+                                end_character=loc_row["end_character"],
+                            ),
+                        )
+                    )
+                    if len(results) >= limit:
+                        return results
+                    break  # one Relationship per row is enough
+        return results
+
+    def list_symbols(
+        self, scope: str, *, limit: int = MAX_ROWS
+    ) -> list[tuple[SymbolMatch, Location]]:
+        """List defined symbols whose containing document path begins
+        with `scope` (file path or directory prefix). Returns the
+        definition site for each symbol — useful for "what's in this
+        module" triage without reading the whole file."""
+        if not scope:
+            return []
+        like_pattern = f"{scope.rstrip('/')}%"
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT gs.symbol, d.relative_path,
+                       der.start_line, der.start_character,
+                       der.end_line, der.end_character
+                FROM defn_enclosing_ranges der
+                JOIN documents d ON d.id = der.document_id
+                JOIN global_symbols gs ON gs.id = der.symbol_id
+                WHERE d.relative_path LIKE ?
+                ORDER BY d.relative_path, der.start_line
+                LIMIT ?
+                """,
+                (like_pattern, limit),
+            )
+            return [
+                (
+                    SymbolMatch(
+                        symbol=r["symbol"],
+                        display_name=self._extract_display_name(r["symbol"]),
+                    ),
+                    Location(
+                        relative_path=r["relative_path"],
+                        start_line=r["start_line"],
+                        start_character=r["start_character"],
+                        end_line=r["end_line"],
+                        end_character=r["end_character"],
+                    ),
+                )
+                for r in cur.fetchall()
+            ]
 
     def get_imports(self, file: str, *, limit: int = MAX_ROWS) -> list[SymbolMatch]:
         """Return the global symbols mentioned in `file`. SCIP doesn't tag

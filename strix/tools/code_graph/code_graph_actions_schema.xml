@@ -56,21 +56,51 @@
   </tool>
 
   <tool name="code_graph_find_implementations">
-    <description>Return implementations / subtypes of an interface or abstract type. NOT YET SUPPORTED (SCIP relationship blob parsing pending). Tool returns a clear unsupported message; use code_graph_find_references on the interface name as a workaround.</description>
+    <description>Return implementations / subtypes of an interface or abstract type. Reads SCIP `Relationship` records where `is_implementation=true` points at the target. Use this when you have an interface or abstract class and want to know every class that implements / extends it — one tool call instead of grepping for `implements X` / `extends X` across the tree.</description>
     <parameters>
       <parameter name="interface" type="string" required="true">
-        <description>Interface or abstract type name.</description>
+        <description>Interface, trait, or abstract class name. Bare identifier preferred.</description>
       </parameter>
     </parameters>
     <returns type="Dict[str, Any]">
-      <description>{"output": "find_implementations is not yet supported..."} — stub message in W2; W3 will fill this in.</description>
+      <description>{"output": "&lt;impl_name&gt; implements &lt;interface&gt; at file:line\n..."} per implementor. Empty when nothing implements it (or when the indexer didn't emit Relationship records for that language).</description>
     </returns>
     <notes>
-  - W2 stub. Calling this won't produce useful results; prefer code_graph_find_references.
+  - Best for object-oriented languages where SCIP indexers emit Relationship records (TypeScript, Go interface satisfaction, Python ABCs, Rust traits).
+  - If the result is unexpectedly empty, the language indexer may not have emitted is_implementation for that symbol — fall back to find_references on the interface name + manual filter.
     </notes>
     <examples>
+  # Find every Auth strategy class in the tree
   <function=code_graph_find_implementations>
   <parameter=interface>AuthorizationStrategy</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="code_graph_list_symbols">
+    <description>List symbols defined under a file or directory path. Useful for "what's in this module" triage without reading the whole file — returns symbol name + definition file:line per row. Saves tokens vs reading the entire file when you only need the structural shape.</description>
+    <parameters>
+      <parameter name="scope" type="string" required="true">
+        <description>File path (e.g. `src/auth/middlewares.ts`) or directory prefix (e.g. `src/auth/`). Path is relative to repo root.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "&lt;file&gt;:\n  &lt;symbol&gt; (line N)\n..."} grouped by file. Up to 50 symbols.</description>
+    </returns>
+    <notes>
+  - For a quick map of a router/middleware/service module, this beats reading the whole file.
+  - Returns only DEFINED symbols (functions, classes, methods, exports). For references TO those symbols use code_graph_find_references.
+  - Path is prefix-matched, so `src/auth/` lists everything under that dir; `src/auth/middlewares.ts` lists symbols in that single file.
+    </notes>
+    <examples>
+  # Map out an auth module before drilling in
+  <function=code_graph_list_symbols>
+  <parameter=scope>src/auth/</parameter>
+  </function>
+
+  # Just one file's defined symbols
+  <function=code_graph_list_symbols>
+  <parameter=scope>src/withdrawals/router.ts</parameter>
   </function>
     </examples>
   </tool>

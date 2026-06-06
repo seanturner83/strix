@@ -120,19 +120,73 @@ def code_graph_find_references(
 
 @register_tool(parallel_safe=True)
 def code_graph_find_implementations(interface: str) -> dict[str, Any]:
-    """Return implementations / subtypes of `interface`. Stubbed in W2:
-    the SCIP relationships data is in a protobuf BLOB we don't yet
-    parse. Tool returns a clear unsupported message so the LLM doesn't
-    waste tokens calling it."""
-    del interface  # Intentionally unused — W3 will fill this in.
-    return {
-        "output": (
-            "find_implementations is not yet supported (SCIP relationship "
-            "blob parsing pending — SEC-6848 W3). Use find_references on "
-            "the interface name to see usages, then read each site for "
-            "implementations."
+    """Return implementations / subtypes of `interface`. Reads the SCIP
+    `global_symbols.relationships` blob and surfaces symbols whose
+    Relationship records flag is_implementation=true pointing at the
+    target interface or class."""
+    idx = _open_index()
+    if idx is None:
+        return _render_unavailable()
+    try:
+        results = idx.find_implementations(interface, limit=LLM_RESULT_LIMIT)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("code_graph_find_implementations failed: %s", exc)
+        return {"error": f"code graph query failed: {exc}"}
+    finally:
+        idx.close()
+
+    if not results:
+        return _render_no_matches("implementation", interface)
+
+    lines = [f"{m.display_name} implements {interface} at {loc.render()}" for m, loc in results]
+    if len(results) >= LLM_RESULT_LIMIT:
+        lines.append(
+            f"… result capped at {LLM_RESULT_LIMIT}; narrow the interface "
+            "name for more precise matches."
         )
-    }
+    return {"output": "\n".join(lines)}
+
+
+@register_tool(parallel_safe=True)
+def code_graph_list_symbols(scope: str) -> dict[str, Any]:
+    """List symbols defined under a file or directory path. Useful for
+    "what's in this module" triage without reading the whole file —
+    returns symbol name + definition file:line per row.
+
+    `scope` can be a single file path (e.g. "src/auth/middlewares.ts")
+    or a directory prefix (e.g. "src/auth/"). Matching is by path
+    prefix on the indexed document's relative_path."""
+    idx = _open_index()
+    if idx is None:
+        return _render_unavailable()
+    try:
+        results = idx.list_symbols(scope, limit=LLM_RESULT_LIMIT)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("code_graph_list_symbols failed: %s", exc)
+        return {"error": f"code graph query failed: {exc}"}
+    finally:
+        idx.close()
+
+    if not results:
+        return _render_no_matches("symbol under", scope)
+
+    # Group by file so output stays compact for directory queries
+    by_file: dict[str, list[str]] = {}
+    for match, loc in results:
+        by_file.setdefault(loc.relative_path, []).append(
+            f"{match.display_name} (line {loc.start_line})"
+        )
+
+    blocks: list[str] = []
+    for path, syms in by_file.items():
+        blocks.append(f"{path}:")
+        blocks.extend(f"  {s}" for s in syms)
+    if len(results) >= LLM_RESULT_LIMIT:
+        blocks.append(
+            f"… result capped at {LLM_RESULT_LIMIT}; narrow the scope "
+            "to a deeper subdirectory or specific file."
+        )
+    return {"output": "\n".join(blocks)}
 
 
 @register_tool(parallel_safe=True)
