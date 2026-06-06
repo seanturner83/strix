@@ -1135,9 +1135,13 @@ def _should_activate_auto_scope(
 
 
 def _resolve_repo_explicit_paths(
-    source: dict[str, str], explicit_paths: list[str], env: dict[str, str]
+    source: dict[str, str],
+    explicit_paths: list[str],
+    env: dict[str, str],
+    diff_base: str | None = None,
 ) -> RepoDiffScope:
-    """Build a RepoDiffScope from a caller-supplied path list, bypassing git diff.
+    """Build a RepoDiffScope from a caller-supplied path list, bypassing the
+    git-diff-derived file-list computation.
 
     Used when --scope-paths is set. Verifies each path exists in the working
     tree (silently drops missing ones with a stderr warning). All supplied
@@ -1148,6 +1152,16 @@ def _resolve_repo_explicit_paths(
 
     Existing scope-instruction code only consumes analyzable_files +
     deleted_files for scoping, so the simplification is safe.
+
+    Per-file diff preload (b6fe1a3): when `diff_base` is ALSO supplied
+    alongside the explicit paths, we still compute merge_base + capture
+    per-file unified diffs via _capture_file_diffs. This means a caller
+    that's hand-picking files (e.g. a CI workflow that pre-computes
+    `git diff --name-only` orchestrator-side) still gets the diff-
+    preload optimization — the agent's first turn includes the inline
+    patch content instead of round-tripping via str_replace_editor view.
+    Without `diff_base`, file_diffs is left empty (legacy --scope-paths
+    semantics — explicit allowlist, no diff context).
     """
     source_path = source.get("source_path", "")
     workspace_subdir = source.get("workspace_subdir")
@@ -1182,18 +1196,47 @@ def _resolve_repo_explicit_paths(
             f"Supplied {len(explicit_paths)} path(s), none found in working tree."
         )
 
+    # If a diff_base is also supplied, capture per-file diffs against
+    # its merge-base so the diff-preload (b6fe1a3) still fires. Failure
+    # to resolve the base ref is non-fatal: log + continue with
+    # file_diffs=[] (the original --scope-paths-only behavior).
+    file_diffs: list[FileDiffPayload] = []
+    base_ref_str = "(explicit --scope-paths)"
+    merge_base_str = "(explicit --scope-paths)"
+    if diff_base:
+        try:
+            base_ref = _resolve_base_ref(repo_path, diff_base, env)
+            mb_result = _run_git_command(
+                repo_path, ["merge-base", base_ref, "HEAD"], check=False
+            )
+            if mb_result.returncode == 0 and mb_result.stdout.strip():
+                merge_base = mb_result.stdout.strip()
+                file_diffs = _capture_file_diffs(repo_path, merge_base, present)
+                base_ref_str = base_ref
+                merge_base_str = merge_base
+            else:
+                sys.stderr.write(
+                    f"[scope-paths] merge-base against '{base_ref}' failed for "
+                    f"{source_path}; proceeding without diff preload\n"
+                )
+        except (ValueError, OSError) as exc:
+            sys.stderr.write(
+                f"[scope-paths] diff_base resolution failed ({exc}); "
+                f"proceeding without diff preload\n"
+            )
+
     return RepoDiffScope(
         source_path=source_path,
         workspace_subdir=workspace_subdir,
-        base_ref="(explicit --scope-paths)",
-        merge_base="(explicit --scope-paths)",
+        base_ref=base_ref_str,
+        merge_base=merge_base_str,
         added_files=[],
         modified_files=present,
         renamed_files=[],
         deleted_files=[],
         analyzable_files=present,
         truncated_sections={},
-        file_diffs=[],
+        file_diffs=file_diffs,
     )
 
 
@@ -1327,7 +1370,14 @@ def resolve_diff_scope_context(
             continue
         try:
             if explicit_paths:
-                repo_scopes.append(_resolve_repo_explicit_paths(source, explicit_paths, env_map))
+                # Thread diff_base through so the diff-preload optimization
+                # (b6fe1a3) still fires when the caller has supplied both
+                # an explicit file allowlist AND a base ref.
+                repo_scopes.append(
+                    _resolve_repo_explicit_paths(
+                        source, explicit_paths, env_map, diff_base=diff_base
+                    )
+                )
             else:
                 repo_scopes.append(_resolve_repo_diff_scope(source, diff_base, env_map))
         except ValueError as e:
