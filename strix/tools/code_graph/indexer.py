@@ -398,15 +398,49 @@ def _convert_to_sqlite(scip_paths: tuple[Path, ...], out_dir: Path) -> Path:
     # W1: single-language path. Multi-language merge ships in W2 — the SCIP
     # CLI's expt-convert takes one index at a time, so multi-lang repos will
     # need a small post-process to UNION the per-language tables.
-    primary = scip_paths[0]
-    _run(["scip", "expt-convert", str(primary), "--output", str(sqlite_path)])
-    if len(scip_paths) > 1:
-        logger.warning(
-            "code_graph: multi-language indexes (%d) detected; only %s converted in W1",
-            len(scip_paths),
-            primary.name,
-        )
-    return sqlite_path
+    #
+    # Try each .scip in priority order, using the first that converts
+    # successfully. The fallback catches a real failure mode: scip-python
+    # emits synthetic `_ScratchFile#` symbols (definition-occurrence with
+    # no matching SymbolInformation), and `scip expt-convert`'s validator
+    # rejects the whole file. Observed on seedcx/composite-actions#1142
+    # (2026-06-08, missing SQLite then downstream hang on iter-2 startup).
+    # When the Python index fails but other languages are present, this
+    # gives the agent partial coverage instead of nothing.
+    last_error: IndexerError | None = None
+    for candidate in scip_paths:
+        try:
+            _run(["scip", "expt-convert", str(candidate), "--output", str(sqlite_path)])
+        except IndexerError as exc:
+            last_error = exc
+            logger.warning(
+                "code_graph: expt-convert failed on %s: %s",
+                candidate.name,
+                str(exc)[:300],
+            )
+            # Remove any partial output before next try — sqlite3 would
+            # otherwise see a non-database file when we re-open later.
+            sqlite_path.unlink(missing_ok=True)
+            continue
+        # Success.
+        if candidate is not scip_paths[0]:
+            logger.warning(
+                "code_graph: primary scip %s failed conversion; used fallback %s",
+                scip_paths[0].name,
+                candidate.name,
+            )
+        elif len(scip_paths) > 1:
+            logger.warning(
+                "code_graph: multi-language indexes (%d) detected; only %s converted in W1",
+                len(scip_paths),
+                candidate.name,
+            )
+        return sqlite_path
+
+    # All candidates failed conversion. Re-raise so _main() warn-and-
+    # continues (INDEXER: SKIPPED → tool layer degrades to "code graph
+    # unavailable", per the contract in W2.2's _open_index).
+    raise last_error or IndexerError("no scip paths to convert")
 
 
 def build_index(target_dir: Path, out_dir: Path) -> IndexResult:
