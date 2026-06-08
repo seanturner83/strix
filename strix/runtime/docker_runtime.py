@@ -248,6 +248,19 @@ class DockerRuntime(AbstractRuntime):
                         "TOOL_SERVER_TOKEN": self._tool_server_token,
                         "STRIX_SANDBOX_EXECUTION_TIMEOUT": str(execution_timeout),
                         "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
+                        # SEC-6848: forward CodeArtifact tokens for the
+                        # SCIP indexer's `cargo fetch` step. Minted by
+                        # the strix-scan composite via IRSA before
+                        # sandbox launch (composite-actions
+                        # rw-security.yml + strix-scan-workflow
+                        # action.yml). Absent on local docker runs and
+                        # GH-hosted runners — indexer's _index_rust
+                        # degrades to no-Rust-code_graph cleanly.
+                        **{
+                            k: v
+                            for k, v in os.environ.items()
+                            if k.startswith("CARGO_REGISTRIES_") and k.endswith("_TOKEN")
+                        },
                     },
                     extra_hosts=self._get_extra_hosts(),
                     tty=True,
