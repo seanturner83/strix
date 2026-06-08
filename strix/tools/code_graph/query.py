@@ -51,10 +51,13 @@ logger = logging.getLogger(__name__)
 MAX_ROWS = 50
 
 
-# SCIP role flags. We only see two distinct values from expt-convert but
-# keep the constants named so the call sites read clearly.
-ROLE_REFERENCE = 0
-ROLE_DEFINITION = 1
+# SCIP SymbolRole is a bitfield (scip.proto): Definition=0x1, Import=0x2,
+# WriteAccess=0x4, ReadAccess=0x8, Generated=0x10, Test=0x20,
+# ForwardDefinition=0x40. expt-convert preserves the bitfield verbatim.
+# `find_references` wants anything that ISN'T a Definition (so reads,
+# writes, imports all count as references) — `role != 0 AND (role & 1) = 0`.
+ROLE_DEFINITION_MASK = 1  # bit 0
+ROLE_DEFINITION = 1  # back-compat for callers that imported the constant
 
 
 def _read_varint(blob: bytes, start: int) -> tuple[int, int]:
@@ -305,14 +308,23 @@ class CodeGraphIndex:
     def find_references(
         self, name: str, *, limit: int = MAX_ROWS, include_definition: bool = False
     ) -> list[tuple[SymbolMatch, Location]]:
-        """Return all references (role=0) to symbols matching `name`. The
-        definition site is excluded unless `include_definition` is set."""
+        """Return all references to symbols matching `name`. A reference is
+        any non-zero SCIP role that doesn't have the Definition bit (0x1)
+        set — i.e. Read (0x8), Write (0x4), Import (0x2), or any
+        combination. The definition site is included when
+        `include_definition` is set."""
         results: list[tuple[SymbolMatch, Location]] = []
-        role_filter = (ROLE_REFERENCE, ROLE_DEFINITION) if include_definition else (ROLE_REFERENCE,)
-        placeholders = ",".join("?" for _ in role_filter)
+        if include_definition:
+            role_clause = "m.role != 0"
+        else:
+            role_clause = "m.role != 0 AND (m.role & ?) = 0"
 
         for match in self._resolve_symbol(name):
             with self._cursor() as cur:
+                params: tuple = (match.symbol,)
+                if not include_definition:
+                    params = params + (ROLE_DEFINITION_MASK,)
+                params = params + (limit,)
                 cur.execute(
                     f"""
                     SELECT d.relative_path, c.start_line, c.end_line
@@ -320,11 +332,11 @@ class CodeGraphIndex:
                     JOIN chunks c     ON c.id = m.chunk_id
                     JOIN documents d  ON d.id = c.document_id
                     JOIN global_symbols gs ON gs.id = m.symbol_id
-                    WHERE gs.symbol = ? AND m.role IN ({placeholders})
+                    WHERE gs.symbol = ? AND {role_clause}
                     ORDER BY d.relative_path, c.start_line
                     LIMIT ?
                     """,
-                    (match.symbol, *role_filter, limit),
+                    params,
                 )
                 for r in cur.fetchall():
                     results.append((
@@ -477,11 +489,11 @@ class CodeGraphIndex:
                 JOIN chunks c    ON c.id = m.chunk_id
                 JOIN documents d ON d.id = c.document_id
                 JOIN global_symbols gs ON gs.id = m.symbol_id
-                WHERE d.relative_path = ? AND m.role = ?
+                WHERE d.relative_path = ? AND m.role != 0 AND (m.role & ?) = 0
                 ORDER BY gs.symbol
                 LIMIT ?
                 """,
-                (file, ROLE_REFERENCE, limit),
+                (file, ROLE_DEFINITION_MASK, limit),
             )
             return [
                 SymbolMatch(symbol=r["symbol"], display_name=self._extract_display_name(r["symbol"]))

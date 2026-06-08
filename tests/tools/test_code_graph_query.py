@@ -17,8 +17,14 @@ from strix.tools.code_graph.query import (
     CodeGraphIndex,
     Location,
     ROLE_DEFINITION,
-    ROLE_REFERENCE,
 )
+
+# Real SCIP SymbolRole values (scip.proto): bit 0 = Definition, bit 3 =
+# ReadAccess. Tests must populate mentions with the bit-flag values
+# scip-go actually emits, otherwise the find_references bitfield filter
+# is never exercised against realistic data.
+ROLE_READ_ACCESS = 8
+ROLE_WRITE_ACCESS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -124,13 +130,13 @@ def synthetic_index(tmp_path: Path) -> Path:
         "INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (?,?,?)",
         [
             (100, 10, ROLE_DEFINITION),
-            (101, 10, ROLE_REFERENCE),
-            (102, 10, ROLE_REFERENCE),
-            (103, 10, ROLE_REFERENCE),
-            (104, 10, ROLE_REFERENCE),
+            (101, 10, ROLE_READ_ACCESS),
+            (102, 10, ROLE_READ_ACCESS),
+            (103, 10, ROLE_READ_ACCESS),
+            (104, 10, ROLE_READ_ACCESS),
             (100, 11, ROLE_DEFINITION),
-            (101, 11, ROLE_REFERENCE),
-            (103, 12, ROLE_REFERENCE),  # unrelated userExists also in apiKeysRouter
+            (101, 11, ROLE_READ_ACCESS),
+            (103, 12, ROLE_READ_ACCESS),  # unrelated userExists also in apiKeysRouter
         ],
     )
 
@@ -253,6 +259,43 @@ def test_find_references_limit_enforced(synthetic_index: Path) -> None:
     try:
         results = idx.find_references("authorizeToParticipantAndAdminRole", limit=2)
         assert len(results) <= 2
+    finally:
+        idx.close()
+
+
+def test_find_references_treats_all_non_definition_roles_as_refs(tmp_path: Path) -> None:
+    # Regression: scip-go emits Read=8 / Write=4 / Import=2; an earlier
+    # version of the query layer matched on `role = 0` and silently
+    # returned zero refs for every Go bundle. Verify each non-zero
+    # non-Definition role is returned as a reference.
+    db = tmp_path / "bitfield.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("INSERT INTO documents (id, relative_path) VALUES (1, 'a.go')")
+    conn.execute("INSERT INTO global_symbols (id, symbol) VALUES (1, 'pkg/Foo#')")
+    conn.executemany(
+        "INSERT INTO chunks (id, document_id, chunk_index, start_line, end_line, occurrences) "
+        "VALUES (?,?,?,?,?,?)",
+        [(i, 1, i, i * 10, i * 10 + 5, b"") for i in range(1, 5)],
+    )
+    conn.executemany(
+        "INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (?,?,?)",
+        [
+            (1, 1, ROLE_DEFINITION),  # 1: should NOT be returned by default
+            (2, 1, 2),                # Import: should be returned
+            (3, 1, ROLE_WRITE_ACCESS),  # 4: should be returned
+            (4, 1, ROLE_READ_ACCESS),   # 8: should be returned
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    idx = CodeGraphIndex(db)
+    try:
+        refs = idx.find_references("Foo")
+        assert {loc.start_line for _, loc in refs} == {20, 30, 40}
+        with_def = idx.find_references("Foo", include_definition=True)
+        assert {loc.start_line for _, loc in with_def} == {10, 20, 30, 40}
     finally:
         idx.close()
 
