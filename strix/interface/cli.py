@@ -1,4 +1,5 @@
 import atexit
+import os
 import signal
 import sys
 import threading
@@ -86,9 +87,29 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     if getattr(args, "tool_mode", None):
         llm_config_kwargs["tool_mode"] = args.tool_mode
     llm_config = LLMConfig(**llm_config_kwargs)
+    # Orchestrator-side cap on LLM tool-call iterations per agent session.
+    # Default 100 — observed median seedcx scan converges in ~25-30 turns,
+    # p90 well below 80. The previous default (300) gave generous depth
+    # for app-code scans that legitimately need it but also let the
+    # grind-without-converging shape burn an entire 50-min wall-clock
+    # sub-session before terminating. Concrete instance: seedcx/composite-
+    # actions#1142 iter 1 was on iteration=26 when the outer 50-min cap
+    # hit, with $5 burned + 1.9M tokens + 0 vulnerabilities found.
+    #
+    # STRIX_MAX_ITERATIONS env-var override lets the orchestrator drop
+    # tighter on repos known to grind (workflow YAML / IaC / helm) and
+    # raise on repos that legitimately need deep exploration. Defaults
+    # are deliberately central — per-repo policy lives in strix-pr-
+    # dispatch.yml's resolve step.
+    try:
+        _env_max_iter = int(os.environ.get("STRIX_MAX_ITERATIONS", "").strip() or "100")
+        if _env_max_iter < 1:
+            raise ValueError("STRIX_MAX_ITERATIONS must be >= 1")
+    except ValueError as exc:
+        raise SystemExit(f"strix: invalid STRIX_MAX_ITERATIONS env var: {exc}") from exc
     agent_config = {
         "llm_config": llm_config,
-        "max_iterations": 300,
+        "max_iterations": _env_max_iter,
     }
 
     if getattr(args, "local_sources", None):
