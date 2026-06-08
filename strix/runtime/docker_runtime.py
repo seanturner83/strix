@@ -515,6 +515,52 @@ class DockerRuntime(AbstractRuntime):
                 file=sys.stderr,
                 flush=True,
             )
+            # SEC-6848 follow-up: persist SCIP outputs to host FS for
+            # S3 upload + post-hoc inspection. /app/runtime/code_graph/
+            # <target>/ lives inside the ephemeral sandbox container —
+            # containers.run() above takes no volumes=, so without an
+            # explicit get_archive the SCIP index dies with the
+            # container and the integration is unobservable post-run.
+            # When STRIX_CODE_GRAPH_PERSIST_DIR is set by the calling
+            # workflow (strix-scan composite passes work/$RUN_DIR/
+            # code_graph), the existing `aws s3 cp --recursive
+            # work/$RUN_DIR` upload picks the extracted tree up for
+            # free. Unset on local dev runs → no-op.
+            persist_dir = os.environ.get("STRIX_CODE_GRAPH_PERSIST_DIR", "")
+            if persist_dir:
+                try:
+                    bits, _ = container.get_archive(
+                        f"/app/runtime/code_graph/{target_name}"
+                    )
+                    Path(persist_dir).mkdir(parents=True, exist_ok=True)
+                    with tarfile.open(
+                        fileobj=BytesIO(b"".join(bits)), mode="r"
+                    ) as tar:
+                        # filter="data" guards against tarfile path
+                        # traversal — sandbox container is pen-test
+                        # scope and not fully trusted from a strict
+                        # view, even though the SCIP indexer writes
+                        # known filenames.
+                        tar.extractall(persist_dir, filter="data")
+                    print(
+                        f"[code_graph hook] persist OK target={target_name} "
+                        f"dest={persist_dir}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except (
+                    OSError,
+                    DockerException,
+                    NotFound,
+                    tarfile.TarError,
+                    ValueError,
+                ) as exc:
+                    print(
+                        f"[code_graph hook] persist FAILED target={target_name} "
+                        f"exc={exc!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             # SEC-6848: clean up TS indexer scaffolding so the LLM scan
             # loop sees a pristine target tree. _index_typescript runs
             # `npm install` inside /workspace/<target>/ to resolve the
