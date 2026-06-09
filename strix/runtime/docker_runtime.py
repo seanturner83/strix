@@ -261,6 +261,42 @@ class DockerRuntime(AbstractRuntime):
                             for k, v in os.environ.items()
                             if k.startswith("CARGO_REGISTRIES_") and k.endswith("_TOKEN")
                         },
+                        # SEC-6848: forward Go module-resolution env vars
+                        # so scip-go's `go list` / `go mod download` step
+                        # can fetch private seedcx modules during the
+                        # SCIP index build. Without these scip-go falls
+                        # back to "github.com/golang/go/src" monikers on
+                        # private deps — symbols are still indexed but
+                        # module/version disambiguation is lost (~92%
+                        # symbol coverage vs full GOPROXY-enabled local
+                        # build; observed on connection-service
+                        # 2026-06-09). Setting GOPROXY=internal mirror +
+                        # GOSUMDB=off matches the precedent landed by
+                        # composite-actions PR #1148 for e2e tests.
+                        # Absent on local / GH-hosted — scip-go degrades
+                        # gracefully (in-tree symbols still indexed).
+                        **{
+                            k: v
+                            for k, v in os.environ.items()
+                            if k in ("GOPROXY", "GOPRIVATE", "GOSUMDB", "GONOPROXY", "GOFLAGS")
+                        },
+                        # SEC-6848: forward npm auth + config env vars
+                        # for scip-typescript's `npm install` step.
+                        # Without these, npm install can't resolve
+                        # private @seedcx packages or
+                        # CodeArtifact-mirrored ones, scip-typescript
+                        # runs against the bare tree, and the SCIP
+                        # index is partial (cross-package refs to
+                        # private deps are missing). NPM_TOKEN /
+                        # NODE_AUTH_TOKEN are the standard names;
+                        # NPM_CONFIG_* lets npm CLI read registry +
+                        # other config overrides from env without a
+                        # baked .npmrc in the sandbox image.
+                        **{
+                            k: v
+                            for k, v in os.environ.items()
+                            if k in ("NPM_TOKEN", "NODE_AUTH_TOKEN") or k.startswith("NPM_CONFIG_")
+                        },
                     },
                     extra_hosts=self._get_extra_hosts(),
                     tty=True,
