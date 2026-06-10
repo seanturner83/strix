@@ -75,10 +75,24 @@ class RequestStats:
 
 
 class LLM:
-    def __init__(self, config: LLMConfig, agent_name: str | None = None):
+    # Predicted-iteration threshold above which we use the 1-hour cache
+    # TTL instead of the default 5-minute. Above ~20 iterations a scan
+    # reliably crosses the 5-min boundary at typical Bedrock latencies,
+    # which forces a full prelude reload + cache rewrite per crossing —
+    # paying input-rate ($15/M for Opus) instead of cache-read rate
+    # ($1.50/M). Threshold is conservative: at 20-iter a scan averages
+    # ~10-15min wall-clock, comfortably past 5min. Cache-write doubles
+    # ($18.75/M → ~$37.50/M for Opus) but only fires once per scan;
+    # cache-read savings on every subsequent iteration dominate.
+    # SEC-???? cost-optimisation analysis 2026-06-11.
+    _CACHE_TTL_1H_THRESHOLD = 20
+
+    def __init__(self, config: LLMConfig, agent_name: str | None = None,
+                 max_iterations: int | None = None):
         self.config = config
         self.agent_name = agent_name
         self.agent_id: str | None = None
+        self.max_iterations = max_iterations
         self._active_skills: list[str] = list(config.skills or [])
         self._system_prompt_context: dict[str, Any] = dict(
             getattr(config, "system_prompt_context", {}) or {}
@@ -392,10 +406,36 @@ class LLM:
                 result.append(msg)
         return result
 
+    def _cache_control(self) -> dict[str, str]:
+        """Return the cache_control object to apply to stable prompt
+        segments. Defaults to 5-minute ephemeral cache. For long-budget
+        scans (max_iterations >= _CACHE_TTL_1H_THRESHOLD) we extend to
+        the 1-hour TTL so iterations spaced > 5min apart still hit cache
+        instead of paying full input-rate to reload the prelude.
+
+        Override unconditionally with STRIX_CACHE_TTL=1h or 5m.
+        """
+        override = Config.get("strix_cache_ttl")
+        if override in ("1h", "5m"):
+            ttl = override
+        elif self.max_iterations and self.max_iterations >= self._CACHE_TTL_1H_THRESHOLD:
+            ttl = "1h"
+        else:
+            ttl = "5m"
+
+        out: dict[str, str] = {"type": "ephemeral"}
+        if ttl != "5m":
+            # Bedrock and Anthropic accept "ttl": "1h"; "5m" is the
+            # default and emitting it explicitly is a noop. Keep the
+            # default form short to minimise diff from upstream.
+            out["ttl"] = ttl
+        return out
+
     def _add_cache_control(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not messages or not supports_prompt_caching(self.config.canonical_model):
             return messages
 
+        cache_control = self._cache_control()
         result = list(messages)
 
         if result[0].get("role") == "system":
@@ -403,7 +443,7 @@ class LLM:
             result[0] = {
                 **result[0],
                 "content": [
-                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                    {"type": "text", "text": content, "cache_control": cache_control}
                 ]
                 if isinstance(content, str)
                 else content,
