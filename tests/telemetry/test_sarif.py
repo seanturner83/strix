@@ -295,3 +295,128 @@ def test_document_shape_matches_sarif_2_1_0_top_level() -> None:
         for location in result["locations"]:
             assert location["physicalLocation"]["artifactLocation"]["uri"]
             assert "startLine" in location["physicalLocation"]["region"]
+
+
+# ---------------------------------------------------------------------------
+# partialFingerprints (SEC-6941)
+# ---------------------------------------------------------------------------
+
+
+def _result_for(finding: dict[str, Any]) -> dict[str, Any]:
+    sarif = build_sarif_report([finding])
+    return sarif["runs"][0]["results"][0]
+
+
+def test_partial_fingerprints_emitted_for_findings_with_locations() -> None:
+    """Every result with a code location should carry
+    partialFingerprints.primaryLocationLineHash so GHAS can reconcile
+    alerts across runs even when the SARIF (category, analysis_key)
+    namespace drifts. Sibling to composite-actions#1161 (Checkov)."""
+    result = _result_for(_finding())
+    assert result["partialFingerprints"]["primaryLocationLineHash"]
+    assert len(result["partialFingerprints"]["primaryLocationLineHash"]) == 64  # sha256
+
+
+def test_class_fingerprint_emitted_in_properties() -> None:
+    """The file-independent class hash is a sibling property used by the
+    orphan-sweep tooling to carry dismissal determinations across file
+    renames (see SEC-6941 plan)."""
+    result = _result_for(_finding(title="Open redirect on /login GET handler"))
+    class_hash = result["properties"]["zh_strix_vuln_class_hash"]
+    assert class_hash
+    assert len(class_hash) == 64  # sha256
+
+
+def test_primary_fingerprint_stable_across_cosmetic_title_change() -> None:
+    """Same vulnerability class on the same file:line with the same route
+    must produce the same primary fingerprint regardless of LLM title
+    rephrasing run-over-run. This is the SEC-6941 motivation: titles
+    are stochastic; primitives (CWE rule_id, file:line, route) are not.
+    """
+    a = _result_for(_finding(title="Unsanitized redirect target"))
+    b = _result_for(
+        _finding(title="Open Redirect via Unvalidated `next` Parameter")
+    )
+    assert (
+        a["partialFingerprints"]["primaryLocationLineHash"]
+        == b["partialFingerprints"]["primaryLocationLineHash"]
+    )
+
+
+def test_primary_fingerprint_differs_across_distinct_findings_in_same_file() -> None:
+    """Two different findings on the same file:line with different CWEs
+    must produce distinct primary fingerprints — otherwise GHAS would
+    collapse them into one alert."""
+    a = _result_for(_finding(cwe="CWE-601"))
+    b = _result_for(_finding(cwe="CWE-918", title="SSRF on the same handler"))
+    assert (
+        a["partialFingerprints"]["primaryLocationLineHash"]
+        != b["partialFingerprints"]["primaryLocationLineHash"]
+    )
+
+
+def test_class_fingerprint_survives_file_rename() -> None:
+    """File rename (refactor with no fix): primary fingerprint
+    legitimately differs because the location moved, but class
+    fingerprint stays stable so the orphan-sweep tooling can carry
+    forward a prior dismissal determination."""
+    orig = _finding(
+        title="Open redirect on /login",
+        code_locations=[
+            {
+                "file": "src/auth/redirects.py",
+                "start_line": 42,
+                "end_line": 45,
+            }
+        ],
+    )
+    renamed = _finding(
+        title="Open redirect on /login",
+        code_locations=[
+            {
+                "file": "src/security/redirects.py",  # moved
+                "start_line": 42,
+                "end_line": 45,
+            }
+        ],
+    )
+    a = _result_for(orig)
+    b = _result_for(renamed)
+    assert (
+        a["partialFingerprints"]["primaryLocationLineHash"]
+        != b["partialFingerprints"]["primaryLocationLineHash"]
+    )
+    assert (
+        a["properties"]["zh_strix_vuln_class_hash"]
+        == b["properties"]["zh_strix_vuln_class_hash"]
+    )
+
+
+def test_primary_fingerprint_omitted_when_no_anchor_available() -> None:
+    """Findings with no code location AND no method+endpoint can't be
+    fingerprinted from primitives. Better to omit partialFingerprints
+    than to fingerprint by rule_id alone (which would collapse every
+    locationless finding of the same CWE to one alert in GHAS)."""
+    finding = _finding(method="", endpoint="", code_locations=[])
+    sarif = build_sarif_report([finding])
+    # Locationless findings are summarized in run.properties, not emitted
+    # as code-scanning results — verify that path stays intact.
+    assert sarif["runs"][0]["results"] == []
+    assert sarif["runs"][0]["properties"]["locationlessFindings"]
+
+
+def test_primary_fingerprint_uses_route_when_locations_have_route() -> None:
+    """Findings that have BOTH a code location and a route get both in
+    the fingerprint composite. Route presence makes BOLA/IDOR findings
+    on the same handler file distinguishable from non-routed findings
+    in the same file."""
+    routed = _result_for(
+        _finding(method="POST", endpoint="/admin/delete", title="BOLA on delete")
+    )
+    unrouted = _result_for(
+        _finding(method="", endpoint="", title="Unsanitized redirect target")
+    )
+    assert (
+        routed["partialFingerprints"]["primaryLocationLineHash"]
+        != unrouted["partialFingerprints"]["primaryLocationLineHash"]
+    )

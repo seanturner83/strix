@@ -36,8 +36,10 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -250,11 +252,27 @@ def _build_result(
     }
     if locations:
         result["locations"] = locations
-    result["properties"] = _result_properties(report)
+    # GHAS auto-resolution + dismissal-stickiness key on
+    # partialFingerprints. Computed from the deterministic primitives
+    # this report already carries (CWE, primary code location, route
+    # tuple) — NOT from the LLM-authored title or message body, which
+    # vary cosmetically across runs of the same finding. See SEC-6941.
+    fp = _primary_fingerprint(rule_id, report, locations)
+    if fp:
+        result["partialFingerprints"] = {"primaryLocationLineHash": fp}
+    # File-independent class fingerprint as a sibling property: lets
+    # downstream tooling (orphan-sweep) carry "won't fix" / "false
+    # positive" determinations across file rename refactors where the
+    # primary fingerprint legitimately shifts but the underlying class
+    # is unchanged.
+    class_fp = _class_fingerprint(rule_id, report)
+    result["properties"] = _result_properties(report, class_fp)
     return result
 
 
-def _result_properties(report: dict[str, Any]) -> dict[str, Any]:
+def _result_properties(
+    report: dict[str, Any], class_fingerprint: str | None = None
+) -> dict[str, Any]:
     """Strix-specific metadata for downstream consumers.
 
     The top-level ``security-severity`` matches GitHub code-scanning's
@@ -264,6 +282,10 @@ def _result_properties(report: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "security-severity": _security_severity(report),
     }
+    if class_fingerprint:
+        # Surfaced at top level so the orphan-sweep tooling can filter
+        # GHAS alerts by it without parsing the nested strix.* tree.
+        properties["zh_strix_vuln_class_hash"] = class_fingerprint
 
     strix: dict[str, Any] = {}
     for key in (
@@ -406,6 +428,167 @@ def _normalise_cwe(value: str) -> str | None:
     if not digits:
         return None
     return f"CWE-{digits}"
+
+
+# Vulnerability-class keywords for the file-independent class
+# fingerprint. Order matters — first match wins, so precise terms
+# come before fuzzy ones (e.g. "broken access control" before
+# "access control"). Keep this list closed and curated; an attacker
+# can't reach it but a future maintainer adding sloppy entries
+# could collapse distinct findings to the same class hash.
+_VULN_CLASS_KEYWORDS = (
+    "missing authentication",
+    "missing authorization",
+    "broken access control",
+    "incorrect authorization",
+    "default credentials",
+    "hardcoded credentials",
+    "hardcoded secret",
+    "hardcoded password",
+    "default admin",
+    "default password",
+    "session fixation",
+    "open redirect",
+    "path traversal",
+    "directory traversal",
+    "command injection",
+    "sql injection",
+    "code injection",
+    "template injection",
+    "xpath injection",
+    "ldap injection",
+    "log injection",
+    "header injection",
+    "csv injection",
+    "prompt injection",
+    "deserialization",
+    "ssrf",
+    "xss",
+    "csrf",
+    "xxe",
+    "race condition",
+    "toctou",
+    "information disclosure",
+    "insecure direct object reference",
+    "idor",
+    "bola",
+    "bfla",
+    "cross-tenant",
+    "cross-project",
+    "tenant bypass",
+    "auth bypass",
+    "rate limiting",
+    "rate limit",
+    "weak cryptography",
+    "weak hash",
+    "weak random",
+    "insecure random",
+    "tls verification",
+    "certificate verification",
+    "denial of service",
+    "regex denial of service",
+    "redos",
+    "supply chain",
+)
+
+
+def _primary_fingerprint(
+    rule_id: str,
+    report: dict[str, Any],
+    locations: list[dict[str, Any]],
+) -> str | None:
+    """Deterministic per-finding fingerprint for SARIF auto-resolution.
+
+    Computed from primitives that don't depend on LLM prose stability:
+
+      - rule_id (already CWE-normalised by ``_rule_id``)
+      - first SARIF location's URI + startLine — these come from
+        Strix's ``code_locations[].file`` and ``start_line`` which
+        are sourced from the actual finding evidence, not synthesized
+      - HTTP method + endpoint when present (BOLA/IDOR/missing-authz
+        findings carry these explicitly in the report dict)
+
+    Returns None if neither a location nor a method+endpoint is
+    available — the caller will skip emitting partialFingerprints
+    in that case rather than fingerprint by rule_id alone (which
+    would collapse every locationless finding of the same CWE to
+    one alert in GHAS).
+    """
+    primary_loc = locations[0] if locations else None
+    uri = ""
+    start_line: int | None = None
+    if primary_loc:
+        physical = primary_loc.get("physicalLocation") or {}
+        uri = (physical.get("artifactLocation") or {}).get("uri", "") or ""
+        region = physical.get("region") or {}
+        sl = region.get("startLine")
+        if isinstance(sl, int) and sl >= 1:
+            start_line = sl
+
+    method = _string_value(report.get("method")) or ""
+    endpoint = _string_value(report.get("endpoint")) or ""
+    route = f"{method.upper()} {endpoint}".strip() if (method or endpoint) else ""
+
+    # Bail when we have no anchor at all. Hashing by rule_id alone
+    # would over-collapse; better to skip and let GHAS fall back to
+    # its native location-based matching for these.
+    if not uri and not route:
+        return None
+
+    parts = [f"rule:{rule_id}"]
+    if uri:
+        parts.append(f"uri:{uri}")
+        if start_line is not None:
+            # startLine in fingerprint is debatable: line shifts in
+            # surrounding code re-fingerprint. The alternative — drop
+            # line — collides multiple findings per file. We include
+            # line because Strix code_locations carry the SINK line,
+            # which moves only when the vulnerable code itself moves;
+            # lines surfacing from cosmetic edits in unrelated parts
+            # of the file don't shift it.
+            parts.append(f"line:{start_line}")
+    if route:
+        parts.append(f"route:{route}")
+
+    composite = "|".join(parts)
+    return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+
+
+def _class_fingerprint(rule_id: str, report: dict[str, Any]) -> str | None:
+    """File-independent fingerprint for cross-rename dismissal carryover.
+
+    Lets the orphan-sweep tooling apply prior dismissal determinations
+    to a new alert that has the same vulnerability class but a
+    different primary fingerprint (typical case: file rename, or a
+    fix that moves the vulnerable code to a new module).
+
+    Composite of (rule_id, vuln-class keyword extracted from title).
+    Title is LLM-authored so it's stochastic at the prose level, but
+    the class keyword extraction picks up the discrete vulnerability
+    category, which is much more stable than the full title.
+
+    Falls back to the first 5 lowercased words of the title when no
+    curated keyword matches. Acceptable as a fallback because the
+    class fingerprint is a tiebreaker for orphan-sweep, not a
+    primary reconciliation key.
+    """
+    title = _string_value(report.get("title")) or ""
+    if not title:
+        return None
+    lower = title.lower()
+    matched = next(
+        (kw for kw in _VULN_CLASS_KEYWORDS if kw in lower),
+        None,
+    )
+    if matched:
+        keyword = matched
+    else:
+        words = re.findall(r"[a-z0-9]+", lower)[:5]
+        keyword = " ".join(words)
+        if not keyword:
+            return None
+    composite = f"rule:{rule_id}|class:{keyword}"
+    return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
 
 def _rule_name(rule_id: str, title: str) -> str:
