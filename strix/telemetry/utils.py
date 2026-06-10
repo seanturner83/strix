@@ -301,6 +301,49 @@ class JsonlSpanExporter(SpanExporter):  # type: ignore[misc]
         return record
 
 
+def _disable_threading_instrumentation() -> None:
+    """Forcibly unwrap OTel's threading instrumentation.
+
+    The `opentelemetry-instrumentation-threading` package wraps
+    `concurrent.futures.ThreadPoolExecutor.submit` at class level when
+    its `instrument()` method runs (auto-discovery via OTel's
+    entry-point loader). The wrap intercepts every subsequent submit
+    org-wide — including litellm's memory_compressor pool, which
+    Strix recycles between iterations. After an iteration boundary
+    the wrapped executor is shut down, but the OTel wrap doesn't
+    know, and the next submit raises::
+
+        RuntimeError: cannot schedule new futures after shutdown
+
+    This cascades through memory_compressor's retry loop and aborts
+    the entire iter — observed on staking-controller#304 (run
+    27193866347, 2026-06-09): three iters burned, 103 turns, 0
+    findings, SIGKILL 137.
+
+    The advertised mitigation `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=
+    threading` env var doesn't fire reliably — the threading
+    instrumentor's entry point is loaded before the env var is
+    consulted in some startup orderings. Programmatic uninstrument
+    is the durable fix: regardless of load order, this removes the
+    class-level wrap so future submits behave normally.
+
+    No-op if the threading instrumentor isn't installed.
+    """
+    try:
+        from opentelemetry.instrumentation.threading import (
+            ThreadingInstrumentor,
+        )
+    except ImportError:
+        return
+    try:
+        ThreadingInstrumentor().uninstrument()
+    except Exception:
+        logger.exception(
+            "Failed to uninstrument OTel threading wrap; "
+            "litellm memory_compressor may crash at iter boundary"
+        )
+
+
 def bootstrap_otel(
     *,
     bootstrapped: bool,
@@ -324,6 +367,12 @@ def bootstrap_otel(
                 bootstrapped,
                 remote_enabled_state,
             )
+
+        # SEC-6848: durable fix for the OTel threading wrap that
+        # crashes litellm's memory_compressor at iter boundaries.
+        # Runs before traceloop.init() so the instrumentor is
+        # unwrapped whether OTel auto-loaded it or traceloop did.
+        _disable_threading_instrumentation()
 
         local_exporter = JsonlSpanExporter(
             output_path_getter=output_path_getter,
