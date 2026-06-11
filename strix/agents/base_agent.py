@@ -76,8 +76,7 @@ class BaseAgent(metaclass=AgentMeta):
         self.interactive = getattr(self.llm_config, "interactive", False)
         if self.interactive and self.state.parent_id is None:
             self.state.waiting_timeout = 0
-        self.llm = LLM(self.llm_config, agent_name=self.agent_name,
-                       max_iterations=self.max_iterations)
+        self.llm = LLM(self.llm_config, agent_name=self.agent_name)
 
         with contextlib.suppress(Exception):
             self.llm.set_agent_identity(self.state.agent_name, self.state.agent_id)
