@@ -364,6 +364,19 @@ class LLM:
 
         if self._is_anthropic() and self.config.enable_prompt_caching:
             messages = self._add_cache_control(messages)
+            # Diagnostic: dump cache_control values that ended up in the
+            # outbound payload, so we can see exactly what LiteLLM gets.
+            import sys as _sys
+            for _i, _m in enumerate(messages[:2]):
+                _content = _m.get("content")
+                if isinstance(_content, list):
+                    for _j, _c in enumerate(_content):
+                        if isinstance(_c, dict) and "cache_control" in _c:
+                            print(
+                                f"[STRIX-OUTBOUND] msg[{_i}].content[{_j}].cache_control = "
+                                f"{_c['cache_control']}",
+                                file=_sys.stderr, flush=True,
+                            )
 
         return messages
 
@@ -637,6 +650,15 @@ class LLM:
             # default and emitting it explicitly is a noop. Keep the
             # default form short to minimise diff from upstream.
             out["ttl"] = ttl
+        # Diagnostic: log what we returned so we can see at the runner
+        # whether 1h is being requested. Will be stripped after the
+        # ttl-flow is verified end-to-end on Bedrock.
+        import sys as _sys
+        print(
+            f"[STRIX-CACHE-CONTROL] max_iter={self.max_iterations} "
+            f"override={override!r} ttl={ttl} -> {out}",
+            file=_sys.stderr, flush=True,
+        )
         return out
 
     def _add_cache_control(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
