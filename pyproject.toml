@@ -33,7 +33,13 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "litellm[proxy]>=1.81.1,<1.82.0",
+  # litellm 1.88+ depends on boto3>=1.43.1, which is the floor for
+  # Bedrock CachePointBlock to know about the `ttl` field (added Jan
+  # 2026 for the 1h-cache-extension). Older boto3 silently strips the
+  # ttl from the request at marshal time, falling back to 5m. The
+  # original 1.81.1<1.82.0 range hard-pinned boto3 to 1.40.76, blocking
+  # the 1h-TTL feature regardless of model+litellm allowlist.
+  "litellm[proxy]>=1.88.1,<1.89.0",
   "tenacity>=9.0.0",
   "pydantic[email]>=2.11.3",
   "rich",
