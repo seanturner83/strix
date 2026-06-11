@@ -64,6 +64,40 @@ try:
 
     print(f"[STRIX-CACHE-PATCH] patched modules: {_patched_modules}",
           file=sys.stderr, flush=True)
+
+    # Wrap _get_cache_point_block to log what LiteLLM actually sees and
+    # what cache_point it constructs. This is the choke point — if our
+    # cache_control reaches here with ttl='1h' but the constructed
+    # cache_point omits ttl, LiteLLM is the bug. If cache_control
+    # arrives with no ttl, our injection didn't survive transit.
+    try:
+        from litellm.llms.bedrock.chat import converse_transformation as _conv_xform_diag
+        # Get the bound method's class — there are 3 overloads + 1 impl.
+        # The implementation is at line 1101 (the runtime one).
+        # Walk classes in the module looking for AmazonConverseConfig.
+        _cls = getattr(_conv_xform_diag, "AmazonConverseConfig", None)
+        if _cls is not None:
+            _orig_get_cp = _cls._get_cache_point_block
+
+            def _wrapped_get_cp(self, message_block, block_type, model=None):
+                cc = (message_block.get("cache_control") if hasattr(message_block, "get") else None)
+                result = _orig_get_cp(self, message_block, block_type, model=model)
+                # Only log when cache_control was present (i.e. caller intends
+                # to enable caching for this block).
+                if cc is not None:
+                    print(
+                        f"[STRIX-LITELLM-CP] block_type={block_type} model={model!r} "
+                        f"cc_in={cc} -> result={result}",
+                        file=sys.stderr, flush=True,
+                    )
+                return result
+
+            _cls._get_cache_point_block = _wrapped_get_cp
+            print("[STRIX-CACHE-PATCH] wrapped AmazonConverseConfig._get_cache_point_block",
+                  file=sys.stderr, flush=True)
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[STRIX-CACHE-PATCH] FAILED to wrap _get_cache_point_block: {_exc!r}",
+              file=sys.stderr, flush=True)
 except Exception as _exc:  # noqa: BLE001
     import sys as _sys
     print(f"[STRIX-CACHE-PATCH] FAILED to install: {_exc!r}",
