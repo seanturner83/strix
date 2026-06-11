@@ -29,6 +29,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="asyncio")
 # extends the allowlist to cover our actual models. Drop when upstream
 # resolves the issue.
 try:
+    import sys
     from litellm.llms.bedrock import common_utils as _bedrock_utils
 
     _orig_is_claude_4_5 = _bedrock_utils.is_claude_4_5_on_bedrock
@@ -37,23 +38,33 @@ try:
         if _orig_is_claude_4_5(model):
             return True
         m = model.lower()
-        return any(pat in m for pat in (
+        result = any(pat in m for pat in (
             "opus-4-7", "opus_4_7", "opus-4.7", "opus_4.7",
             "opus-4-8", "opus_4_8", "opus-4.8", "opus_4.8",
         ))
+        # Loud signal so we can verify the patch is firing. Will spam
+        # but easy to grep for. Remove once verified.
+        print(f"[STRIX-CACHE-PATCH] is_claude_4_5_on_bedrock({model!r}) = {result}",
+              file=sys.stderr, flush=True)
+        return result
 
     _bedrock_utils.is_claude_4_5_on_bedrock = _patched_is_claude_4_5_on_bedrock
 
-    # ALSO patch the imported reference inside converse_transformation —
-    # `from foo import bar` binds at import time, so updating the module
-    # source isn't enough; the imported binding inside transformer must
-    # be replaced too.
-    try:
-        from litellm.llms.bedrock.chat import converse_transformation as _conv_xform
-        _conv_xform.is_claude_4_5_on_bedrock = _patched_is_claude_4_5_on_bedrock
-    except Exception:  # noqa: BLE001
-        pass
-except Exception:  # noqa: BLE001
-    # Upstream LiteLLM may eventually fix the function or reshape the
-    # module — in either case we don't want a startup crash.
-    pass
+    # Patch every module that has already done a `from common_utils import
+    # is_claude_4_5_on_bedrock`, since those module-local bindings won't
+    # update when we replace the source. We reach over every loaded module
+    # and stomp the binding in place if present.
+    _patched_modules = []
+    for _mod_name, _mod in list(sys.modules.items()):
+        if _mod is None or not _mod_name.startswith("litellm."):
+            continue
+        if getattr(_mod, "is_claude_4_5_on_bedrock", None) is _orig_is_claude_4_5:
+            _mod.is_claude_4_5_on_bedrock = _patched_is_claude_4_5_on_bedrock
+            _patched_modules.append(_mod_name)
+
+    print(f"[STRIX-CACHE-PATCH] patched modules: {_patched_modules}",
+          file=sys.stderr, flush=True)
+except Exception as _exc:  # noqa: BLE001
+    import sys as _sys
+    print(f"[STRIX-CACHE-PATCH] FAILED to install: {_exc!r}",
+          file=_sys.stderr, flush=True)
