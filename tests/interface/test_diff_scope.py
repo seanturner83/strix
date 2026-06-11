@@ -511,3 +511,66 @@ def test_resolve_diff_scope_context_rejects_scope_paths_with_full_mode(tmp_path:
             non_interactive=True,
             env={},
         )
+
+
+def test_build_diff_scope_instruction_includes_self_reference_advisory_when_repo_full_name_set() -> None:
+    # SEC: when the canonical owner/repo is known, the agent prompt
+    # surfaces a self-reference advisory so intra-repo `uses:` /
+    # imports / path refs aren't flagged as third-party.
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="target",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=[],
+        modified_files=["foo.yml"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["foo.yml"],
+        repo_full_name="seedcx/composite-actions",
+    )
+    out = utils.build_diff_scope_instruction([scope])
+    assert "Repository: seedcx/composite-actions" in out
+    assert "Self-reference advisory" in out
+    assert "seedcx/composite-actions/..." in out
+    assert "intra-repo" in out
+
+
+def test_build_diff_scope_instruction_omits_self_reference_when_repo_full_name_unset() -> None:
+    # No repo_full_name → no advisory line, render stays as before.
+    scope = utils.RepoDiffScope(
+        source_path="/tmp/repo",
+        workspace_subdir="target",
+        base_ref="refs/remotes/origin/main",
+        merge_base="abc123",
+        added_files=[],
+        modified_files=["foo.py"],
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=["foo.py"],
+    )
+    out = utils.build_diff_scope_instruction([scope])
+    assert "Self-reference advisory" not in out
+    # The basic Repository Scope line still renders unchanged.
+    assert "Repository Scope: target" in out
+
+
+def test_resolve_diff_scope_context_stamps_repo_full_name_on_first_scope(tmp_path: Path) -> None:
+    repo = _make_git_repo(tmp_path)
+    (repo / "x.py").write_text("# x\n")
+
+    sources = [{"source_path": str(repo), "workspace_subdir": "repo"}]
+    result = utils.resolve_diff_scope_context(
+        local_sources=sources,
+        scope_mode="diff",
+        diff_base=None,
+        scope_paths="x.py",
+        non_interactive=True,
+        env={},
+        target_repo_full_name="seedcx/composite-actions",
+    )
+    assert result.active is True
+    assert result.metadata["repos"][0]["repo_full_name"] == "seedcx/composite-actions"
+    # The advisory lands in the rendered prompt on result.instruction_block.
+    assert "Self-reference advisory" in result.instruction_block
+    assert "seedcx/composite-actions" in result.instruction_block

@@ -504,6 +504,12 @@ class RepoDiffScope:
     renamed_files: list[dict[str, Any]]
     deleted_files: list[str]
     analyzable_files: list[str]
+    # Canonical owner/repo (e.g. "seedcx/composite-actions") when the
+    # caller supplied it. Surfaced in the diff-scope instruction so the
+    # agent can recognise intra-repo self-references in workflow uses:
+    # entries / imports / path refs. None when the caller didn't pass
+    # one — render falls back to the workspace_subdir basename only.
+    repo_full_name: str | None = None
     truncated_sections: dict[str, bool] = field(default_factory=dict)
     file_diffs: list[FileDiffPayload] = field(default_factory=list)
 
@@ -511,6 +517,7 @@ class RepoDiffScope:
         return {
             "source_path": self.source_path,
             "workspace_subdir": self.workspace_subdir,
+            "repo_full_name": self.repo_full_name,
             "base_ref": self.base_ref,
             "merge_base": self.merge_base,
             "added_files": self.added_files,
@@ -1025,6 +1032,22 @@ def build_diff_scope_instruction(scopes: list[RepoDiffScope]) -> str:  # noqa: P
         repo_name = scope.workspace_subdir or Path(scope.source_path).name or "repository"
         lines.append("")
         lines.append(f"Repository Scope: {repo_name}")
+        # When the canonical owner/repo is known, surface it explicitly
+        # so the agent can recognise intra-repo self-references. Without
+        # this, references like `uses: seedcx/composite-actions/...@main`
+        # inside seedcx/composite-actions itself read as third-party,
+        # producing false-positive supply-chain findings.
+        if scope.repo_full_name:
+            lines.append(f"Repository: {scope.repo_full_name}")
+            lines.append(
+                f"Self-reference advisory: workflow `uses:`, imports, and "
+                f"path references to `{scope.repo_full_name}/...` are "
+                f"intra-repo (the same repo being scanned), NOT third-party "
+                f"dependencies. Do not flag them as untrusted external code "
+                f"or unpinned third-party action references on that basis "
+                f"alone — apply the same scrutiny you would to any other "
+                f"in-repo path."
+            )
         lines.append(f"Base reference: {scope.base_ref}")
         lines.append(f"Merge base: {scope.merge_base}")
 
@@ -1319,6 +1342,7 @@ def resolve_diff_scope_context(
     non_interactive: bool,
     scope_paths: str | None = None,
     env: dict[str, str] | None = None,
+    target_repo_full_name: str | None = None,
 ) -> DiffScopeResult:
     if scope_mode not in _SUPPORTED_SCOPE_MODES:
         raise ValueError(f"Unsupported scope mode: {scope_mode}")
@@ -1399,6 +1423,15 @@ def resolve_diff_scope_context(
             "Diff-scope is active, but no Git repositories were found. "
             "Use --scope-mode full to disable diff-scope for this run."
         )
+
+    # Stamp the canonical owner/repo onto every constructed scope. We
+    # only have one identifier from the caller (the run's primary
+    # target) — when there are multiple sources, only the first carries
+    # it. Callers running multi-target scans against repos owned by
+    # different orgs can extend this in the future; today's surface is
+    # one repo per dispatch.
+    if target_repo_full_name and repo_scopes:
+        repo_scopes[0].repo_full_name = target_repo_full_name
 
     instruction_block = build_diff_scope_instruction(repo_scopes)
     metadata: dict[str, Any] = {

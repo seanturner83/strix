@@ -436,6 +436,22 @@ Examples:
     )
 
     parser.add_argument(
+        "--target-repo-full-name",
+        type=str,
+        help=(
+            "Canonical owner/repo identifier for the target being scanned "
+            "(e.g. 'seedcx/composite-actions'). Surfaced in the diff-scope "
+            "prompt so the agent can recognise self-references in workflow "
+            "`uses:` entries, internal imports, and inline path refs as "
+            "intra-repo rather than third-party. Without this, the agent "
+            "only sees the workspace_subdir basename (e.g. 'target') which "
+            "is too generic to disambiguate. Falls back to GITHUB_REPOSITORY "
+            "env var when unset; missing entirely is fine — the prompt just "
+            "skips the self-reference advisory line."
+        ),
+    )
+
+    parser.add_argument(
         "--config",
         type=str,
         help="Path to a custom config file (JSON) to use instead of ~/.strix/cli-config.json",
@@ -733,6 +749,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             diff_base=args.diff_base,
             scope_paths=getattr(args, "scope_paths", None),
             non_interactive=args.non_interactive,
+            target_repo_full_name=getattr(args, "target_repo_full_name", None)
+            or os.environ.get("GITHUB_REPOSITORY") or None,
         )
     except ValueError as e:
         console = Console()
