@@ -90,16 +90,44 @@ def test_build_sarif_maps_severity_levels() -> None:
     assert levels == ["error", "error", "warning", "note", "note"]
 
 
-def test_build_sarif_summarizes_locationless_findings_without_code_scanning_results() -> None:
+def test_build_sarif_anchors_locationless_findings_synthetically() -> None:
+    """Findings without safe code locations are now anchored to
+    SECURITY.md and emitted as proper SARIF results so they flow
+    through GHAS code-scanning normally — the old run-properties-summary
+    path made them invisible to the SEC-6941 partialFingerprints code,
+    which meant their alerts re-orphaned every run. The synthetic-anchor
+    contract was previously implemented downstream in
+    composite-actions/rw-security.yml's `Sanitize SARIF` jq step;
+    pulling it upstream consolidates the semantic and ensures
+    fingerprints get injected before SARIF leaves Strix."""
     sarif = build_sarif_report([_finding(code_locations=None, cwe=None, cve=None)])
 
     run = sarif["runs"][0]
-    assert run["results"] == []
-    assert run["properties"]["locationlessFindingCount"] == 1
-    assert run["properties"]["locationlessFindings"][0]["id"] == "vuln-0001"
+    assert len(run["results"]) == 1
+    result = run["results"][0]
+    # Anchored to SECURITY.md, marked synthetic
+    assert (
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        == "SECURITY.md"
+    )
+    assert result["properties"]["zh_synthetic_location"] is True
+    # Fingerprints flow through the SEC-6941 path the same as
+    # source-anchored results
+    assert result["partialFingerprints"]["primaryLocationLineHash"]
+    assert result["properties"]["zh_strix_vuln_class_hash"]
+    # Top-level count remains as observability hook for CI dashboards
+    assert run["properties"]["syntheticLocationCount"] == 1
+    # The detail-list at run.properties.locationlessFindings is gone
+    # — findings are first-class results now, not summaries.
+    assert "locationlessFindings" not in run["properties"]
 
 
 def test_build_sarif_drops_unsafe_code_locations() -> None:
+    """When ALL code_locations are rejected as unsafe, the finding falls
+    back to the synthetic SECURITY.md anchor (same path as a finding
+    with no code_locations at all). The dropped-unsafe-locations
+    bookkeeping only kicks in when safe locations remain — see the
+    sibling test below."""
     sarif = build_sarif_report(
         [
             _finding(
@@ -117,10 +145,19 @@ def test_build_sarif_drops_unsafe_code_locations() -> None:
     )
 
     run = sarif["runs"][0]
-    assert run["results"] == []
-    assert run["properties"]["locationlessFindingCount"] == 1
-    assert "droppedUnsafeLocationCount" not in run["properties"]
-    assert "droppedUnsafeLocationFindings" not in run["properties"]
+    assert len(run["results"]) == 1
+    result = run["results"][0]
+    assert (
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        == "SECURITY.md"
+    )
+    assert result["properties"]["zh_synthetic_location"] is True
+    assert run["properties"]["syntheticLocationCount"] == 1
+    # The drop-count is still reported as observability — useful to
+    # know HOW the synthetic anchor came about (7 unsafe inputs vs 0
+    # provided). The finding is still in results[]; this is just a
+    # diagnostic counter at run-properties level.
+    assert run["properties"]["droppedUnsafeLocationCount"] == 7
 
 
 def test_build_sarif_keeps_locations_without_valid_end_line() -> None:
@@ -392,17 +429,39 @@ def test_class_fingerprint_survives_file_rename() -> None:
     )
 
 
-def test_primary_fingerprint_omitted_when_no_anchor_available() -> None:
-    """Findings with no code location AND no method+endpoint can't be
-    fingerprinted from primitives. Better to omit partialFingerprints
-    than to fingerprint by rule_id alone (which would collapse every
-    locationless finding of the same CWE to one alert in GHAS)."""
-    finding = _finding(method="", endpoint="", code_locations=[])
-    sarif = build_sarif_report([finding])
-    # Locationless findings are summarized in run.properties, not emitted
-    # as code-scanning results — verify that path stays intact.
-    assert sarif["runs"][0]["results"] == []
-    assert sarif["runs"][0]["properties"]["locationlessFindings"]
+def test_primary_fingerprint_distinguishes_locationless_findings_by_class() -> None:
+    """Two locationless findings of the same CWE but different vuln
+    classes (e.g. both CWE-862 but one missing-authn, one missing-authz)
+    must produce distinct primary fingerprints — otherwise GHAS would
+    collapse them into a single alert. The class-keyword extraction in
+    the synthetic-fingerprint path is what keeps them distinct."""
+    a = _result_for(
+        _finding(
+            cwe="CWE-862",
+            title="Missing Authentication on /admin endpoint",
+            method="",
+            endpoint="",
+            code_locations=[],
+        )
+    )
+    b = _result_for(
+        _finding(
+            cwe="CWE-862",
+            title="Missing Authorization on /admin endpoint",
+            method="",
+            endpoint="",
+            code_locations=[],
+        )
+    )
+    # Both are synthetic-anchored
+    assert a["properties"]["zh_synthetic_location"] is True
+    assert b["properties"]["zh_synthetic_location"] is True
+    # Same rule_id (CWE) but different class keywords → distinct
+    assert a["ruleId"] == b["ruleId"] == "CWE-862"
+    assert (
+        a["partialFingerprints"]["primaryLocationLineHash"]
+        != b["partialFingerprints"]["primaryLocationLineHash"]
+    )
 
 
 def test_primary_fingerprint_uses_route_when_locations_have_route() -> None:

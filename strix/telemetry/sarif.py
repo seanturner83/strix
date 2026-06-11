@@ -52,6 +52,21 @@ SARIF_VERSION = "2.1.0"
 TOOL_NAME = "Strix"
 TOOL_INFORMATION_URI = "https://strix.ai"
 
+# Synthetic anchor for findings that have no safe code location. SARIF
+# requires every result to carry at least one location, and GitHub
+# code-scanning's UI handles locationless results unreliably.
+# Anchoring to SECURITY.md keeps the result valid + visible while a
+# `properties.zh_synthetic_location: true` flag lets downstream tooling
+# distinguish synthetic anchors from real source locations.
+#
+# The composite-actions/rw-security.yml `Sanitize SARIF` jq step has
+# been doing this anchoring downstream of Strix for ~6 weeks (SEC-6439,
+# project_strix_locationless_drop_blast). Pulling it upstream lets the
+# partialFingerprints + class_hash injection (SEC-6941) cover these
+# findings too — previously they bypassed the fingerprint code path
+# entirely and re-orphaned on every run.
+_SYNTHETIC_LOCATION_URI = "SECURITY.md"
+
 
 # SARIF only has three result levels; Strix's five severities collapse here.
 # Original label survives in ``result.properties.strix.severity``.
@@ -87,24 +102,30 @@ def build_sarif_report(
     *,
     tool_version: str | None = None,
 ) -> dict[str, Any]:
-    """Return a SARIF 2.1.0 document for findings with safe source locations."""
+    """Return a SARIF 2.1.0 document for findings.
+
+    Findings without safe source locations are anchored synthetically
+    to SECURITY.md and flagged via ``properties.zh_synthetic_location``.
+    They're still emitted as proper SARIF results so they (a) flow
+    through GHAS code-scanning normally rather than being shunted into
+    a run-properties summary the UI can't render, and (b) carry the
+    SEC-6941 partialFingerprints + class hash so cross-run dismissal
+    stickiness works for them.
+    """
     rules_by_id: dict[str, dict[str, Any]] = {}
     results: list[dict[str, Any]] = []
-    locationless_findings: list[dict[str, Any]] = []
+    synthetic_location_count = 0
     dropped_unsafe_location_findings: list[dict[str, Any]] = []
 
     for report in vulnerability_reports:
         locations, dropped_location_count = _build_locations(
             report.get("code_locations")
         )
+        is_synthetic = False
         if not locations:
-            # Locationless findings survive as a run-properties summary rather
-            # than invalid code-scanning alerts. Some SARIF consumers would
-            # accept a result without a location, but GitHub code-scanning's
-            # UI handling of locationless alerts is unreliable — the summary
-            # approach is how reviewers actually see these findings.
-            locationless_findings.append(_locationless_summary(report))
-            continue
+            locations = [_synthetic_location()]
+            is_synthetic = True
+            synthetic_location_count += 1
 
         if dropped_location_count:
             dropped_unsafe_location_findings.append(
@@ -113,7 +134,9 @@ def build_sarif_report(
 
         rule_id = _rule_id(report)
         rules_by_id.setdefault(rule_id, _build_rule(rule_id, report))
-        results.append(_build_result(rule_id, report, locations))
+        results.append(
+            _build_result(rule_id, report, locations, is_synthetic=is_synthetic)
+        )
 
     driver: dict[str, Any] = {
         "name": TOOL_NAME,
@@ -129,9 +152,14 @@ def build_sarif_report(
     }
 
     run_properties: dict[str, Any] = {}
-    if locationless_findings:
-        run_properties["locationlessFindingCount"] = len(locationless_findings)
-        run_properties["locationlessFindings"] = locationless_findings
+    if synthetic_location_count:
+        # Surface the count for observability without duplicating the
+        # findings themselves — they're already in `results[]` with
+        # `properties.zh_synthetic_location: true`. Anyone counting the
+        # synthetic-anchor population can grep results by that flag,
+        # but having a top-level count means CI logs / dashboards can
+        # bookkeep without parsing the result list.
+        run_properties["syntheticLocationCount"] = synthetic_location_count
     if dropped_unsafe_location_findings:
         run_properties["droppedUnsafeLocationCount"] = sum(
             finding["droppedLocationCount"]
@@ -242,8 +270,17 @@ def _build_result(
     rule_id: str,
     report: dict[str, Any],
     locations: list[dict[str, Any]],
+    *,
+    is_synthetic: bool = False,
 ) -> dict[str, Any]:
-    """Build one SARIF result using validated physical locations."""
+    """Build one SARIF result using validated physical locations.
+
+    ``is_synthetic`` flags results whose location is the SECURITY.md
+    anchor rather than a real code location — surfaces as
+    ``properties.zh_synthetic_location: true`` so reviewers and
+    downstream tooling can distinguish anchored-locationless findings
+    from source-linked ones.
+    """
     title = _string_value(report.get("title")) or rule_id
     result: dict[str, Any] = {
         "ruleId": rule_id,
@@ -257,7 +294,7 @@ def _build_result(
     # this report already carries (CWE, primary code location, route
     # tuple) — NOT from the LLM-authored title or message body, which
     # vary cosmetically across runs of the same finding. See SEC-6941.
-    fp = _primary_fingerprint(rule_id, report, locations)
+    fp = _primary_fingerprint(rule_id, report, locations, is_synthetic=is_synthetic)
     if fp:
         result["partialFingerprints"] = {"primaryLocationLineHash": fp}
     # File-independent class fingerprint as a sibling property: lets
@@ -266,12 +303,17 @@ def _build_result(
     # primary fingerprint legitimately shifts but the underlying class
     # is unchanged.
     class_fp = _class_fingerprint(rule_id, report)
-    result["properties"] = _result_properties(report, class_fp)
+    result["properties"] = _result_properties(
+        report, class_fp, is_synthetic=is_synthetic
+    )
     return result
 
 
 def _result_properties(
-    report: dict[str, Any], class_fingerprint: str | None = None
+    report: dict[str, Any],
+    class_fingerprint: str | None = None,
+    *,
+    is_synthetic: bool = False,
 ) -> dict[str, Any]:
     """Strix-specific metadata for downstream consumers.
 
@@ -286,6 +328,13 @@ def _result_properties(
         # Surfaced at top level so the orphan-sweep tooling can filter
         # GHAS alerts by it without parsing the nested strix.* tree.
         properties["zh_strix_vuln_class_hash"] = class_fingerprint
+    if is_synthetic:
+        # Top-level so reviewers + downstream automation can filter
+        # synthetic-anchored alerts without parsing the nested strix.*
+        # tree. Matches the flag that the composite-actions/rw-security
+        # `Sanitize SARIF` jq step has been emitting downstream of
+        # Strix; pulling it upstream consolidates the semantic.
+        properties["zh_synthetic_location"] = True
 
     strix: dict[str, Any] = {}
     for key in (
@@ -327,6 +376,22 @@ def _result_properties(
 # ---------------------------------------------------------------------------
 # Location handling
 # ---------------------------------------------------------------------------
+
+
+def _synthetic_location() -> dict[str, Any]:
+    """Synthetic anchor for findings with no safe code location.
+
+    SARIF requires every result to carry at least one location, and
+    GHAS code-scanning's UI handles locationless results unreliably.
+    Anchoring to SECURITY.md gives the result a valid + visible
+    location; the result's ``properties.zh_synthetic_location: true``
+    flag lets reviewers + tooling distinguish synthetic from real.
+    """
+    return {
+        "physicalLocation": {
+            "artifactLocation": {"uri": _SYNTHETIC_LOCATION_URI},
+        }
+    }
 
 
 def _build_locations(raw_locations: Any) -> tuple[list[dict[str, Any]], int]:
@@ -496,6 +561,8 @@ def _primary_fingerprint(
     rule_id: str,
     report: dict[str, Any],
     locations: list[dict[str, Any]],
+    *,
+    is_synthetic: bool = False,
 ) -> str | None:
     """Deterministic per-finding fingerprint for SARIF auto-resolution.
 
@@ -508,11 +575,21 @@ def _primary_fingerprint(
       - HTTP method + endpoint when present (BOLA/IDOR/missing-authz
         findings carry these explicitly in the report dict)
 
-    Returns None if neither a location nor a method+endpoint is
-    available — the caller will skip emitting partialFingerprints
-    in that case rather than fingerprint by rule_id alone (which
-    would collapse every locationless finding of the same CWE to
-    one alert in GHAS).
+    Synthetic-anchored findings (``is_synthetic=True``) all share
+    uri="SECURITY.md" and have no real start_line. Hashing by
+    (rule_id, "SECURITY.md") alone would collapse every locationless
+    finding of the same CWE into a single alert in GHAS. To
+    distinguish them, the synthetic path adds the class keyword
+    extracted from the title (same logic ``_class_fingerprint``
+    uses). The class keyword catalogue is closed and stable, so
+    cross-run identity holds — same vulnerability class on the same
+    rule_id always lands on the same hash, and two different
+    classes on the same rule_id don't collide.
+
+    Returns None when no anchor is available AND not synthetic.
+    The caller skips partialFingerprints in that case (would never
+    happen post-synthetic-anchor land but the guard stays for
+    defence in depth).
     """
     primary_loc = locations[0] if locations else None
     uri = ""
@@ -529,9 +606,6 @@ def _primary_fingerprint(
     endpoint = _string_value(report.get("endpoint")) or ""
     route = f"{method.upper()} {endpoint}".strip() if (method or endpoint) else ""
 
-    # Bail when we have no anchor at all. Hashing by rule_id alone
-    # would over-collapse; better to skip and let GHAS fall back to
-    # its native location-based matching for these.
     if not uri and not route:
         return None
 
@@ -549,6 +623,16 @@ def _primary_fingerprint(
             parts.append(f"line:{start_line}")
     if route:
         parts.append(f"route:{route}")
+
+    if is_synthetic:
+        # Augment with class keyword so locationless findings of
+        # different vuln classes don't collide. _class_keyword is the
+        # closed-list extractor; falls through to first-5-words when
+        # no curated keyword matches. Rule_id is already in the
+        # composite so we don't need to also stamp the CWE.
+        title = _string_value(report.get("title")) or ""
+        if title:
+            parts.append(f"synth_class:{_class_keyword(title)}")
 
     composite = "|".join(parts)
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()
@@ -573,22 +657,30 @@ def _class_fingerprint(rule_id: str, report: dict[str, Any]) -> str | None:
     primary reconciliation key.
     """
     title = _string_value(report.get("title")) or ""
-    if not title:
+    keyword = _class_keyword(title) if title else ""
+    if not keyword:
         return None
-    lower = title.lower()
-    matched = next(
-        (kw for kw in _VULN_CLASS_KEYWORDS if kw in lower),
-        None,
-    )
-    if matched:
-        keyword = matched
-    else:
-        words = re.findall(r"[a-z0-9]+", lower)[:5]
-        keyword = " ".join(words)
-        if not keyword:
-            return None
     composite = f"rule:{rule_id}|class:{keyword}"
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+
+
+def _class_keyword(title: str) -> str:
+    """Pick the first matching curated keyword in ``title``, or fall
+    back to the first 5 lowercased alpha-numeric words.
+
+    Shared between ``_class_fingerprint`` (file-rename carryover) and
+    ``_primary_fingerprint`` (synthetic-location distinguisher) so the
+    two fingerprints stay aligned on what counts as "the same class".
+    Returns empty string when title is empty or whitespace-only.
+    """
+    if not title:
+        return ""
+    lower = title.lower()
+    for kw in _VULN_CLASS_KEYWORDS:
+        if kw in lower:
+            return kw
+    words = re.findall(r"[a-z0-9]+", lower)[:5]
+    return " ".join(words)
 
 
 def _rule_name(rule_id: str, title: str) -> str:
