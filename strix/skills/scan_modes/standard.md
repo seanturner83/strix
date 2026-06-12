@@ -35,6 +35,41 @@ For deeper threat-modelling guidance — STRIDE-per-element matrices, the
 risk-scoring rubric, common mitigations per leg — see
 the threat_modeling skill — invoke via load_skill(skills='threat_modeling').
 
+## Evil user-story enumeration (a Q2 lens)
+
+Before classifying threats with STRIDE, articulate Q2 in evil-user-story
+form. The format mirrors the agile user story but inverts polarity:
+
+> **As a `<malicious actor>`, I want to `<perform a malicious action>`,
+> so that `<outcome / impact>`.**
+
+Use it as a forcing function: you cannot write the sentence without
+naming a *concrete action* in the actor's hands and a *concrete impact*
+on the target. Speculative prose ("a state actor could...") won't fit
+the template — it has no `<malicious action>` linked to code you can
+read.
+
+Consider both **abuse** (adversary intentionally exploits) and **misuse**
+(legitimate actor accidentally or negligently does something harmful):
+
+- *As a malicious authenticated user, I want to send a `platform_code`
+  in the request body that doesn't match my JWT's tenant claim, so that
+  I can rewrite another tenant's webhook URLs.* (abuse)
+- *As a backoffice operator, I want to browse customer PII unrelated to
+  my open ticket, so that I can satisfy curiosity. The system should not
+  permit this without leaving a detectable audit trail.* (misuse)
+
+**Mitigation flip**: the acceptance criteria of an abuse story invert
+into a regular security-story. *"I should be able to rewrite cross-tenant
+webhooks"* → flip → *"the system MUST scope webhook updates to the
+authenticated tenant"*. That's your remediation specification.
+
+**Anti-patterns to refuse**:
+- "As a state actor / nation state / APT, I..." — typically not actionable
+  unless you can name a specific code path.
+- "As an attacker, I want to compromise the system" — too abstract.
+- Severity by attacker pedigree rather than impact-times-reachability.
+
 ## Approach
 
 Systematic testing across the full attack surface. Understand the application before exploiting it.

@@ -36,6 +36,55 @@ spanning multiple primitives.
 For STRIDE-per-element applicability, scoring rubric, and common
 mitigations per leg, see the threat_modeling skill — invoke via load_skill(skills='threat_modeling').
 
+## Evil user-story enumeration (a Q2 lens)
+
+Before classifying threats with STRIDE, articulate Q2 in evil-user-story
+form. The format mirrors the agile user story but inverts polarity:
+
+> **As a `<malicious actor>`, I want to `<perform a malicious action>`,
+> so that `<outcome / impact>`.**
+
+Use it as a forcing function: you cannot write the sentence without
+naming a *concrete action* in the actor's hands and a *concrete impact*
+on the target. Speculative-attacker prose ("a state actor could...")
+won't fit the template — it has no `<malicious action>` linked to code
+you can read. That's the point.
+
+Two flavours, both worth considering for any user-story-shaped surface:
+
+- **Abuse**: an adversary intentionally exploits the surface.
+  *As a malicious authenticated user, I want to send a `platform_code`
+  in the request body that doesn't match my JWT's tenant claim, so that
+  I can rewrite another tenant's webhook URLs.*
+- **Misuse**: a legitimate actor accidentally / negligently does
+  something harmful, often via excess functionality.
+  *As a backoffice operator, I want to browse customer PII unrelated to
+  my open ticket, so that I can satisfy curiosity. The system should not
+  permit this without leaving a detectable audit trail.*
+
+Chain-finding in deep mode often produces multi-step abuse stories:
+*As an attacker who has `<low-privilege primitive A>`, I can also
+`<reach primitive B>`, so that `<final-state impact>` becomes possible.*
+The chain itself is one evil user story, not three. Map each step to a
+STRIDE leg as you go; if a step doesn't classify cleanly, you probably
+haven't grounded it in real code yet — go re-anchor.
+
+**Mitigation flip**: the acceptance criteria of an abuse story invert
+into a regular security-story. *"I should be able to rewrite cross-tenant
+webhooks"* → flip → *"the system MUST scope webhook updates to the
+authenticated tenant; reject mismatches with permission-denied"*. That's
+your remediation specification.
+
+**Anti-patterns to refuse**:
+- "As a state actor / nation state / APT, I..." — typically not actionable
+  unless you can name a specific code path. If the threat actor identity
+  is doing the load-bearing work, you're producing fan fiction.
+- "As an attacker, I want to compromise the system" — too abstract, fails
+  the concrete-action test. Restate the verb.
+- Severity by attacker pedigree rather than impact-times-reachability.
+  Severity is a property of the abuse story's `<impact>` and how easily
+  the `<malicious action>` is achievable, not of who's doing it.
+
 ## Approach
 
 Thorough understanding before exploitation. Test every parameter, every endpoint, every edge case. Chain findings for maximum impact.
