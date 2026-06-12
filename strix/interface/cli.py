@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.agents.StrixAgent import StrixAgent
+from strix.llm import memory_compressor
 from strix.llm.config import LLMConfig
 from strix.telemetry.tracer import Tracer, set_global_tracer
 
@@ -148,6 +149,17 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         cleanup_runtime()
 
     def signal_handler(_signum: int, _frame: Any) -> None:
+        # Tell the memory compressor to skip its next call so an
+        # in-flight or about-to-start ThreadPoolExecutor.submit doesn't
+        # race Python's interpreter-shutdown (cpython
+        # concurrent/futures/thread.py flips _shutdown=True at atexit,
+        # and litellm's logging-callback subsystem does its own
+        # pool.submit internally — both layers race the SIGTERM-driven
+        # sys.exit below). Without this, the compressor's outer except
+        # logs a noisy traceback ("Failed to summarize messages") that
+        # obscures the real cause (workflow iter-cap timeout) and the
+        # iter-loop's resume hook frequently doesn't fire.
+        memory_compressor.mark_shutting_down()
         tracer.cleanup()
         sys.exit(1)
 

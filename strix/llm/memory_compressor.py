@@ -44,6 +44,30 @@ UsageCallback = Callable[[Any, str], None]
 logger = logging.getLogger(__name__)
 
 
+# Set by interface/cli.py's SIGTERM/SIGINT handler to short-circuit any
+# in-flight or about-to-start compression calls. The wall-clock-timeout
+# guard at the per-attempt level can race with Python interpreter
+# shutdown when SIGTERM lands mid-compression — pool.submit() inside
+# litellm.completion's logging-callback path raises after
+# concurrent.futures.thread._python_exit flips _shutdown=True. Checking
+# this flag at compress_history entry stops the race at source: skip
+# compression entirely once shutdown begins, return messages unchanged
+# so the caller (agent loop) wraps up its iteration cleanly.
+_shutting_down = False
+
+
+def mark_shutting_down() -> None:
+    """Signal that the process is in graceful-shutdown mode (SIGTERM
+    received). Subsequent compress_history calls return their input
+    unchanged. Idempotent."""
+    global _shutting_down  # noqa: PLW0603 (signal-handler flag — module-level by design)
+    _shutting_down = True
+
+
+def is_shutting_down() -> bool:
+    return _shutting_down
+
+
 def _is_known_bedrock_content_filtered_bug(exc: BaseException) -> bool:
     """Detect the known LiteLLM ↔ Bedrock Converse enum mismatch.
 
@@ -84,6 +108,36 @@ def _is_known_bedrock_content_filtered_bug(exc: BaseException) -> bool:
         and "finish_reason" in msg
         and "content_filtered" in msg
     )
+
+
+def _is_executor_shutdown_race(exc: BaseException) -> bool:
+    """Detect the SIGTERM-during-compression race against Python's
+    `concurrent.futures` global executor shutdown.
+
+    Shape: the workflow's outer iter-cap mechanism wraps Strix in
+    `timeout --signal=TERM ...`. When the timeout fires while
+    `_summarize_messages` is mid-flight, Python's interpreter shutdown
+    starts running atexit hooks before Strix's signal handler can wind
+    the agent loop down. `concurrent.futures.thread._python_exit` flips
+    the module-level `_shutdown=True`, so any subsequent `pool.submit()`
+    — including the one litellm.completion's logging-callback subsystem
+    issues internally (litellm/utils.py:1661, `executor.submit(...)`) —
+    raises `RuntimeError("cannot schedule new futures after shutdown")`.
+
+    The exception bubbles up through future.result() and gets handled by
+    the outer fallback (return messages[0]), so compression degrades
+    gracefully. But `logger.exception` paints the traceback into the
+    workflow log and obscures the real cause (SIGTERM). 6 instances in
+    12h on the 2026-06-12 audit (rag-retrieval#4, zerohash-sdk#673,
+    participants-command#1436, tf-k8s-app-addons#1409, rundeck#5620,
+    authorizer-service#24).
+
+    Detector matches on str(exc) only — the upstream stack varies by
+    where in litellm the race lands.
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    return "cannot schedule new futures after shutdown" in str(exc)
 
 
 DEFAULT_MAX_TOTAL_TOKENS = 100_000
@@ -281,6 +335,13 @@ def _summarize_messages(
                 "Literal doesn't accept. Known issue, scan continues."
             )
             return messages[0]
+        if _is_executor_shutdown_race(exc):
+            logger.info(
+                "Skipping memory compression this round: ThreadPoolExecutor "
+                "shutdown race (SIGTERM during compression). Returning "
+                "uncompressed first message; iter-loop will resume."
+            )
+            return messages[0]
         logger.exception("Failed to summarize messages")
         return messages[0]
 
@@ -436,6 +497,24 @@ class MemoryCompressor:
         - Technical details and findings
         """
         if not messages:
+            return messages
+
+        # Short-circuit when SIGTERM has been received: compression is a
+        # network-bound LLM call that races interpreter shutdown
+        # (RuntimeError "cannot schedule new futures after shutdown" via
+        # litellm's internal logging-callback executor). Returning
+        # uncompressed messages lets the agent loop's current iteration
+        # wind down cleanly so the workflow's iter-cap mechanism can
+        # resume on the next iteration. Tradeoff: the next request may
+        # exceed the model's context window — but the wrapping iter-loop
+        # truncates / restarts on context errors anyway, and the
+        # alternative (a noisy traceback + iter-1 abort) wastes the
+        # entire iteration's work.
+        if is_shutting_down():
+            logger.info(
+                "Skipping compress_history: shutdown in progress (SIGTERM "
+                "received). Returning messages unchanged."
+            )
             return messages
 
         self.truncate_tool_outputs(messages)

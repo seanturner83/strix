@@ -215,3 +215,164 @@ def test_summarize_messages_quiets_wrapped_content_filtered(
         "wrapped content_filtered must not produce ERROR-level traceback; "
         "got: " + repr([r.getMessage() for r in exc_records])
     )
+
+
+# --- ThreadPoolExecutor shutdown race (SIGTERM during compression) -----------
+# 6 instances in 12h on the 2026-06-12 audit. Workflow's outer iter-cap
+# wraps Strix in `timeout --signal=TERM ...`; SIGTERM lands while
+# _summarize_messages is mid-flight; Python interpreter shutdown flips
+# concurrent.futures.thread._shutdown=True; subsequent pool.submit() inside
+# litellm's logging-callback subsystem raises RuntimeError. Detector must
+# recognise this so the outer except logs at INFO instead of ERROR.
+
+from strix.llm.memory_compressor import (
+    _is_executor_shutdown_race,
+    is_shutting_down,
+    mark_shutting_down,
+)
+
+
+def test_detects_executor_shutdown_race() -> None:
+    exc = RuntimeError("cannot schedule new futures after shutdown")
+    assert _is_executor_shutdown_race(exc) is True
+
+
+def test_does_not_swallow_unrelated_runtime_errors() -> None:
+    """Other RuntimeErrors must stay loud — only the specific shutdown-race
+    text matches."""
+    assert _is_executor_shutdown_race(RuntimeError("event loop is closed")) is False
+    assert _is_executor_shutdown_race(RuntimeError("anything else")) is False
+
+
+def test_does_not_swallow_non_runtime_with_matching_text() -> None:
+    """Match must be type-narrow: a non-RuntimeError carrying the exact
+    string shouldn't quiet — that signature only ever comes from
+    cpython concurrent/futures/thread.py:171|173."""
+
+    class _Imposter(Exception):
+        pass
+
+    assert _is_executor_shutdown_race(_Imposter("cannot schedule new futures after shutdown")) is False
+
+
+def test_summarize_messages_quiets_executor_shutdown_race(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When litellm.completion raises the shutdown-race RuntimeError, the
+    function must return messages[0] AND log at INFO, not the noisy
+    traceback that obscures the real cause (SIGTERM)."""
+    import logging
+
+    def raise_shutdown_race(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    import strix.llm.memory_compressor as mc
+    monkeypatch.setattr(mc.litellm, "completion", raise_shutdown_race)
+    monkeypatch.setattr(
+        mc, "resolve_llm_config", lambda **kwargs: (None, None, None)
+    )
+
+    messages = [{"role": "user", "content": "hello"}]
+    with caplog.at_level(logging.INFO, logger="strix.llm.memory_compressor"):
+        result = _summarize_messages(messages, model="bedrock/anthropic.claude-3-7-sonnet", timeout=5)
+
+    assert result == messages[0]
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    exc_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("shutdown" in r.getMessage().lower() for r in info_records), (
+        "expected an INFO log mentioning shutdown; got: "
+        + repr([r.getMessage() for r in caplog.records])
+    )
+    assert not exc_records, (
+        "shutdown race must not produce ERROR-level traceback; got: "
+        + repr([r.getMessage() for r in exc_records])
+    )
+
+
+# --- SIGTERM-aware compress_history short-circuit ----------------------------
+
+@pytest.fixture
+def _reset_shutdown_flag() -> Any:
+    """The shutdown flag is module-level. Reset between tests so failures
+    don't bleed across the file."""
+    import strix.llm.memory_compressor as mc
+    mc._shutting_down = False
+    yield
+    mc._shutting_down = False
+
+
+def test_mark_shutting_down_flips_flag(_reset_shutdown_flag: Any) -> None:
+    assert is_shutting_down() is False
+    mark_shutting_down()
+    assert is_shutting_down() is True
+
+
+def test_compress_history_short_circuits_when_shutting_down(
+    _reset_shutdown_flag: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Once mark_shutting_down() has been called (e.g. from the SIGTERM
+    handler in interface/cli.py), compress_history must return its input
+    unchanged WITHOUT calling _summarize_messages — that's the whole
+    point of the short-circuit, to avoid the LLM call that races
+    interpreter shutdown."""
+    import logging
+
+    import strix.llm.memory_compressor as mc
+
+    summarize_calls = []
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        summarize_calls.append((args, kwargs))
+        raise AssertionError("_summarize_messages must NOT be called when shutting down")
+
+    monkeypatch.setattr(mc, "_summarize_messages", fail_if_called)
+    monkeypatch.setattr(
+        mc, "resolve_llm_config", lambda **kwargs: ("bedrock/test-model", None, None)
+    )
+
+    compressor = mc.MemoryCompressor(model_name="bedrock/test-model")
+    # Force the budget check to want compression (without shutdown short-
+    # circuit, _summarize_messages would be called).
+    compressor.max_total_tokens = 1
+    messages = [{"role": "user", "content": "x" * 10000}] * 30
+
+    mark_shutting_down()
+    with caplog.at_level(logging.INFO, logger="strix.llm.memory_compressor"):
+        result = compressor.compress_history(messages)
+
+    assert result == messages, "expected unchanged messages back"
+    assert summarize_calls == [], "_summarize_messages must not be invoked"
+    assert any("shutdown" in r.getMessage().lower() for r in caplog.records), (
+        "expected an INFO log mentioning shutdown"
+    )
+
+
+def test_compress_history_runs_normally_when_not_shutting_down(
+    _reset_shutdown_flag: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity: the short-circuit only fires when the flag is set."""
+    import strix.llm.memory_compressor as mc
+
+    summarize_calls = []
+
+    def stub_summarize(messages: list[dict[str, Any]], *args: Any, **kwargs: Any) -> Any:
+        summarize_calls.append(messages)
+        return {"role": "user", "content": "<context_summary count='X'>summary</context_summary>"}
+
+    monkeypatch.setattr(mc, "_summarize_messages", stub_summarize)
+    monkeypatch.setattr(
+        mc, "resolve_llm_config", lambda **kwargs: ("bedrock/test-model", None, None)
+    )
+
+    compressor = mc.MemoryCompressor(model_name="bedrock/test-model")
+    compressor.max_total_tokens = 1
+    messages = [{"role": "user", "content": "x" * 10000}] * 30
+
+    assert is_shutting_down() is False
+    compressor.compress_history(messages)
+
+    assert summarize_calls, "_summarize_messages should be invoked normally"
