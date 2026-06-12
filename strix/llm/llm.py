@@ -569,7 +569,30 @@ class LLM:
         except Exception:  # noqa: BLE001, S110  # nosec B110
             pass
 
+    # SEC-6994: Bedrock 5xx-class error markers that LiteLLM sometimes
+    # mis-maps to BadRequestError(400). Observed 2026-06-12 on opus-4-8
+    # rollout: a transient `BedrockException - internalServerException`
+    # ("The system encountered an unexpected error during processing.
+    # Try your request again.") came through as litellm.BadRequestError,
+    # so the status-code-driven _should_retry returned False on a 400
+    # and the agent died on first turn instead of retrying. The Bedrock
+    # message is a 5xx-class server error; retrying is the correct
+    # behavior. Match by string body since the LiteLLM exception class
+    # mapping is not reliable for these cases.
+    _BEDROCK_TRANSIENT_BODY_MARKERS = (
+        "internalServerException",
+        "ServiceUnavailableException",
+        "ThrottlingException",
+        "ModelTimeoutException",
+        "ModelStreamErrorException",
+    )
+
     def _should_retry(self, e: Exception) -> bool:
+        # Bedrock body-string fallback first: catches the LiteLLM mis-mapping
+        # case where a 5xx-class server error is wrapped as BadRequestError.
+        msg = str(e)
+        if any(marker in msg for marker in self._BEDROCK_TRANSIENT_BODY_MARKERS):
+            return True
         code = getattr(e, "status_code", None) or getattr(
             getattr(e, "response", None), "status_code", None
         )
