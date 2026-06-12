@@ -687,20 +687,25 @@ class LLM:
                 else content,
             }
 
-        # Cache breakpoint 2: agent identity message (stable per-agent)
+        # Cache breakpoint 2: agent identity message (stable per-agent).
+        # Reuse the resolved cache_control so the configured TTL (e.g. 1h
+        # for long scans) flows through to this breakpoint as well — earlier
+        # versions hardcoded {"type": "ephemeral"} here and silently fell
+        # back to the 5-minute default, partially defeating the 1h-TTL
+        # extension applied to the system prompt above.
         if len(result) > 1 and "<agent_identity>" in str(result[1].get("content", "")):
             content = result[1]["content"]
             if isinstance(content, str):
                 result[1] = {
                     **result[1],
                     "content": [
-                        {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                        {"type": "text", "text": content, "cache_control": cache_control}
                     ],
                 }
             elif isinstance(content, list) and content:
                 # Content is already a list — add cache_control to the last item
                 last = content[-1]
                 if isinstance(last, dict):
-                    last["cache_control"] = {"type": "ephemeral"}
+                    last["cache_control"] = cache_control
 
         return result
