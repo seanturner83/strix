@@ -211,11 +211,24 @@ class LLM:
         self, conversation_history: list[dict[str, Any]]
     ) -> AsyncIterator[LLMResponse]:
         messages = self._prepare_messages(conversation_history)
-        # Default 8 retries with the existing exp backoff (cap raised below)
-        # gives ~5min of cumulative wait, which rides out typical Bedrock
-        # capacity blips on hot models (e.g. Sonnet 4.6 immediately post-
-        # release). Configurable via STRIX_LLM_MAX_RETRIES.
-        max_retries = int(Config.get("strix_llm_max_retries") or "8")
+        # Default 12 retries (was 8). SEC-6994: Opus 4.8 throws SUSTAINED
+        # Bedrock internalServerException windows that outlast the old
+        # budget — observed 2026-06-13 on docker-actions-runner#62 (7 reqs)
+        # and zh-global-infrastructure (16 reqs), both dying at iteration 0
+        # with the 5xx-retry fix present. The retry ENGAGED (not the old
+        # shadow bug) but the transient won. Raising count + the backoff
+        # floor below widens the window the retries span. Configurable via
+        # STRIX_LLM_MAX_RETRIES.
+        max_retries = int(Config.get("strix_llm_max_retries") or "12")
+        # Minimum per-retry backoff (seconds). The pure exp curve (2,4,8,16…)
+        # fires the first ~6 attempts within ~14s — useless against a
+        # multi-MINUTE outage, which is the actual 4.8 failure shape. A floor
+        # spaces early retries across real time so the budget spans minutes,
+        # not seconds. Default 15s; STRIX_LLM_RETRY_FLOOR_S to tune. Adds
+        # ~15s latency to a fast-clearing transient — negligible against a
+        # scan that runs minutes-to-hours, worth it to ride out sustained
+        # windows. With 12 retries + 15s floor: ~14.5min cumulative wait.
+        retry_floor_s = int(Config.get("strix_llm_retry_floor_s") or "15")
 
         bad_request_retried = False
         transient_thinking_retries = 0
@@ -268,11 +281,7 @@ class LLM:
                         continue
                 if attempt >= max_retries or not self._should_retry(e):
                     self._raise_error(e)
-                # Cap at 120s (was 90) so attempt-6+ contributes meaningful
-                # wait time during prolonged Bedrock throttling rather than
-                # spinning at the cap.
-                wait = min(120, 2 * (2**attempt))
-                await asyncio.sleep(wait)
+                await asyncio.sleep(self._retry_backoff(attempt, retry_floor_s))
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[LLMResponse]:
         accumulated = ""
@@ -465,6 +474,19 @@ class LLM:
             ) or 0.0
         except Exception:  # noqa: BLE001
             return 0.0
+
+    @staticmethod
+    def _retry_backoff(attempt: int, floor_s: int = 15, cap_s: int = 120) -> int:
+        """Per-retry backoff (seconds): exponential, floored, capped.
+
+        SEC-6994: the pure exp curve (2,4,8,16,32,64…) fires the first ~6
+        attempts within ~14s, which is useless against the sustained
+        multi-MINUTE Bedrock internalServerException windows Opus 4.8
+        throws. The floor spaces early retries across real time so the
+        budget actually spans minutes. With floor=15, cap=120 over 12
+        retries: 15,15,15,16,32,64,120,120,120,120,120,120 ≈ 14.6min.
+        """
+        return min(cap_s, max(floor_s, 2 * (2 ** attempt)))
 
     @staticmethod
     def _truncate_large_tool_results(

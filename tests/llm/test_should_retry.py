@@ -174,3 +174,41 @@ def test_loop_ordering_invariant_5xx_marker_reaches_should_retry() -> None:
     llm = _llm()
     assert llm._is_bad_request(exc) is False, "must not be routed to one-shot bad-request handler"
     assert llm._should_retry(exc) is True, "must reach the full-budget retry path"
+
+
+# --- SEC-6994: retry backoff floor (sustained-5xx window spanning) -----------
+# Opus 4.8 throws multi-minute internalServerException windows that outlasted
+# the old 8-retry / pure-exp budget (first ~6 attempts fired in ~14s). These
+# pin the floored backoff so early retries span real time + the budget covers
+# minutes, and guard against a revert to the unfloored curve.
+
+def test_retry_backoff_floor_applies_to_early_attempts():
+    # Pure exp would give 2,4,8 for attempts 0-2; the 15s floor lifts them.
+    assert LLM._retry_backoff(0, floor_s=15) == 15
+    assert LLM._retry_backoff(1, floor_s=15) == 15
+    assert LLM._retry_backoff(2, floor_s=15) == 15
+    # Once exp exceeds the floor it takes over: 2*2^4 = 32.
+    assert LLM._retry_backoff(4, floor_s=15) == 32
+
+
+def test_retry_backoff_caps_at_120():
+    # 2*2^6 = 128 -> capped to 120; high attempts stay capped.
+    assert LLM._retry_backoff(6, floor_s=15) == 120
+    assert LLM._retry_backoff(20, floor_s=15) == 120
+
+
+def test_retry_backoff_floor_zero_is_pure_exp():
+    # floor=0 (env override) reverts to the original exponential curve.
+    assert LLM._retry_backoff(0, floor_s=0) == 2
+    assert LLM._retry_backoff(2, floor_s=0) == 8
+
+
+def test_retry_budget_spans_minutes_not_seconds():
+    # The load-bearing invariant: 12 retries with the 15s floor must cumulate
+    # to >10min so a sustained Bedrock window is actually ridden out — the old
+    # 8/pure-exp budget front-loaded into ~14s + a couple of 120s tails.
+    total = sum(LLM._retry_backoff(a, floor_s=15) for a in range(12))
+    assert total > 600, f"cumulative backoff {total}s too short to span a sustained outage"
+    # And the first 4 attempts must NOT all fire inside 60s (the old failure).
+    first4 = sum(LLM._retry_backoff(a, floor_s=15) for a in range(4))
+    assert first4 >= 45, f"early retries still bunched ({first4}s) — won't span a minute-scale window"
