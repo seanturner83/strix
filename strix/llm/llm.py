@@ -515,6 +515,21 @@ class LLM:
         return truncated_any
 
     def _is_bad_request(self, e: Exception) -> bool:
+        # SEC-6994 follow-up: a Bedrock 5xx-class server error
+        # (internalServerException etc.) is mis-mapped by LiteLLM to
+        # BadRequestError(400). Those must NOT be treated as bad requests —
+        # otherwise the retry loop routes them through the one-shot
+        # bad-request handler (bad_request_retried) and they only ever get a
+        # single bare retry, never reaching _should_retry's marker check that
+        # grants the full max_retries budget. Exclude them here so they fall
+        # through to the _should_retry path. (The original SEC-6994 patch
+        # added the markers to _should_retry but that branch was shadowed by
+        # this 400 check, which runs first in the loop — observed
+        # daily-settlement weekly run 27454948115 + jurisdiction-command#152:
+        # 2 internalServerException occurrences then death, not 8 retries.)
+        msg = str(e)
+        if any(marker in msg for marker in self._BEDROCK_TRANSIENT_BODY_MARKERS):
+            return False
         code = getattr(e, "status_code", None) or getattr(
             getattr(e, "response", None), "status_code", None
         )

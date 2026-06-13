@@ -119,3 +119,58 @@ def test_does_not_retry_on_unrelated_text_mentioning_retry() -> None:
         status_code=400,
     )
     assert _llm()._should_retry(exc) is False
+
+
+# --- SEC-6994 follow-up: _is_bad_request must NOT shadow the 5xx markers ------
+#
+# The original SEC-6994 patch added the markers to _should_retry, but the retry
+# loop checks _is_bad_request (code==400) FIRST and routes a 400 through the
+# one-shot bad-request handler — so a Bedrock 5xx mis-mapped to 400 only got a
+# single bare retry and never reached _should_retry's marker check. Observed
+# as a cluster of single-digit-minute failures (daily-settlement weekly run
+# 27454948115; jurisdiction-command#152 run 27452115581): 2 occurrences, then
+# death, not the intended 8-retry budget. These pin the precedence fix.
+
+@pytest.mark.parametrize("marker", [
+    "internalServerException",
+    "ServiceUnavailableException",
+    "ThrottlingException",
+    "ModelTimeoutException",
+    "ModelStreamErrorException",
+])
+def test_is_bad_request_excludes_bedrock_5xx_markers(marker: str) -> None:
+    """A 400-wrapped Bedrock 5xx must NOT be classified as a bad request, so
+    the retry loop lets it fall through to the _should_retry marker path
+    (full max_retries budget) instead of the one-shot bad-request handler."""
+    msg = (
+        f"litellm.BadRequestError: BedrockException - {marker} "
+        '{"message":"...Try your request again."}'
+    )
+    exc = _FakeException(msg, status_code=400)
+    assert _llm()._is_bad_request(exc) is False
+
+
+def test_is_bad_request_still_true_for_genuine_400() -> None:
+    """A real client-side 400 (no Bedrock-5xx marker) is still a bad request —
+    we only exclude the mis-mapped transient case."""
+    exc = _FakeException(
+        "litellm.BadRequestError: invalid model parameter `foo`", status_code=400
+    )
+    assert _llm()._is_bad_request(exc) is True
+
+
+def test_loop_ordering_invariant_5xx_marker_reaches_should_retry() -> None:
+    """The load-bearing invariant the original fix missed: for a 400-wrapped
+    Bedrock 5xx, the retry loop's _is_bad_request gate (which runs first and
+    only retries once) must defer to _should_retry (which grants the full
+    budget). Concretely: _is_bad_request False AND _should_retry True. If a
+    future change makes _is_bad_request match these again, this fails."""
+    msg = (
+        "litellm.BadRequestError: BedrockException - internalServerException "
+        '{"message":"The system encountered an unexpected error during '
+        'processing. Try your request again."}'
+    )
+    exc = _FakeException(msg, status_code=400)
+    llm = _llm()
+    assert llm._is_bad_request(exc) is False, "must not be routed to one-shot bad-request handler"
+    assert llm._should_retry(exc) is True, "must reach the full-budget retry path"
