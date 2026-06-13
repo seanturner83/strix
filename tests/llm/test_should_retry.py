@@ -212,3 +212,36 @@ def test_retry_budget_spans_minutes_not_seconds():
     # And the first 4 attempts must NOT all fire inside 60s (the old failure).
     first4 = sum(LLM._retry_backoff(a, floor_s=15) for a in range(4))
     assert first4 >= 45, f"early retries still bunched ({first4}s) — won't span a minute-scale window"
+
+
+# --- SEC-6994: config defaults must not shadow the retry budget --------------
+# The retry COUNT bump originally lived only as `or "12"` in generate(), but
+# Config.get() returns the class default ("5") when the env var is unset, so
+# get() never returns None and the `or "12"` was dead code — the budget stayed
+# 5 (zh-global-infrastructure run 27463698889 died at ~104s / 5 retries). The
+# fix is the class default itself. Pin it so this can't silently regress.
+
+def test_config_default_retry_budget_is_12():
+    from strix.config.config import Config
+    import os
+    # With the env var unset, Config.get must return the 12 class default,
+    # NOT the old "5", and NOT rely on a caller-side `or` fallback.
+    os.environ.pop("STRIX_LLM_MAX_RETRIES", None)
+    assert Config.get("strix_llm_max_retries") == "12"
+
+
+def test_config_default_retry_floor_is_15():
+    from strix.config.config import Config
+    import os
+    os.environ.pop("STRIX_LLM_RETRY_FLOOR_S", None)
+    assert Config.get("strix_llm_retry_floor_s") == "15"
+
+
+def test_retry_knobs_env_overridable():
+    from strix.config.config import Config
+    import os
+    os.environ["STRIX_LLM_MAX_RETRIES"] = "20"
+    try:
+        assert Config.get("strix_llm_max_retries") == "20"
+    finally:
+        os.environ.pop("STRIX_LLM_MAX_RETRIES", None)

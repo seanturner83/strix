@@ -25,7 +25,18 @@ class Config:
     litellm_base_url = None
     ollama_api_base = None
     strix_reasoning_effort = "high"
-    strix_llm_max_retries = "5"
+    strix_llm_max_retries = "12"  # SEC-6994: was "5". This CLASS DEFAULT is
+    # what Config.get() returns when STRIX_LLM_MAX_RETRIES is unset — it
+    # SHADOWS the `or "12"` fallback in llm.generate() (get() never returns
+    # None, so that fallback was dead code). Opus 4.8's sustained Bedrock
+    # internalServerException windows outlast a 5-retry budget; 12 + the 15s
+    # backoff floor (llm._retry_backoff) spans ~14.6min. Root cause confirmed:
+    # zh-global-infrastructure run 27463698889 died at ~104s after 5 retries
+    # on STRIX_REF=06751aa (which set the 12 default in generate() but not here).
+    strix_llm_retry_floor_s = "15"  # SEC-6994: min per-retry backoff (seconds).
+    # Spaces early retries across real time so the budget spans a multi-minute
+    # Bedrock outage instead of front-loading into ~14s. Class default so
+    # Config.get resolves it consistently + tracked below for sandbox propagation.
     strix_memory_compressor_timeout = "30"
     strix_max_context_tokens = None  # Default: 100000
     strix_min_recent_messages = None  # Default: 15
@@ -47,6 +58,7 @@ class Config:
         "ollama_api_base",
         "strix_reasoning_effort",
         "strix_llm_max_retries",
+        "strix_llm_retry_floor_s",
         "strix_memory_compressor_timeout",
         "llm_timeout",
         "strix_tool_mode",
