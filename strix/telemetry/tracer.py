@@ -1133,6 +1133,33 @@ class Tracer:
             else:
                 status = "errored"
 
+            # Persist the aggregated LLM usage so downstream accounting
+            # (the strix-scan composite's "Strix turn usage" step-summary
+            # table) can surface cost + cache-read % per run without a
+            # CloudWatch dig. get_total_llm_stats() already sums per-agent
+            # _total_stats (input/output/cached_tokens/cost/requests);
+            # cached_tokens is LiteLLM's normalized cache_read count
+            # (prompt_tokens_details.cached_tokens == Anthropic
+            # cache_read_input_tokens). cache_read_pct is read /
+            # (read + fresh-input) — the fraction that drives $/scan.
+            usage: dict[str, Any] = {}
+            try:
+                stats = self.get_total_llm_stats()
+                tot = stats.get("total", {}) or {}
+                cached = int(tot.get("cached_tokens", 0) or 0)
+                fresh_in = int(tot.get("input_tokens", 0) or 0)
+                cacheable_in = cached + fresh_in
+                usage = {
+                    "input_tokens": fresh_in,
+                    "output_tokens": int(tot.get("output_tokens", 0) or 0),
+                    "cached_tokens": cached,
+                    "cost": float(tot.get("cost", 0.0) or 0.0),
+                    "requests": int(tot.get("requests", 0) or 0),
+                    "cache_read_pct": round(100.0 * cached / cacheable_in, 1) if cacheable_in else 0.0,
+                }
+            except Exception:  # noqa: BLE001 — usage is best-effort, never block the marker
+                usage = {}
+
             write_session_meta(
                 self.get_run_dir(),
                 {
@@ -1141,6 +1168,7 @@ class Tracer:
                     "iteration_count": iteration_count,
                     "vulnerability_count": vulnerability_count,
                     "agent_count": len(self.agents),
+                    "usage": usage,
                 },
             )
         except Exception:  # noqa: BLE001
