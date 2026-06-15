@@ -1,0 +1,75 @@
+<tools>
+  <tool name="structured_query">
+    <description>Resolve a path in a YAML or JSON file to its value and exact 1-based line range.
+
+Use this to find the precise file:line for a finding in a workflow, IaC, or config file (.yml/.yaml/.json) so you can cite it in code_locations — instead of reporting it without a location. When a vulnerability lives in a config structure (a GitHub Actions step's run: block, a permissions: stanza, a JSON policy element), DO NOT guess the line by eyeballing read_file output: call structured_query with the structural path and use the returned start_line/end_line directly.
+
+This is the structured-file companion to code_graph (which covers Go/TS source). For raw HCL (.tf), this tool does NOT apply — only .tf.json is JSON.</description>
+    <details>Backed by PyYAML node marks (YAML) and a JSON offset scanner (stdlib). Multi-line block scalars like 'run: |' return the full span (start_line..end_line covering every line of the block). Returns the parsed value, the start_line/end_line, and the raw snippet text.</details>
+    <parameters>
+      <parameter name="file" type="string" required="true">
+        <description>Relative path to a .yml/.yaml/.json file in the repo. No leading slash, no '..' traversal. Example: ".github/workflows/rw-security.yml"</description>
+      </parameter>
+      <parameter name="path" type="string" required="true">
+        <description>Structural path into the document. Dotted keys plus [n] indices:
+- "permissions" — a top-level key/block
+- "jobs.build.steps[3].run" — the run block of the 4th step of the build job
+- "rules[0].http[1].match" — nested arrays
+Keys containing '.' or '[' are not expressible this way; use structured_find for those.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>On success: file, path, start_line, end_line (1-based, inclusive; block scalars span all their lines), value (parsed), snippet (raw text). On failure: error (path not found, malformed path, unsupported file type, unreadable file).</description>
+    </returns>
+    <examples>
+  # Locating a GitHub Actions injection sink for code_locations
+  <function=structured_query>
+  <parameter=file>.github/workflows/ci.yml</parameter>
+  <parameter=path>jobs.build.steps[2].run</parameter>
+  </function>
+
+  # Finding the line range of an over-broad permissions block
+  <function=structured_query>
+  <parameter=file>.github/workflows/deploy.yml</parameter>
+  <parameter=path>permissions</parameter>
+  </function>
+
+  # A JSON IAM policy statement
+  <function=structured_query>
+  <parameter=file>policy.json</parameter>
+  <parameter=path>Statement[0].Action</parameter>
+  </function>
+    </examples>
+  </tool>
+
+  <tool name="structured_find">
+    <description>Find every mapping/object KEY in a YAML or JSON file whose name matches a regex, with each match's path and line range.
+
+Use for "where is X configured" or "how many places set Y" across a config file — e.g. find every permissions: block, every run: step, or every key named *_token. Returns up to 50 matches. Pair with structured_query when you need the value at a specific match.</description>
+    <details>Walks mapping keys (YAML) / object keys (JSON) recursively and regex-matches each key name. Returns path + start_line/end_line per hit. Does not match values — only keys.</details>
+    <parameters>
+      <parameter name="file" type="string" required="true">
+        <description>Relative path to a .yml/.yaml/.json file. No leading slash, no '..'.</description>
+      </parameter>
+      <parameter name="key_regex" type="string" required="true">
+        <description>Python regex matched against each key name (re.search semantics). Examples: "^run$" (exact), "token|secret|password" (any), "^permissions$".</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>On success: file, matches (list of {path, start_line, end_line}), output (human-readable summary). When no keys match: output noting zero matches.</description>
+    </returns>
+    <examples>
+  # Where is permissions set across this workflow?
+  <function=structured_find>
+  <parameter=file>.github/workflows/rw-security.yml</parameter>
+  <parameter=key_regex>^permissions$</parameter>
+  </function>
+
+  # Every run: step (candidate injection sinks)
+  <function=structured_find>
+  <parameter=file>.github/workflows/ci.yml</parameter>
+  <parameter=key_regex>^run$</parameter>
+  </function>
+    </examples>
+  </tool>
+</tools>
