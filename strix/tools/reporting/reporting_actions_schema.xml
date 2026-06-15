@@ -14,7 +14,7 @@ DO NOT USE:
 - For reporting multiple vulnerabilities at once. Use a separate create_vulnerability_report for each vulnerability.
 - To re-report a vulnerability that was already reported (even with different details)
 
-White-box requirement (when you have access to the code): You MUST include code_locations with nested XML, including fix_before/fix_after on locations where a fix is proposed.
+White-box requirement (when you have access to the code): You MUST include code_locations with nested XML, including fix_before/fix_after on locations where a fix is proposed. This is ENFORCED, not advisory: a code finding submitted without code_locations (and without a location_justification exemption) is REJECTED with success=false and you must resubmit after reading the file and citing real file:line numbers. Findings with no real location were historically anchored to a synthetic "SECURITY.md" placeholder and became un-triageable — that silent fallback is now blocked.
 
 DEDUPLICATION: If this tool returns with success=false and mentions a duplicate, DO NOT attempt to re-submit. The vulnerability has already been reported. Move on to testing other areas.
 
@@ -175,6 +175,13 @@ const result = await db.query(query, [id]);</fix_after>
             <label>User input from request parameter (source)</label>
           </location>
         </format>
+      </parameter>
+      <parameter name="location_justification" type="string" required="false">
+        <description>ONLY for findings that genuinely cannot be tied to any source line. code_locations is ENFORCED for code findings — if you omit it, the report is REJECTED and you must read the file and supply real file:line numbers. Use this escape hatch instead of code_locations ONLY when:
+- The finding is black-box / DAST against a running endpoint (no source available) — though prefer setting the `endpoint` parameter, which auto-exempts.
+- The finding is a cross-cutting architectural property with no single site (e.g. "all 13 routes on this mux lack auth middleware" — though even then, prefer listing the registration sites as code_locations).
+
+Provide one sentence explaining why no file:line exists. Do NOT use this to skip the work of locating a normal code finding — that is exactly the behaviour this field exists to stop. The justification is recorded on the report for audit.</description>
       </parameter>
     </parameters>
     <returns type="Dict[str, Any]">

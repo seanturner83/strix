@@ -198,6 +198,33 @@ def _validate_cvss_parameters(**kwargs: str) -> list[str]:
     return validation_errors
 
 
+_LOCATION_REQUIRED_MSG = (
+    "code_locations is REQUIRED for code-based findings and was missing or "
+    "empty. ~96% of historical reports landed with no real file:line and were "
+    "silently anchored to the synthetic 'SECURITY.md' placeholder, which makes "
+    "them un-triageable and un-dismissable. Before resubmitting:\n"
+    "  1. Open the affected file(s) and read the actual lines (use code_graph / "
+    "read_file — do NOT guess line numbers).\n"
+    "  2. Provide code_locations with <file>, <start_line>, <end_line> for every "
+    "place the vulnerability manifests (and fix_before/fix_after where you "
+    "propose a fix).\n"
+    "If — and ONLY if — this finding genuinely cannot be tied to any source "
+    "line (e.g. a black-box/DAST finding against a running endpoint, or a "
+    "cross-cutting architectural property with no single site), resubmit with "
+    "location_justification=\"<one sentence: why no file:line exists>\". Do not "
+    "use the exemption to skip the work of locating a normal code finding."
+)
+
+
+def _looks_like_runtime_target(target: str | None, endpoint: str | None) -> bool:
+    """A finding is runtime/black-box (legitimately location-less) when it has
+    an HTTP endpoint, or its target is a URL rather than a repo path."""
+    if endpoint and endpoint.strip():
+        return True
+    t = (target or "").strip().lower()
+    return t.startswith(("http://", "https://"))
+
+
 @register_tool(sandbox_execution=False)
 def create_vulnerability_report(  # noqa: PLR0912
     title: str,
@@ -214,6 +241,7 @@ def create_vulnerability_report(  # noqa: PLR0912
     cve: str | None = None,
     cwe: str | None = None,
     code_locations: str | None = None,
+    location_justification: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -236,6 +264,17 @@ def create_vulnerability_report(  # noqa: PLR0912
 
     if parsed_locations:
         validation_errors.extend(_validate_code_locations(parsed_locations))
+    elif not _looks_like_runtime_target(target, endpoint) and not (
+        location_justification and location_justification.strip()
+    ):
+        # Location enforcement (SEC-7xxx): a code finding with no resolvable
+        # code_locations and no explicit justified exemption is rejected and
+        # bounced back to the agent to locate. Runtime/black-box findings
+        # (endpoint set, or URL target) are auto-exempt — their location is
+        # the endpoint, not a file. The exemption (location_justification) is
+        # logged on the report so synthetic-anchored findings are an explicit,
+        # auditable choice rather than the silent default they used to be.
+        validation_errors.append(_LOCATION_REQUIRED_MSG)
     if cve:
         cve = _extract_cve(cve)
         cve_err = _validate_cve(cve)
@@ -314,6 +353,7 @@ def create_vulnerability_report(  # noqa: PLR0912
                 cve=cve,
                 cwe=cwe,
                 code_locations=parsed_locations,
+                location_justification=location_justification,
             )
 
             return {

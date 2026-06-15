@@ -500,6 +500,7 @@ class Tracer:
         cve: str | None = None,
         cwe: str | None = None,
         code_locations: list[dict[str, Any]] | None = None,
+        location_justification: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -538,6 +539,13 @@ class Tracer:
             report["cwe"] = cwe.strip()
         if code_locations:
             report["code_locations"] = code_locations
+        if location_justification:
+            # Records WHY a finding has no file:line (DAST endpoint, cross-
+            # cutting architectural property). Makes synthetic-anchored
+            # findings an explicit, auditable exemption rather than the
+            # silent default. Consumed by the SARIF builder's
+            # zh_synthetic_location handling.
+            report["location_justification"] = location_justification.strip()
 
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
