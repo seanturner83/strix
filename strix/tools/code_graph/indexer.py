@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -58,8 +59,16 @@ def _has_files_matching(target: Path, *patterns: str) -> bool:
     return False
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 600) -> None:
+def _run(
+    cmd: list[str],
+    cwd: Path | None = None,
+    timeout: int = 600,
+    env: dict[str, str] | None = None,
+) -> None:
     logger.info("code_graph: running %s (cwd=%s)", " ".join(cmd), cwd)
+    run_env = None
+    if env:
+        run_env = {**os.environ, **env}
     proc = subprocess.run(
         cmd,
         cwd=cwd,
@@ -67,6 +76,7 @@ def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 600) -> None:
         text=True,
         timeout=timeout,
         check=False,
+        env=run_env,
     )
     if proc.returncode != 0:
         raise IndexerError(
@@ -243,7 +253,17 @@ def _index_go(target: Path, out_dir: Path) -> Path | None:
     if not _binary_exists("scip-go"):
         raise IndexerError("scip-go missing from sandbox")
     out = out_dir / "go.scip"
-    _run(["scip-go", "--output", str(out)], cwd=target)
+    # GOTOOLCHAIN=local forces Go to use the toolchain baked into the
+    # sandbox instead of honouring the target go.mod's `go 1.x.y` pin,
+    # which triggers an on-demand toolchain DOWNLOAD. That download fails
+    # in our sandbox because GOSUMDB=off makes Go refuse to verify the
+    # toolchain module's checksum ("checksum database disabled by
+    # GOSUMDB=off") — so the whole SCIP index silently skips and every Go
+    # finding lands location-less. The baked toolchain indexes fine
+    # regardless of the repo's go-directive; scip-go only needs to parse +
+    # type-check, not match the exact patch release. Observed on
+    # global-policy-engine#10 (go.mod pinned go1.26.4) 2026-06-15.
+    _run(["scip-go", "--output", str(out)], cwd=target, env={"GOTOOLCHAIN": "local"})
     return out if out.exists() else None
 
 
