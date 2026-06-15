@@ -220,13 +220,35 @@ _LOCATION_REQUIRED_MSG = (
 )
 
 
+def _looks_like_url(s: str | None) -> bool:
+    """True only for a genuine network locator (URL / host:port / scheme://),
+    NOT a file path. The endpoint exemption must not fire just because the
+    field is non-empty: agents were observed satisfying the location gate by
+    stuffing source FILE PATHS into `endpoint` (e.g.
+    'internal/nats/client.go') — which is exactly the locationless finding we
+    want to reject. A real runtime endpoint has a scheme, a host:port, or a
+    leading '/' route on a hostful target — never a *.go / *.py / dotted file.
+    """
+    if not s or not s.strip():
+        return False
+    v = s.strip().lower()
+    if v.startswith(("http://", "https://", "ws://", "wss://", "grpc://", "tcp://", "nats://")):
+        return True
+    # bare host:port (api.foo:8080) or host with a route (foo.com/x) — require
+    # a dot-bearing host token before any '/' and reject obvious file paths.
+    first = v.split("/", 1)[0]
+    if ":" in first and not first.endswith((".go", ".py", ".ts", ".js", ".rs", ".java", ".rb")):
+        host = first.split(":", 1)[0]
+        if "." in host or host in ("localhost",):
+            return True
+    return False
+
+
 def _looks_like_runtime_target(target: str | None, endpoint: str | None) -> bool:
     """A finding is runtime/black-box (legitimately location-less) when it has
-    an HTTP endpoint, or its target is a URL rather than a repo path."""
-    if endpoint and endpoint.strip():
-        return True
-    t = (target or "").strip().lower()
-    return t.startswith(("http://", "https://"))
+    a genuine network endpoint, or its target is a URL rather than a repo path.
+    A file path in `endpoint` does NOT count — see _looks_like_url."""
+    return _looks_like_url(endpoint) or _looks_like_url(target)
 
 
 @register_tool(sandbox_execution=False)
