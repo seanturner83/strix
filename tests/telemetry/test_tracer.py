@@ -574,10 +574,20 @@ def test_save_run_data_emits_empty_sarif_on_zero_findings(monkeypatch, tmp_path)
     assert doc["runs"][0]["results"] == []
 
 
-def test_save_run_data_skips_sarif_when_not_mark_complete(monkeypatch, tmp_path) -> None:
-    """Periodic save_run_data() calls during a scan (mark_complete=False)
-    must not emit SARIF — only the final completion writes it. Otherwise
-    a partial mid-scan SARIF could overwrite a populated one on rerun."""
+def test_save_run_data_emits_sarif_even_when_not_mark_complete(monkeypatch, tmp_path) -> None:
+    """save_run_data() emits findings.sarif on EVERY call, not only at
+    mark_complete=True.
+
+    This intentionally inverts the old invariant. SEC-6802 (commit 2adad30)
+    moved the write_sarif call out of the mark_complete gate because GHAS only
+    auto-closes stale alerts under tool.driver.name=Strix when a NEW SARIF is
+    uploaded for the ref. Under the old behaviour a clean re-scan that resolved
+    the prior finding produced no findings.sarif, so the alert stayed open and
+    the PR stayed blocked even after the fix (SEC-6635). The old worry — that a
+    mid-scan save could overwrite a populated SARIF with a partial one — no
+    longer holds: rehydration (SEC-6802) means each save emits the CUMULATIVE
+    finding set, and a zero-findings save correctly emits an empty-results SARIF
+    (the signal GHAS needs to close stale alerts)."""
     monkeypatch.chdir(tmp_path)
 
     tracer = Tracer("periodic-save")
@@ -586,7 +596,8 @@ def test_save_run_data_skips_sarif_when_not_mark_complete(monkeypatch, tmp_path)
     _attach_real_conversation_log(tracer, run_dir)
 
     tracer.save_run_data(mark_complete=False)
-    assert not (run_dir / "findings.sarif").exists()
+    assert (run_dir / "findings.sarif").exists(), \
+        "SEC-6802: SARIF must emit on every save_run_data, not only at completion"
 
 
 def test_orchestrator_success_true_overrides_legacy_heuristic(monkeypatch, tmp_path) -> None:
