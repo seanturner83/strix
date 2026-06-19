@@ -345,3 +345,107 @@ class TestRetract:
         assert new_id in existing
         assert len([r for r in t.vulnerability_reports if r["id"] == new_id]) == 1, \
             f"new finding id {new_id} collided with a surviving finding"
+
+
+# ---------------------------------------------------------------------------
+# Groundedness guard — refuse a retraction when the vuln is still present
+# ---------------------------------------------------------------------------
+#
+# The retract primitive trusts the agent's "this is fixed" claim. The guard
+# (in reporting_actions) re-verifies it deterministically: recover the prior
+# finding's code_locations from events.jsonl, and if the fix_before (vuln-site)
+# block is STILL verbatim in the current tree, REFUSE — otherwise a confident-
+# but-wrong agent could silently drop a real finding from the gate (fail-open).
+
+def _write_events_finding(events_path: Path, report_id: str, locations: list) -> None:
+    """Append a finding.created event with code_locations (mirrors the tracer)."""
+    import json as _json
+    evt = {"event_type": "finding.created",
+           "payload": {"report": {"id": report_id, "code_locations": locations}}}
+    with events_path.open("a", encoding="utf-8") as f:
+        f.write(_json.dumps(evt) + "\n")
+
+
+class TestRetractGroundednessGuard:
+    def _guard(self):
+        from strix.tools.reporting.reporting_actions import (
+            _prior_finding_locations,
+            _vuln_still_present,
+        )
+        return _prior_finding_locations, _vuln_still_present
+
+    def test_refuses_when_vuln_site_still_present(self, tmp_path) -> None:
+        _prior, _still = self._guard()
+        run_dir = tmp_path / "run"; run_dir.mkdir()
+        ws = tmp_path / "ws"; (ws / "internal/auth").mkdir(parents=True)
+        sink = 'const jwtSigningKey = "supersecret-2026"'
+        (ws / "internal/auth/x.go").write_text(f"package auth\n{sink}\n")
+        _write_events_finding(run_dir / "events.jsonl", "vuln-0001", [
+            {"file": "internal/auth/x.go", "start_line": 2, "end_line": 2,
+             "fix_before": sink, "fix_after": "var k = os.Getenv(\"K\")"},
+        ])
+        locs = _prior(run_dir, "vuln-0001")
+        still, detail = _still(locs, workspace_root=str(ws))
+        assert still is True, "vuln-site code unchanged → guard must REFUSE retraction"
+
+    def test_allows_when_vuln_site_gone(self, tmp_path) -> None:
+        _prior, _still = self._guard()
+        run_dir = tmp_path / "run"; run_dir.mkdir()
+        ws = tmp_path / "ws"; (ws / "internal/auth").mkdir(parents=True)
+        # Current code is the FIXED version — the fix_before block is absent.
+        (ws / "internal/auth/x.go").write_text(
+            'package auth\nvar jwtSigningKey = os.Getenv("JWT_SIGNING_KEY")\n')
+        _write_events_finding(run_dir / "events.jsonl", "vuln-0001", [
+            {"file": "internal/auth/x.go", "start_line": 2, "end_line": 2,
+             "fix_before": 'const jwtSigningKey = "supersecret-2026"',
+             "fix_after": 'var jwtSigningKey = os.Getenv("JWT_SIGNING_KEY")'},
+        ])
+        locs = _prior(run_dir, "vuln-0001")
+        still, _ = _still(locs, workspace_root=str(ws))
+        assert still is False, "vuln-site code gone → guard must ALLOW retraction"
+
+    def test_context_only_location_does_not_false_refuse(self, tmp_path) -> None:
+        """A finding's context location (snippet, NO fix_before) is often
+        unchanged by a fix. The guard must IGNORE it — only fix_before (sink)
+        locations count. Otherwise a genuine fix is false-refused (the canary
+        bug: CWE-78 sink fixed, but an unchanged helper context line matched)."""
+        _prior, _still = self._guard()
+        run_dir = tmp_path / "run"; run_dir.mkdir()
+        ws = tmp_path / "ws"; (ws / "a").mkdir(parents=True)
+        # Sink (fix_before) is GONE; an unchanged context helper REMAINS.
+        helper = "func helper() {\n\t_ = x\n}"
+        (ws / "a/f.go").write_text(
+            f"package a\n_ = exec.Command(\"ping\", \"-c1\", host)\n{helper}\n")
+        _write_events_finding(run_dir / "events.jsonl", "vuln-0002", [
+            {"file": "a/f.go", "start_line": 2, "end_line": 2,
+             "fix_before": '_ = exec.Command("sh", "-c", "ping -c1 "+host)',  # GONE
+             "fix_after": '_ = exec.Command("ping", "-c1", host)'},
+            {"file": "a/f.go", "start_line": 3, "end_line": 5,
+             "snippet": helper, "label": "context helper (unchanged)"},  # PRESENT, no fix_before
+        ])
+        locs = _prior(run_dir, "vuln-0002")
+        still, detail = _still(locs, workspace_root=str(ws))
+        assert still is False, \
+            f"context-only match must NOT refuse a genuine fix; detail={detail}"
+
+    def test_missing_events_allows_failsafe(self, tmp_path) -> None:
+        """No events.jsonl / no recoverable locations → guard can't disprove the
+        fix → allow (don't fabricate a block from missing data)."""
+        _prior, _still = self._guard()
+        run_dir = tmp_path / "run"; run_dir.mkdir()  # no events.jsonl
+        assert _prior(run_dir, "vuln-0001") is None
+        still, _ = _still([], workspace_root=str(tmp_path))
+        assert still is False
+
+    def test_deleted_file_allows_retraction(self, tmp_path) -> None:
+        """Vulnerable file deleted entirely → vuln gone → allow."""
+        _prior, _still = self._guard()
+        run_dir = tmp_path / "run"; run_dir.mkdir()
+        ws = tmp_path / "ws"; ws.mkdir()  # file does NOT exist
+        _write_events_finding(run_dir / "events.jsonl", "vuln-0003", [
+            {"file": "gone/deleted.go", "start_line": 1, "end_line": 1,
+             "fix_before": "dangerous()", "fix_after": "safe()"},
+        ])
+        locs = _prior(run_dir, "vuln-0003")
+        still, _ = _still(locs, workspace_root=str(ws))
+        assert still is False, "deleted vulnerable file → allow retraction"

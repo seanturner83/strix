@@ -413,6 +413,94 @@ def create_vulnerability_report(  # noqa: PLR0912
         }
 
 
+def _prior_finding_locations(run_dir: "Path", report_id: str) -> list[dict[str, Any]] | None:
+    """Recover a prior finding's code_locations from the run dir's events.jsonl.
+
+    Rehydration (SEC-6802) drops code_locations (they don't round-trip through
+    vulnerabilities.csv/.md), so the in-memory rehydrated report can't tell us
+    WHERE the vuln was or its verbatim snippet. But the original
+    `finding.created` event recorded the full report incl. code_locations, and
+    events.jsonl is carried in the resumable-PR-session bundle. Read it back so
+    the retraction guard can re-check the vuln site. Returns None if no
+    locations are recoverable (guard then can't verify → caller decides).
+    """
+    import json as _json
+
+    events = run_dir / "events.jsonl"
+    if not events.exists():
+        return None
+    locations: list[dict[str, Any]] | None = None
+    try:
+        with events.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or "finding.created" not in line:
+                    continue
+                try:
+                    evt = _json.loads(line)
+                except ValueError:
+                    continue
+                report = (evt.get("payload") or {}).get("report") or {}
+                if report.get("id") == report_id and report.get("code_locations"):
+                    # Last finding.created for this id wins (re-reports overwrite).
+                    locations = report["code_locations"]
+    except OSError:
+        return None
+    return locations
+
+
+def _vuln_still_present(
+    locations: list[dict[str, Any]], workspace_root: str = "/workspace"
+) -> tuple[bool, str]:
+    """Groundedness guard: is the vulnerable code still in the current tree?
+
+    We check ONLY locations that carry a `fix_before` block — that is the
+    verbatim vulnerable code the finding proposed to REPLACE, i.e. the actual
+    vuln SITE / sink. Locations with only a `snippet` (no fix_before) are
+    informational context per the create_vulnerability_report schema — the
+    tainted-data source, surrounding code, or a proposed NEW helper to add —
+    and must NOT be checked: that context is frequently unchanged by a fix
+    (e.g. the source line stays; the sink is what's hardened), so matching on
+    it false-refuses a genuine fix (over-strict → fixed finding stuck forever).
+
+    If the fix_before block is STILL present verbatim in the current file, the
+    vuln was NOT fixed → refuse the retraction (otherwise a real finding
+    silently vanishes from the gate = fail-OPEN). Cross-file-safe: it checks
+    the vuln site, not where the fix lives. Returns (still_present, detail);
+    still_present=True => REFUSE. When no fix_before location is checkable
+    (deleted file, locationless/DAST finding, or context-only), returns
+    (False, "...") = can't disprove the fix, allow — we don't manufacture a
+    block from missing data (that's the agent's reason's job, same as pre-guard).
+    """
+    from pathlib import Path as _Path
+
+    checked = 0
+    for loc in locations or []:
+        rel = loc.get("file")
+        # ONLY the fix-bearing (sink) locations represent the vulnerable code
+        # to replace. Skip context/source/addition locations (snippet-only).
+        needle = loc.get("fix_before")
+        if not rel or not needle or not needle.strip():
+            continue
+        target = _Path(workspace_root) / rel
+        if not target.exists():
+            # Vulnerable file deleted entirely → vuln gone. Strong fix signal.
+            continue
+        checked += 1
+        try:
+            body = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if needle.strip() in body or needle in body:
+            return True, (
+                f"the vulnerable code is still present in {rel} "
+                f"(unchanged sink: {needle.strip()[:80]!r})"
+            )
+    if checked == 0:
+        return False, "no fix-bearing vulnerable snippet available to re-check"
+    return False, "vulnerable code no longer present at the recorded sink location(s)"
+
+
 @register_tool(sandbox_execution=False)
 def retract_vulnerability_report(report_id: str, reason: str) -> dict[str, Any]:
     """Remove a previously-reported finding that no longer applies to the
@@ -462,6 +550,41 @@ def retract_vulnerability_report(report_id: str, reason: str) -> dict[str, Any]:
                 "success": False,
                 "message": "Report could not be retracted - tracer unavailable",
             }
+
+        # Groundedness guard (resumable-PR-session): do NOT trust the agent's
+        # claim that the finding is fixed. Recover the finding's original
+        # code_locations from the run dir's events.jsonl and check whether the
+        # vulnerable code (fix_before / snippet) is STILL VERBATIM in the
+        # current tree. If it is, the vuln was not actually fixed — refuse the
+        # retraction so a real finding can't be silently dropped from the gate
+        # (fail-OPEN). Cross-file-safe: it checks the vuln SITE, not where a fix
+        # lives. Best-effort: if the run dir / events / snippet are unavailable
+        # we cannot disprove the fix and fall through to allow (same signal as
+        # before the guard existed — we don't fabricate a block from missing
+        # data). Errors here must never crash the retract path.
+        try:
+            run_dir = tracer._compute_run_dir_if_exists()  # noqa: SLF001
+            if run_dir is not None:
+                locations = _prior_finding_locations(run_dir, report_id.strip())
+                if locations:
+                    still_present, detail = _vuln_still_present(locations)
+                    if still_present:
+                        return {
+                            "success": False,
+                            "retracted": False,
+                            "message": (
+                                f"Retraction REFUSED for {report_id}: {detail}. "
+                                "Re-read the file — if the vulnerability is genuinely "
+                                "resolved the original vulnerable code must no longer be "
+                                "present at that location. If you believe this is a "
+                                "false block, the finding is NOT fixed and must remain."
+                            ),
+                            "guard": "vuln_still_present",
+                        }
+        except Exception:  # noqa: BLE001 — guard must never break the tool
+            import logging
+
+            logging.warning("retract groundedness guard errored; allowing retraction", exc_info=True)
 
         result = tracer.retract_vulnerability_report(report_id.strip(), reason.strip())
         if result.get("retracted"):

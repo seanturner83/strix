@@ -274,7 +274,7 @@ class TestReopenInstruction:
     def setup_method(self):
         self.tmp = Path(tempfile.mkdtemp())
 
-    def _resume(self, *, completed: bool):
+    def _resume(self, monkeypatch, *, completed: bool):
         import importlib.util
         import types
 
@@ -315,41 +315,45 @@ class TestReopenInstruction:
             meta = {"status": "completed"}
 
         # Register stub packages + modules so resume.py's lazy `from ...`
-        # imports resolve to these instead of the real (heavy) ones.
+        # imports resolve to these instead of the real (heavy) ones. Use
+        # monkeypatch.setitem so EVERY override is reverted after the test —
+        # a bare `sys.modules[...] =` leaks the fakes into later test files
+        # (test_tracer.py imports the REAL conversation_log) and poisons them.
         for pkg in ("strix", "strix.agents", "strix.sessions", "strix.telemetry"):
-            sys.modules.setdefault(pkg, types.ModuleType(pkg))
+            if pkg not in sys.modules:
+                monkeypatch.setitem(sys.modules, pkg, types.ModuleType(pkg))
 
         state_mod = types.ModuleType("strix.agents.state")
         state_mod.AgentState = _FakeState
-        sys.modules["strix.agents.state"] = state_mod
+        monkeypatch.setitem(sys.modules, "strix.agents.state", state_mod)
 
         listing_mod = types.ModuleType("strix.sessions.listing")
         listing_mod.get_session = lambda run_name, runs_root=None: _FakeRow()
-        sys.modules["strix.sessions.listing"] = listing_mod
+        monkeypatch.setitem(sys.modules, "strix.sessions.listing", listing_mod)
 
         conv_mod = types.ModuleType("strix.telemetry.conversation_log")
         conv_mod.ConversationLog = _FakeConvLog
         conv_mod.ReplayError = RuntimeError
-        sys.modules["strix.telemetry.conversation_log"] = conv_mod
+        monkeypatch.setitem(sys.modules, "strix.telemetry.conversation_log", conv_mod)
 
         spec = importlib.util.spec_from_file_location(
             "strix.sessions.resume", root / "strix/sessions/resume.py"
         )
         mod = importlib.util.module_from_spec(spec)  # type: ignore[attr-defined]
-        sys.modules["strix.sessions.resume"] = mod
+        monkeypatch.setitem(sys.modules, "strix.sessions.resume", mod)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
 
-    def test_reopen_uses_default_when_no_override(self):
-        mod = self._resume(completed=True)
+    def test_reopen_uses_default_when_no_override(self, monkeypatch):
+        mod = self._resume(monkeypatch, completed=True)
         bundle = mod.load_resume_bundle("pr-acme-app-42")
         assert bundle.mode == "reopen"
         last = bundle.agent_state.messages[-1]
         assert last["role"] == "user"
         assert "summarize the key findings" in last["content"]
 
-    def test_reopen_injects_override(self):
-        mod = self._resume(completed=True)
+    def test_reopen_injects_override(self, monkeypatch):
+        mod = self._resume(monkeypatch, completed=True)
         diff = "A new push landed. Diff since last scan:\n+ added_func()"
         bundle = mod.load_resume_bundle("pr-acme-app-42", reopen_instruction=diff)
         assert bundle.mode == "reopen"
@@ -357,9 +361,9 @@ class TestReopenInstruction:
         assert last["content"] == diff
         assert "summarize the key findings" not in last["content"]
 
-    def test_continue_mode_ignores_override(self):
+    def test_continue_mode_ignores_override(self, monkeypatch):
         # Incomplete session → continue mode → no reopen message injected at all.
-        mod = self._resume(completed=False)
+        mod = self._resume(monkeypatch, completed=False)
         bundle = mod.load_resume_bundle("pr-acme-app-42", reopen_instruction="should be ignored")
         assert bundle.mode == "continue"
         assert all(m["content"] != "should be ignored" for m in bundle.agent_state.messages)
