@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import threading
@@ -502,7 +503,21 @@ class Tracer:
         code_locations: list[dict[str, Any]] | None = None,
         location_justification: str | None = None,
     ) -> str:
-        report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
+        # Monotonic id: max existing ordinal + 1, NOT len+1. A plain count
+        # collides once a finding has been retracted (resumable-PR-session) —
+        # e.g. retract vuln-0002 of {0001,0002,0003} leaves len==2, so len+1
+        # would mint vuln-0003 again and shadow the surviving one. Derive from
+        # the highest vuln-NNNN seen (in-memory reports ∪ on-disk-saved ids) so
+        # ids are never recycled even across retractions.
+        def _ordinal(vid: str) -> int:
+            try:
+                return int(vid.rsplit("-", 1)[-1])
+            except (ValueError, IndexError):
+                return 0
+
+        seen_ids = {r["id"] for r in self.vulnerability_reports} | self._saved_vuln_ids
+        next_ordinal = max((_ordinal(v) for v in seen_ids), default=0) + 1
+        report_id = f"vuln-{next_ordinal:04d}"
 
         report: dict[str, Any] = {
             "id": report_id,
@@ -565,6 +580,71 @@ class Tracer:
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
+
+    def retract_vulnerability_report(self, report_id: str, reason: str) -> dict[str, Any]:
+        """Remove a previously-reported finding from the cumulative set.
+
+        Resumable-PR-session: on --resume the tracer rehydrates every prior
+        finding from vulnerabilities.csv (SEC-6802). When a push FIXES one of
+        them, the agent re-validates against the current code and must be able
+        to DROP it — otherwise rehydration is append-only and the fixed finding
+        re-emits forever, anchored to the synthetic SECURITY.md placeholder once
+        its real line is gone. Under the consumer gate's introduced=head\\base
+        diff that makes a fixed finding immortal => the PR can never go green
+        after the fix (fail-CLOSED). This is the retract primitive that closes
+        that gap.
+
+        Reverses add_vulnerability_report's three side effects:
+          1. drop the report from the in-memory vulnerability_reports list
+          2. discard its id from _saved_vuln_ids + delete the stale .md writeup
+          3. save_run_data() rebuilds vulnerabilities.csv + findings.sarif
+             wholesale from the reduced set, so the retracted finding vanishes
+             from the emitted SARIF.
+
+        report_id is NOT recycled (positional vuln-NNNN ids stay stable so any
+        cross-references survive). Idempotent: retracting an unknown/already-
+        retracted id is a no-op success.
+        """
+        before = len(self.vulnerability_reports)
+        retracted = next(
+            (r for r in self.vulnerability_reports if r.get("id") == report_id), None
+        )
+        if retracted is None:
+            logger.info("retract_vulnerability_report: %s not present (no-op)", report_id)
+            return {"success": True, "retracted": False, "reason": "id not present"}
+
+        self.vulnerability_reports = [
+            r for r in self.vulnerability_reports if r.get("id") != report_id
+        ]
+        self._saved_vuln_ids.discard(report_id)
+
+        # Delete the stale per-finding writeup so a future rehydration (next
+        # push) doesn't reload the retracted finding from disk. The CSV +
+        # SARIF are rewritten wholesale by save_run_data() below; the .md is
+        # the one artefact written append-only, so it needs explicit removal.
+        with contextlib.suppress(OSError):
+            run_dir = self._compute_run_dir_if_exists()
+            if run_dir is not None:
+                (run_dir / "vulnerabilities" / f"{report_id}.md").unlink(missing_ok=True)
+
+        logger.info(
+            "Retracted vulnerability report %s (%s) — reason: %s",
+            report_id, retracted.get("title", ""), reason,
+        )
+        self._emit_event(
+            "finding.retracted",
+            payload={"report_id": report_id, "title": retracted.get("title"), "reason": reason},
+            status=retracted.get("severity", "info"),
+            source="strix.findings",
+        )
+        self.save_run_data()
+        return {
+            "success": True,
+            "retracted": True,
+            "report_id": report_id,
+            "title": retracted.get("title"),
+            "remaining": before - 1,
+        }
 
     def mark_orchestrator_success(self, success: bool) -> None:
         """Record whether the orchestrator exited cleanly.

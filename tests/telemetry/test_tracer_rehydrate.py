@@ -227,3 +227,121 @@ class TestIncrementalSarif:
             + len(sarif["runs"][0].get("results", []))
         )
         assert all_count == 5
+
+
+# ---------------------------------------------------------------------------
+# Fix C — retract_vulnerability_report (resumable-PR-session fail-closed fix)
+# ---------------------------------------------------------------------------
+#
+# The real-diff canary (run 27842371384) proved that on --resume a FIXED prior
+# finding re-emits forever: rehydration is append-only, so even though the
+# agent's report correctly declares it dropped, vulnerabilities.csv still
+# carries it and the SARIF re-ships it. Under the gate's introduced=head\base
+# diff that makes a fixed finding immortal => the PR can never go green after
+# the fix (fail-CLOSED). retract_vulnerability_report is the primitive the
+# agent calls to drop a confirmed-fixed finding so the cumulative SARIF is
+# correct. These tests drive the REAL tracer method + SARIF emit offline.
+
+def _all_sarif_titles(sarif: dict) -> set[str]:
+    """Every finding TITLE present in a SARIF (results + locationless).
+
+    Titles are the stable cross-layer identity here — SARIF results key the
+    rule on CWE (ruleId=CWE-78), not the internal vuln-NNNN id, so we match on
+    the message/title text the emitter carries through verbatim.
+    """
+    titles = set()
+    run = sarif["runs"][0]
+    for r in run.get("results", []):
+        txt = (r.get("message") or {}).get("text", "")
+        if txt:
+            titles.add(txt.strip())
+    for lf in run["properties"].get("locationlessFindings", []):
+        t = lf.get("title") or (lf.get("message") or {}).get("text", "")
+        if t:
+            titles.add(t.strip())
+    return titles
+
+
+class TestRetract:
+    def test_retract_drops_fixed_keeps_present(self, monkeypatch, tmp_path) -> None:
+        """The canary shape: resume restores 2 findings, the push FIXED one of
+        them. Retract the fixed one -> SARIF emits only the still-present one."""
+        _seed_disk_run(tmp_path, "retract-run", [
+            {"id": "vuln-0001", "title": "Hardcoded JWT signing key",
+             "severity": "critical", "cwe": "CWE-798"},
+            {"id": "vuln-0002", "title": "OS command injection via Host",
+             "severity": "critical", "cwe": "CWE-78"},
+        ])
+        monkeypatch.chdir(tmp_path)
+        t = Tracer("retract-run")
+        set_global_tracer(t)
+        assert len(t.vulnerability_reports) == 2  # both rehydrated
+
+        result = t.retract_vulnerability_report("vuln-0001", "key now read from os.Getenv at line 22")
+        assert result["success"] and result["retracted"]
+        assert result["remaining"] == 1
+
+        # In-memory set reduced; the fixed id is gone.
+        ids = {r["id"] for r in t.vulnerability_reports}
+        assert ids == {"vuln-0002"}
+        # Re-emitted SARIF no longer carries the retracted finding.
+        sarif = json.loads((tmp_path / "strix_runs" / "retract-run" / "findings.sarif").read_text())
+        titles = _all_sarif_titles(sarif)
+        assert "Hardcoded JWT signing key" not in titles, \
+            "retracted (fixed) finding must NOT be in SARIF"
+        assert "OS command injection via Host" in titles, \
+            "still-present finding MUST remain (no fail-open)"
+
+    def test_retract_removes_stale_md_so_next_resume_wont_reload(self, monkeypatch, tmp_path) -> None:
+        """The .md is the rehydration source — retract must delete it, else the
+        NEXT push reloads the retracted finding from disk and it resurrects."""
+        run_dir = _seed_disk_run(tmp_path, "retract-md", [
+            {"id": "vuln-0001", "title": "fixed thing", "severity": "high"},
+            {"id": "vuln-0002", "title": "live thing", "severity": "high"},
+        ])
+        monkeypatch.chdir(tmp_path)
+        t = Tracer("retract-md")
+        set_global_tracer(t)
+        t.retract_vulnerability_report("vuln-0001", "resolved")
+
+        assert not (run_dir / "vulnerabilities" / "vuln-0001.md").exists()
+        assert (run_dir / "vulnerabilities" / "vuln-0002.md").exists()
+        # Simulate the NEXT push: a fresh Tracer rehydrates from the (now
+        # reduced) disk state — the retracted finding stays gone.
+        t2 = Tracer("retract-md")
+        assert {r["id"] for r in t2.vulnerability_reports} == {"vuln-0002"}
+        # CSV no longer references vuln-0001 either.
+        csv_text = (run_dir / "vulnerabilities.csv").read_text()
+        assert "vuln-0001" not in csv_text
+        assert "vuln-0002" in csv_text
+
+    def test_retract_unknown_id_is_noop_success(self, monkeypatch, tmp_path) -> None:
+        _seed_disk_run(tmp_path, "retract-noop", [
+            {"id": "vuln-0001", "title": "only one", "severity": "high"},
+        ])
+        monkeypatch.chdir(tmp_path)
+        t = Tracer("retract-noop")
+        set_global_tracer(t)
+        result = t.retract_vulnerability_report("vuln-9999", "never existed")
+        assert result["success"] and not result["retracted"]
+        assert {r["id"] for r in t.vulnerability_reports} == {"vuln-0001"}
+
+    def test_retract_then_new_finding_does_not_reuse_id(self, monkeypatch, tmp_path) -> None:
+        """Positional ids must stay stable: after retracting vuln-0002 of 3, a
+        new finding should NOT recycle vuln-0002 (would shadow references)."""
+        _seed_disk_run(tmp_path, "retract-seq", [
+            {"id": "vuln-0001", "title": "a", "severity": "high"},
+            {"id": "vuln-0002", "title": "b (will fix)", "severity": "high"},
+            {"id": "vuln-0003", "title": "c", "severity": "high"},
+        ])
+        monkeypatch.chdir(tmp_path)
+        t = Tracer("retract-seq")
+        set_global_tracer(t)
+        t.retract_vulnerability_report("vuln-0002", "fixed")
+        # 2 remain (0001, 0003); next add uses len+1 = vuln-0003 → COLLISION risk.
+        new_id = t.add_vulnerability_report(title="new after retract", severity="low")
+        existing = {r["id"] for r in t.vulnerability_reports}
+        # The new id must be unique within the current set (no shadowing).
+        assert new_id in existing
+        assert len([r for r in t.vulnerability_reports if r["id"] == new_id]) == 1, \
+            f"new finding id {new_id} collided with a surviving finding"

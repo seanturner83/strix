@@ -411,3 +411,69 @@ def create_vulnerability_report(  # noqa: PLR0912
             "message": f"Vulnerability report '{title}' created (not persisted)",
             "warning": "Report could not be persisted - tracer unavailable",
         }
+
+
+@register_tool(sandbox_execution=False)
+def retract_vulnerability_report(report_id: str, reason: str) -> dict[str, Any]:
+    """Remove a previously-reported finding that no longer applies to the
+    current code — use this when a resumed scan confirms a prior finding has
+    been FIXED by a new push.
+
+    Resumable-PR-session context: when you --resume a session, the findings you
+    reported on earlier pushes are restored into your finding set. If this
+    push's diff genuinely fixes one of them, you MUST retract it here so it is
+    dropped from the cumulative report. Without an explicit retraction the
+    finding re-emits on every push and the pull request can never pass the
+    security gate even after the bug is fixed.
+
+    Only retract a finding you have VERIFIED is resolved by re-reading the
+    current code (e.g. a hardcoded secret now read from the environment, a
+    missing auth check now present, an injection sink now parameterised). Do
+    NOT retract a finding that is merely hard to reach or that you have not
+    re-confirmed against the current code — when in doubt, keep it.
+
+    Args:
+        report_id: the id of the finding to retract (e.g. "vuln-0001").
+        reason: a concrete justification grounded in the current code —
+            cite WHAT changed and WHERE (file:line) that resolves it.
+            Required; an empty reason is rejected.
+    """
+    if not report_id or not report_id.strip():
+        return {"success": False, "message": "report_id is required"}
+    if not reason or not reason.strip():
+        return {
+            "success": False,
+            "message": (
+                "reason is required — cite what changed in the current code "
+                "(file:line) that resolves this finding. Do not retract without "
+                "re-verifying the fix."
+            ),
+        }
+
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            import logging
+
+            logging.warning("Current tracer not available - retraction not persisted")
+            return {
+                "success": False,
+                "message": "Report could not be retracted - tracer unavailable",
+            }
+
+        result = tracer.retract_vulnerability_report(report_id.strip(), reason.strip())
+        if result.get("retracted"):
+            result["message"] = (
+                f"Finding {report_id} retracted from the cumulative report "
+                f"({result.get('remaining', '?')} finding(s) remain)."
+            )
+        else:
+            result["message"] = (
+                f"Finding {report_id} was not in the current set (already retracted "
+                f"or never reported) — nothing to do."
+            )
+        return result
+    except (ImportError, AttributeError) as e:
+        return {"success": False, "message": f"Failed to retract finding: {e!s}"}
