@@ -374,4 +374,45 @@ import { validateAndResolveUrl } from '../utils/url-validator';</fix_after>
 </function>
     </examples>
   </tool>
+
+  <tool name="retract_vulnerability_report">
+    <description>Remove a previously-reported finding that no longer applies to the current code. Use this when a RESUMED scan confirms that a prior finding has been FIXED by a new push.
+
+WHEN TO USE — resumable-PR-session re-validation:
+When you resume a previous scan session, the findings you reported on earlier pushes are restored into your finding set so the report stays cumulative. If the new push's changes genuinely RESOLVE one of those prior findings, you MUST retract it here. Otherwise the finding re-emits on every future push and the pull request can NEVER pass the security gate even after the bug is fixed (the gate treats any reported finding as still-open).
+
+Typical resolved patterns that warrant a retraction:
+- A hardcoded secret/credential is now read from the environment or a secret manager.
+- A missing authentication/authorization check is now present on the path.
+- An injection sink is now parameterised / escaped / passed as an argument vector instead of a shell or query string.
+- The vulnerable code (function, route, file) was deleted entirely.
+
+DO NOT USE:
+- For a finding you have NOT re-confirmed against the CURRENT code. Re-read the file at the cited location first. When in doubt, KEEP the finding — a false retraction silently removes a real vulnerability from the gate (fail-open).
+- To suppress a finding you simply disagree with, or one that is merely hard to reach. Retraction is for GENUINELY-RESOLVED issues only.
+- For findings on a fresh (non-resumed) scan — there is nothing to retract.
+
+The retraction removes the finding from the cumulative report (vulnerabilities index + SARIF) and deletes its writeup so it does not reappear on the next push. The reason you supply is recorded for audit.</description>
+    <parameters>
+      <parameter name="report_id" type="string" required="true">
+        <description>The id of the finding to retract, exactly as it appears in the current finding set (e.g. "vuln-0001"). Retracting an unknown or already-retracted id is a harmless no-op.</description>
+      </parameter>
+      <parameter name="reason" type="string" required="true">
+        <description>Concrete, code-grounded justification for why this finding is resolved in the CURRENT code. Cite WHAT changed and WHERE (file:line). Example: "Hardcoded key removed — internal/auth/strix_demo.go line 22 now reads var jwtSigningKey = os.Getenv(\"JWT_SIGNING_KEY\") instead of a string constant." An empty or vague reason is rejected; do not retract without re-verifying the fix.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing:
+- On retraction: success=true, retracted=true, report_id, title, remaining (count of findings left), message
+- On no-op (id not in current set): success=true, retracted=false, message
+- On error (missing id/reason, tracer unavailable): success=false, message</description>
+    </returns>
+
+    <examples>
+<function=retract_vulnerability_report>
+<parameter=report_id>vuln-0001</parameter>
+<parameter=reason>Confirmed fixed in this push. internal/auth/strix_demo.go line 22 previously declared `const jwtSigningKey = "...supersecret..."` (CWE-798); it now reads `var jwtSigningKey = os.Getenv("JWT_SIGNING_KEY")`, so no signing secret is embedded in source any longer. Re-read the current file to verify before retracting.</parameter>
+</function>
+    </examples>
+  </tool>
 </tools>
