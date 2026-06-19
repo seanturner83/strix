@@ -638,6 +638,20 @@ class Tracer:
             source="strix.findings",
         )
         self.save_run_data()
+
+        # save_run_data only rewrites vulnerabilities.csv inside
+        # `if self.vulnerability_reports:` — so retracting the LAST finding
+        # leaves a STALE csv on disk (the empty SARIF still emits, per SEC-6802,
+        # but the CSV doesn't). Since the CSV is the rehydration source, a stale
+        # one would resurrect the retracted finding on the next push. Truncate
+        # it to a header-only file when the set is now empty.
+        if not self.vulnerability_reports:
+            with contextlib.suppress(OSError):
+                run_dir = self._compute_run_dir_if_exists()
+                if run_dir is not None:
+                    csv_path = run_dir / "vulnerabilities.csv"
+                    if csv_path.exists():
+                        csv_path.write_text("id,title,severity,timestamp,file\n", encoding="utf-8")
         return {
             "success": True,
             "retracted": True,

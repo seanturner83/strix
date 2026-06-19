@@ -563,11 +563,14 @@ def retract_vulnerability_report(report_id: str, reason: str) -> dict[str, Any]:
         # before the guard existed — we don't fabricate a block from missing
         # data). Errors here must never crash the retract path.
         try:
+            import os as _os
+
+            workspace_root = _os.environ.get("STRIX_WORKSPACE_ROOT", "/workspace")
             run_dir = tracer._compute_run_dir_if_exists()  # noqa: SLF001
             if run_dir is not None:
                 locations = _prior_finding_locations(run_dir, report_id.strip())
                 if locations:
-                    still_present, detail = _vuln_still_present(locations)
+                    still_present, detail = _vuln_still_present(locations, workspace_root)
                     if still_present:
                         return {
                             "success": False,
