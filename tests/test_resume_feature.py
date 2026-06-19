@@ -254,3 +254,112 @@ class TestListing:
     def test_get_session_missing(self):
         mod = self._listing()
         assert mod.get_session("nonexistent", runs_root=self.tmp) is None
+
+
+# ---------------------------------------------------------------------------
+# resume — reopen-instruction override (resumable-PR-session)
+# ---------------------------------------------------------------------------
+
+
+class TestReopenInstruction:
+    """load_resume_bundle's reopen_instruction override.
+
+    A headless orchestrator (ssw resumable-PR-session) reopens a *completed*
+    session and needs to drive it with a directed prompt (the diff since the
+    last scanned SHA) instead of the interactive "summarize and ask what next"
+    default. These tests stub the lazy imports so resume.py can run without
+    heavy deps, mirroring the file-location style used above.
+    """
+
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _resume(self, *, completed: bool):
+        import importlib.util
+        import types
+
+        root = Path(__file__).parents[1]
+
+        # Minimal AgentState: just records add_message calls into .messages.
+        class _FakeState:
+            def __init__(self, messages, iteration, context, completed, stop_requested):
+                self.messages = list(messages)
+                self.iteration = iteration
+                self.context = context
+                self.completed = completed
+                self.stop_requested = stop_requested
+
+            def add_message(self, role, content):
+                self.messages.append({"role": role, "content": content})
+
+        _completed = completed  # class bodies don't close over the enclosing scope
+
+        class _FakeReplay:
+            messages = [{"role": "user", "content": "original scan"}]
+            iteration = 7
+            context = {"found": True}
+            completed = _completed
+            scan_config = {"targets": [{"original": "repo"}], "user_instructions": "orig"}
+
+        class _FakeConvLog:
+            ReplayError = RuntimeError
+
+            @staticmethod
+            def replay(_run_dir):
+                return _FakeReplay()
+
+        class _FakeRow:
+            run_name = "pr-acme-app-42"
+            run_dir = self.tmp
+            has_conversation_log = True
+            meta = {"status": "completed"}
+
+        # Register stub packages + modules so resume.py's lazy `from ...`
+        # imports resolve to these instead of the real (heavy) ones.
+        for pkg in ("strix", "strix.agents", "strix.sessions", "strix.telemetry"):
+            sys.modules.setdefault(pkg, types.ModuleType(pkg))
+
+        state_mod = types.ModuleType("strix.agents.state")
+        state_mod.AgentState = _FakeState
+        sys.modules["strix.agents.state"] = state_mod
+
+        listing_mod = types.ModuleType("strix.sessions.listing")
+        listing_mod.get_session = lambda run_name, runs_root=None: _FakeRow()
+        sys.modules["strix.sessions.listing"] = listing_mod
+
+        conv_mod = types.ModuleType("strix.telemetry.conversation_log")
+        conv_mod.ConversationLog = _FakeConvLog
+        conv_mod.ReplayError = RuntimeError
+        sys.modules["strix.telemetry.conversation_log"] = conv_mod
+
+        spec = importlib.util.spec_from_file_location(
+            "strix.sessions.resume", root / "strix/sessions/resume.py"
+        )
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[attr-defined]
+        sys.modules["strix.sessions.resume"] = mod
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+    def test_reopen_uses_default_when_no_override(self):
+        mod = self._resume(completed=True)
+        bundle = mod.load_resume_bundle("pr-acme-app-42")
+        assert bundle.mode == "reopen"
+        last = bundle.agent_state.messages[-1]
+        assert last["role"] == "user"
+        assert "summarize the key findings" in last["content"]
+
+    def test_reopen_injects_override(self):
+        mod = self._resume(completed=True)
+        diff = "A new push landed. Diff since last scan:\n+ added_func()"
+        bundle = mod.load_resume_bundle("pr-acme-app-42", reopen_instruction=diff)
+        assert bundle.mode == "reopen"
+        last = bundle.agent_state.messages[-1]
+        assert last["content"] == diff
+        assert "summarize the key findings" not in last["content"]
+
+    def test_continue_mode_ignores_override(self):
+        # Incomplete session → continue mode → no reopen message injected at all.
+        mod = self._resume(completed=False)
+        bundle = mod.load_resume_bundle("pr-acme-app-42", reopen_instruction="should be ignored")
+        assert bundle.mode == "continue"
+        assert all(m["content"] != "should be ignored" for m in bundle.agent_state.messages)

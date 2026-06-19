@@ -326,6 +326,30 @@ Examples:
     )
 
     parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        metavar="RUN_NAME",
+        help="Use this stable run name instead of an auto-generated one. Lets an "
+        "orchestrator key a run deterministically (e.g. per-PR 'pr-<repo>-<number>') "
+        "so it can be resumed across pushes via --resume. SEC resumable-PR-session.",
+    )
+
+    parser.add_argument(
+        "--reopen-instruction",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help="On --resume of a COMPLETED session, inject this as the reopen prompt "
+        "instead of the interactive default ('summarize and ask what next'). Use it to "
+        "drive a headless re-open — e.g. the resumable-PR-session flow passes the diff "
+        "since the last scanned SHA so the agent re-validates prior findings and scans "
+        "the new changes. Ignored for incomplete (continue-mode) sessions and for fresh "
+        "scans. Kept separate from --instruction so a large diff isn't re-injected via "
+        "the task description on every push.",
+    )
+
+    parser.add_argument(
         "-c",
         "--continue",
         dest="continue_recent",
@@ -673,13 +697,23 @@ def _handle_resume_bootstrap(args: argparse.Namespace) -> None:
 
     bundle = None
 
+    # --reopen-instruction is the directed reopen prompt for a completed
+    # session (resumable-PR-session: ssw injects the diff-since-last-scanned-
+    # SHA). Kept distinct from --instruction so it does NOT flow into the
+    # task re-injection (base_agent._initialize_sandbox_and_state re-adds the
+    # task — incl. `Special instructions: {user_instructions}` — on every
+    # resume); overloading --instruction would duplicate a large diff and
+    # clobber the original scan instructions. Harmless for `continue` mode,
+    # which ignores it.
+    reopen_instruction = getattr(args, "reopen_instruction", None)
+
     if args.continue_recent:
         row = most_recent()
         if row is None:
             console.print("[red]No resumable sessions found.[/red]")
             sys.exit(1)
         try:
-            bundle = load_resume_bundle(row.run_name)
+            bundle = load_resume_bundle(row.run_name, reopen_instruction=reopen_instruction)
         except ResumeError as exc:
             console.print(f"[red]Resume failed:[/red] {exc}")
             sys.exit(1)
@@ -697,7 +731,7 @@ def _handle_resume_bootstrap(args: argparse.Namespace) -> None:
 
     elif args.resume:
         try:
-            bundle = load_resume_bundle(args.resume)
+            bundle = load_resume_bundle(args.resume, reopen_instruction=reopen_instruction)
         except ResumeError as exc:
             console.print(f"[red]Resume failed:[/red] {exc}")
             sys.exit(1)

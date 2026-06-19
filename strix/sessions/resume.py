@@ -24,9 +24,18 @@ class ResumeBundle:
 
 
 def load_resume_bundle(
-    run_name: str, runs_root: Path | None = None
+    run_name: str,
+    runs_root: Path | None = None,
+    reopen_instruction: str | None = None,
 ) -> ResumeBundle:
-    """Load a past session from conversation.jsonl and reconstruct AgentState."""
+    """Load a past session from conversation.jsonl and reconstruct AgentState.
+
+    reopen_instruction lets a headless orchestrator inject a directed re-open
+    prompt instead of the interactive default. This is the resumable-PR-session
+    hook: ssw passes "a new push landed; here is the diff since the last scanned
+    SHA — re-validate prior findings and scan the new diff" so the agent does
+    real work on reopen rather than summarising and waiting for a human.
+    """
     from strix.agents.state import AgentState
     from strix.sessions.listing import get_session
     from strix.telemetry.conversation_log import ConversationLog, ReplayError
@@ -58,8 +67,11 @@ def load_resume_bundle(
     if mode == "reopen":
         state.add_message(
             "user",
-            "The previous scan session has been reopened. Please summarize the key "
-            "findings so far and ask what to investigate or test next.",
+            reopen_instruction
+            or (
+                "The previous scan session has been reopened. Please summarize the key "
+                "findings so far and ask what to investigate or test next."
+            ),
         )
 
     return ResumeBundle(
