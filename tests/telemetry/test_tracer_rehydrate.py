@@ -449,3 +449,91 @@ class TestRetractGroundednessGuard:
         locs = _prior(run_dir, "vuln-0003")
         still, _ = _still(locs, workspace_root=str(ws))
         assert still is False, "deleted vulnerable file → allow retraction"
+
+
+class TestRetractToolGuardIntegration:
+    """End-to-end through the retract_vulnerability_report TOOL (not just the
+    guard helpers): does the tool actually intercept, refuse, and — the
+    regression that matters — leave tracer state UNMUTATED on refusal? A guard
+    that returns a refusal message but still drops the finding would be worse
+    than no guard. Drives the real Tracer; points the guard's workspace at a
+    fixture dir via STRIX_WORKSPACE_ROOT."""
+
+    def _tool(self):
+        from strix.tools.reporting.reporting_actions import retract_vulnerability_report
+        return retract_vulnerability_report
+
+    def _seed(self, tmp_path, monkeypatch, *, fix_before, current_code):
+        """Seed a resumed Tracer with one finding (vuln-0001) whose vuln site is
+        `fix_before`, plus a workspace whose current file holds `current_code`."""
+        monkeypatch.chdir(tmp_path)
+        _seed_disk_run(tmp_path, "tool-guard", [
+            {"id": "vuln-0001", "title": "Hardcoded key", "severity": "critical",
+             "cwe": "CWE-798"},
+        ])
+        run_dir = tmp_path / "strix_runs" / "tool-guard"
+        _write_events_finding(run_dir / "events.jsonl", "vuln-0001", [
+            {"file": "x.go", "start_line": 1, "end_line": 1,
+             "fix_before": fix_before, "fix_after": "var k = getenv()"},
+        ])
+        ws = tmp_path / "ws"; ws.mkdir()
+        (ws / "x.go").write_text(current_code)
+        monkeypatch.setenv("STRIX_WORKSPACE_ROOT", str(ws))
+        t = Tracer("tool-guard")
+        set_global_tracer(t)
+        return t
+
+    def test_tool_refuses_and_leaves_state_unmutated(self, tmp_path, monkeypatch) -> None:
+        sink = 'const k = "supersecret"'
+        # current code STILL contains the sink => not fixed => must REFUSE.
+        t = self._seed(tmp_path, monkeypatch, fix_before=sink,
+                       current_code=f"package x\n{sink}\n")
+        assert {r["id"] for r in t.vulnerability_reports} == {"vuln-0001"}
+
+        result = self._tool()("vuln-0001", "I think this is fixed")  # wrong claim
+
+        assert result["success"] is False
+        assert result.get("guard") == "vuln_still_present"
+        assert "REFUSED" in result["message"]
+        # THE REGRESSION CHECK: state must be untouched — finding still present,
+        # in memory AND on disk + the .md not deleted.
+        assert {r["id"] for r in t.vulnerability_reports} == {"vuln-0001"}, \
+            "refused retraction must NOT remove the finding from memory"
+        run_dir = tmp_path / "strix_runs" / "tool-guard"
+        assert "vuln-0001" in (run_dir / "vulnerabilities.csv").read_text()
+        assert (run_dir / "vulnerabilities" / "vuln-0001.md").exists()
+
+    def test_tool_allows_genuine_fix_and_mutates_state(self, tmp_path, monkeypatch) -> None:
+        sink = 'const k = "supersecret"'
+        # current code has the FIXED form — sink gone => guard allows.
+        t = self._seed(tmp_path, monkeypatch, fix_before=sink,
+                       current_code='package x\nvar k = os.Getenv("K")\n')
+        result = self._tool()("vuln-0001", "fixed: now reads from env at x.go:1")
+
+        assert result["success"] is True and result["retracted"] is True
+        assert t.vulnerability_reports == [], "allowed retraction must drop the finding"
+        run_dir = tmp_path / "strix_runs" / "tool-guard"
+        assert "vuln-0001" not in (run_dir / "vulnerabilities.csv").read_text()
+        assert not (run_dir / "vulnerabilities" / "vuln-0001.md").exists()
+
+    def test_tool_failsafe_allows_when_no_events(self, tmp_path, monkeypatch) -> None:
+        """No events.jsonl → guard can't disprove → tool falls through to allow
+        (don't fabricate a block from missing data)."""
+        monkeypatch.chdir(tmp_path)
+        _seed_disk_run(tmp_path, "tool-noevents", [
+            {"id": "vuln-0001", "title": "x", "severity": "high"},
+        ])
+        # no events.jsonl written
+        monkeypatch.setenv("STRIX_WORKSPACE_ROOT", str(tmp_path / "ws"))
+        t = Tracer("tool-noevents")
+        set_global_tracer(t)
+        result = self._tool()("vuln-0001", "fixed")
+        assert result["success"] is True and result.get("retracted") is True
+
+    def test_tool_rejects_empty_reason_before_guard(self, tmp_path, monkeypatch) -> None:
+        t = self._seed(tmp_path, monkeypatch, fix_before='const k = "s"',
+                       current_code='package x\nconst k = "s"\n')
+        result = self._tool()("vuln-0001", "   ")
+        assert result["success"] is False and "reason is required" in result["message"]
+        # finding untouched
+        assert {r["id"] for r in t.vulnerability_reports} == {"vuln-0001"}
