@@ -18,6 +18,7 @@ from strix.tools.code_graph.code_graph_actions import (
     code_graph_find_references,
     code_graph_get_imports,
     code_graph_get_symbol_at,
+    code_graph_grep,
 )
 
 
@@ -296,6 +297,155 @@ def test_tools_are_registered_with_registry() -> None:
         "code_graph_find_implementations",
         "code_graph_get_imports",
         "code_graph_get_symbol_at",
+        "code_graph_grep",
     }
     missing = expected - registered_names
     assert not missing, f"missing registrations: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# code_graph_grep — precise symbol resolution + source context
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def grep_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A fixture index whose definition/reference ranges point at REAL
+    source files on disk, so code_graph_grep can read windows from them.
+    Sets STRIX_WORKSPACE_ROOT to the checkout root.
+
+    Layout (1-based for humans; SCIP stores 0-based lines):
+      pkg/auth/check.go   — defines validateWithdrawal (lines 5-9, 0-based 4-8)
+      pkg/api/handler.go  — references it at line 11 (0-based 10)
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "pkg" / "auth").mkdir(parents=True)
+    (ws / "pkg" / "api").mkdir(parents=True)
+    (ws / "pkg" / "auth" / "check.go").write_text(
+        "package auth\n"            # line 1 (idx 0)
+        "\n"                         # 2
+        "import \"errors\"\n"        # 3
+        "\n"                         # 4
+        "func validateWithdrawal(r *Req) error {\n"   # 5 (idx 4) DEF start
+        "\tif r.Amount <= 0 {\n"     # 6
+        "\t\treturn errors.New(\"bad amount\")\n"      # 7
+        "\t}\n"                      # 8
+        "\treturn nil\n"             # 9 (idx 8) DEF end
+        "}\n",                       # 10
+        encoding="utf-8",
+    )
+    (ws / "pkg" / "api" / "handler.go").write_text(
+        "package api\n"             # 1
+        "\n"                         # 2
+        "func Handle(req *Req) {\n"  # 3
+        "\tamt := parse(req)\n"      # 4
+        "\t_ = amt\n"                # 5
+        "\t// gate\n"                # 6
+        "\tif err := validateWithdrawal(req); err != nil {\n"  # 7 ... but ref at idx 10 below
+        "\t\treturn\n"               # 8
+        "\t}\n"                      # 9
+        "\tprocess(req)\n"           # 10
+        "\tvalidateWithdrawal(req)\n"  # 11 (idx 10) REF
+        "}\n",                       # 12
+        encoding="utf-8",
+    )
+
+    db_root = tmp_path / "code_graph" / "target"
+    db_root.mkdir(parents=True)
+    db = db_root / "code_graph.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(SCHEMA_SQL)
+    conn.executemany(
+        "INSERT INTO documents (id, relative_path) VALUES (?,?)",
+        [(1, "pkg/auth/check.go"), (2, "pkg/api/handler.go")],
+    )
+    conn.execute(
+        "INSERT INTO global_symbols (id, symbol) VALUES "
+        "(1, 'scip-go gomod x HEAD `pkg/auth`/validateWithdrawal.')"
+    )
+    # chunk covering the ref line in handler.go (0-based line 10)
+    conn.execute(
+        "INSERT INTO chunks (id, document_id, chunk_index, start_line, end_line, occurrences) "
+        "VALUES (200, 2, 0, 10, 10, x'')"
+    )
+    conn.execute(
+        "INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (200, 1, 8)"
+    )
+    # definition enclosing range: check.go lines 4-8 (0-based)
+    conn.execute(
+        "INSERT INTO defn_enclosing_ranges "
+        "(id, document_id, symbol_id, start_line, start_char, end_line, end_char) "
+        "VALUES (1, 1, 1, 4, 0, 8, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    from strix.tools.code_graph.query import CodeGraphIndex
+
+    monkeypatch.setattr(
+        CodeGraphIndex, "discover",
+        classmethod(lambda cls, root=None: CodeGraphIndex(db)),
+    )
+    monkeypatch.setenv("STRIX_WORKSPACE_ROOT", str(ws))
+    return ws
+
+
+def test_grep_unavailable_when_no_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(code_graph_actions, "_open_index", lambda: None)
+    result = code_graph_grep("foo")
+    assert "code graph not available" in result["output"]
+
+
+def test_grep_shows_definition_body(grep_workspace) -> None:
+    result = code_graph_grep("validateWithdrawal")
+    out = result["output"]
+    # The full def body (lines 5-9, displayed 1-based) must be inlined.
+    assert "● DEFINITION" in out
+    assert "func validateWithdrawal(r *Req) error {" in out
+    assert "return errors.New(\"bad amount\")" in out
+    assert "return nil" in out
+    # 1-based line numbers shown.
+    assert "5 func validateWithdrawal" in out
+
+
+def test_grep_shows_reference_with_context(grep_workspace) -> None:
+    result = code_graph_grep("validateWithdrawal", context=2)
+    out = result["output"]
+    assert "● REFERENCE" in out
+    # ref is at 1-based line 11; with ±2 context we see 9-12.
+    assert "validateWithdrawal(req)" in out
+    assert "process(req)" in out      # line 10, within ±2
+    assert "11 \tvalidateWithdrawal(req)" in out
+
+
+def test_grep_context_is_clamped(grep_workspace) -> None:
+    # Asking for a huge context must not blow past GREP_MAX_CONTEXT, and
+    # must not error reading near file boundaries.
+    result = code_graph_grep("validateWithdrawal", context=9999)
+    assert "● REFERENCE" in result["output"]
+
+
+def test_grep_unknown_symbol(grep_workspace) -> None:
+    result = code_graph_grep("doesNotExistAnywhere")
+    assert "no symbol matches" in result["output"]
+
+
+def test_grep_degrades_when_source_missing(grep_workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Point the workspace somewhere with no source files: the graph still
+    # resolves the symbol, but every hit shows the bare location + a
+    # "source unavailable" note rather than erroring.
+    monkeypatch.setenv("STRIX_WORKSPACE_ROOT", "/nonexistent-workspace-xyz")
+    result = code_graph_grep("validateWithdrawal")
+    out = result["output"]
+    assert "● DEFINITION" in out
+    assert "source unavailable" in out
+
+
+def test_grep_refuses_path_traversal(grep_workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed SCIP relative_path that escapes the workspace must be
+    # refused by _read_lines (returns None -> "source unavailable"),
+    # never read from outside the checkout.
+    from strix.tools.code_graph import code_graph_actions as cga
+
+    assert cga._read_lines("../../../../etc/passwd") is None

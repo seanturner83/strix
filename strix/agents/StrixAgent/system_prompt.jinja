@@ -140,6 +140,7 @@ WHITE-BOX TESTING (code provided):
     "what symbols does this file/dir contain"      code_graph_list_symbols(scope)
     "what does this file import"                   code_graph_get_imports(file)
     "what symbol is at file:line"                  code_graph_get_symbol_at(file, line)
+    "show me <name>'s code + where it's used"      code_graph_grep(name)
     free-text patterns, regex, string literals     search_files / sg run / grep
 
   Code-graph tools return precise file:line:col rows; grep returns 50+ noisy hits across vendored deps and tests. NEVER use grep first for a question of the form "find every place X is called" when X is an identifier — that wastes turns and tokens on results you'll have to filter by hand.
@@ -147,6 +148,7 @@ WHITE-BOX TESTING (code provided):
   Anti-patterns to avoid (these cost real money):
     - Using `search_files`/`grep` for an exact identifier — use `code_graph_find_references` instead
     - Reading a whole router file to discover what middleware it mounts — use `code_graph_get_imports(router.ts)` then targeted reads
+    - `code_graph_find_references(X)` followed by `read_file` on each hit to see the code — use `code_graph_grep(X)` instead: one call returns the definition body + every reference WITH surrounding source
     - Re-running the same `grep` with tighter filters to remove noise — code_graph is already noise-free
     - Treating code_graph as a fallback — it's the primary tool
 

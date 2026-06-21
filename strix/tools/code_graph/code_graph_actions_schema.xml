@@ -126,6 +126,39 @@
     </examples>
   </tool>
 
+  <tool name="code_graph_grep">
+    <description>Resolve a symbol precisely via the code graph, then show its SOURCE — the definition's full body plus each reference site with surrounding context. This is the tool to use when you need to SEE THE CODE, not just locations: "show me where checkAuth is defined and everywhere it's called, with the surrounding lines". One call replaces code_graph_find_references followed by a fan-out of read_file. Unlike grep it returns ZERO false hits from comments, string literals, vendored dependencies, or unrelated same-named symbols — every line shown is a real definition or reference of THIS symbol. Use this for security review when you need to judge logic (is there a bypassable check between source and sink?) rather than just enumerate call sites.</description>
+    <parameters>
+      <parameter name="symbol" type="string" required="true">
+        <description>Symbol name to resolve and show. Bare identifier preferred (substring match handles language-specific monikers, same as the other code_graph_* tools).</description>
+      </parameter>
+      <parameter name="context" type="integer" required="false">
+        <description>Lines of source shown above and below each REFERENCE site. Default 3, max 10. The DEFINITION is always shown in full (its enclosing body), regardless of this value.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>{"output": "# &lt;name&gt;\n● DEFINITION file:line\n  &lt;numbered source lines of the def body&gt;\n\n# references (N shown, ±C lines)\n● REFERENCE file:line\n  &lt;numbered source window&gt;\n..."}. {"output": "code graph not available..."} when the indexer was skipped. {"output": "no symbol matches..."} when the symbol isn't indexed.</description>
+    </returns>
+    <notes>
+  - Prefer this over `code_graph_find_references` + multiple `read_file` calls when you need to read the code around each hit — it's one call and far fewer tokens than reading whole files.
+  - Reference sites are capped at 15 (each costs a source window); the definition body is shown in full but truncated at 120 lines for generated/minified files.
+  - Falls back to a bare location line for any hit whose source file can't be read (it still tells you where to look).
+  - For a plain location list (no source), use `code_graph_find_references`. For just the def location, use `code_graph_find_definition`.
+    </notes>
+    <examples>
+  # See an auth middleware's implementation AND every place it guards, with context
+  <function=code_graph_grep>
+  <parameter=symbol>checkCustomerAccountPermission</parameter>
+  </function>
+
+  # Wider window around each call site
+  <function=code_graph_grep>
+  <parameter=symbol>validateWithdrawal</parameter>
+  <parameter=context>5</parameter>
+  </function>
+    </examples>
+  </tool>
+
   <tool name="code_graph_get_symbol_at">
     <description>Return symbols mentioned in the chunk containing a given line in a file. Coarser than IDE go-to-symbol (chunk-level, not cursor-precise) but useful for "what does this code reference" lookups.</description>
     <parameters>
