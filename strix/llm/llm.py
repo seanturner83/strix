@@ -81,17 +81,32 @@ class RequestStats:
 
 
 class LLM:
-    # Predicted-iteration threshold above which we use the 1-hour cache
-    # TTL instead of the default 5-minute. Above ~20 iterations a scan
-    # reliably crosses the 5-min boundary at typical Bedrock latencies,
-    # which forces a full prelude reload + cache rewrite per crossing —
-    # paying input-rate ($15/M for Opus) instead of cache-read rate
-    # ($1.50/M). Threshold is conservative: at 20-iter a scan averages
-    # ~10-15min wall-clock, comfortably past 5min. Cache-write doubles
-    # ($18.75/M → ~$37.50/M for Opus) but only fires once per scan;
-    # cache-read savings on every subsequent iteration dominate.
-    # SEC-???? cost-optimisation analysis 2026-06-11.
-    _CACHE_TTL_1H_THRESHOLD = 20
+    # max_iterations threshold above which we use the 1-hour cache TTL instead
+    # of the default 5-minute. We use max_iterations as a SCOPE proxy, not a
+    # literal turn prediction: the 1h cache-write premium (1.25× input on the
+    # write) only pays off on long, gappy scans where the cached preamble goes
+    # untouched >5min between turns. Gap analysis (SEC-7045, 2026-06-21) showed
+    # two clean cohorts:
+    #   - PR / diff scans  (strix-pr-dispatch, dynamic cap, ceiling 40): median
+    #     ~8 turns, span minutes, turns every ~38s — 5m cache never expires
+    #     between touches, so 1h just burns the write premium. → want 5m.
+    #   - Full-scope scans (weekly-merges / weekly-infra / targeted-rescan /
+    #     advisory-merges / DAST — set NO STRIX_MAX_ITERATIONS, so CLI default
+    #     100): median 68 turns, ~49min span, 66% have a >5min gap. → want 1h.
+    # INVARIANT this threshold relies on (verified 2026-06-21): PR-dispatch is
+    # the ONLY caller that sets max_iterations, capped ≤40 (app curve
+    # clamp(10,40,…); infra clamp(8,30,…)); every full-scope caller leaves it
+    # unset → 100. The gate is `max_iterations >= THRESHOLD`. At 40 the only PR
+    # scans that still get 1h are the MAX-size app PRs that hit the 40 ceiling
+    # exactly (7+ human-authored files) — a small, genuinely-large slice that
+    # plausibly DOES run long enough to want 1h, so catching them is acceptable;
+    # everything else (the bulk: ≤6-file app, all infra ≤30) drops to 5m. Full
+    # scans (100) stay 1h. **If you raise the PR app ceiling past 40, or set an
+    # explicit low cap on a full-scope scan, this proxy mis-sorts — re-key on
+    # scope_mode then (see SEC-7045).**
+    # (Was 20, set 2026-06-11 against the OLD higher PR caps; stranded when the
+    # cap-curve was lowered to 40/30, which left ~all scans ≥20 → always-1h.)
+    _CACHE_TTL_1H_THRESHOLD = 40
 
     def __init__(self, config: LLMConfig, agent_name: str | None = None,
                  max_iterations: int | None = None):
