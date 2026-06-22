@@ -27,6 +27,42 @@ _SERVER_TIMEOUT = float(Config.get("strix_sandbox_execution_timeout") or "120")
 SANDBOX_EXECUTION_TIMEOUT = _SERVER_TIMEOUT + 30
 SANDBOX_CONNECT_TIMEOUT = float(Config.get("strix_sandbox_connect_timeout") or "10")
 
+# SEC-???? spike: per-call tool-cost feedback. When enabled, append the
+# approximate token cost of each tool RESULT to the observation the agent
+# sees. The agent is an optimiser but reasons about capability ("can I
+# reach the answer?") not cost ("what did that path burn?") — fleet
+# telemetry shows read+grep results are ~48% of all tool-result tokens,
+# and live observation shows the agent treats "search then read the whole
+# file" as equivalent to a precise windowed fetch because it doesn't price
+# the follow-up read. Making the cost legible at the point of choice lets
+# it self-select the cheaper tool WHEN precision is what it needed (and
+# keep grepping when breadth is). Pure economic signal, no directive —
+# authority signals ("use X instead") are already ignored.
+#
+# DEFAULT OFF: this touches every tool result fleet-wide, so it ships inert
+# and is enabled per-run (STRIX_TOOL_COST_FEEDBACK=1) to MEASURE the mix
+# shift, never flipped live blind.
+_TOOL_COST_FEEDBACK = (Config.get("strix_tool_cost_feedback") or "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# ~4 chars/token is the standard rough estimate; deliberately char-based to
+# add zero per-call latency (no tokenizer invocation on every result).
+_CHARS_PER_TOKEN = 4
+
+
+def _cost_feedback_line(result_str: str) -> str:
+    """Render the per-call cost annotation appended to a tool result.
+
+    Reports the approximate token cost the result adds to context. Bucketed
+    coarsely so the agent reads it as a signal, not a precise figure it
+    might over-fit to. Empty string when the feature is disabled."""
+    if not _TOOL_COST_FEEDBACK:
+        return ""
+    approx_tokens = len(result_str) // _CHARS_PER_TOKEN
+    return f"\n<cost>~{approx_tokens} tokens added to context by this result</cost>"
+
 
 async def execute_tool(tool_name: str, agent_state: Any | None = None, **kwargs: Any) -> Any:
     execute_in_sandbox = should_execute_in_sandbox(tool_name)
@@ -243,8 +279,13 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
 
     if result_str is None:
         final_result_str = f"Tool {tool_name} executed successfully"
+        cost_basis = ""
     else:
         final_result_str = str(result_str)
+        # Cost is reported against the FULL result the agent is charged for
+        # in context, before any display-truncation here — the truncation
+        # notice and the cost line describe the same underlying size.
+        cost_basis = final_result_str
         if len(final_result_str) > 10000:
             start_part = final_result_str[:4000]
             end_part = final_result_str[-4000:]
@@ -253,6 +294,12 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
     observation_xml = (
         f"<tool_result>\n<tool_name>{tool_name}</tool_name>\n"
         f"<result>{final_result_str}</result>\n</tool_result>"
+        # Cost annotation sits OUTSIDE the </tool_result> wrapper on purpose:
+        # the history-truncation pass (llm._TOOL_RESULT_PATTERN) matches
+        # `</result>\s*</tool_result>`, so anything inserted between those
+        # tags would break that match and silently disable truncation of
+        # this result — a cost-feedback feature must not defeat cost control.
+        f"{_cost_feedback_line(cost_basis)}"
     )
 
     return observation_xml, images
