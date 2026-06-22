@@ -154,3 +154,55 @@ def test_list_content_branch_also_inherits_ttl(monkeypatch):
     # And the FIRST content block of the same message must NOT have been
     # mutated — only the trailing block is the breakpoint.
     assert "cache_control" not in out[1]["content"][0]
+
+
+# ---------------------------------------------------------------------------
+# Cohort-routing boundary (SEC-7045): the TTL must split PR/diff scans (5m)
+# from full-scope scans (1h) via max_iterations as a scope proxy. These pin
+# the ACTUAL routing at concrete cap values from the real curves, so the
+# split is asserted independent of the exact threshold constant — the prior
+# tests used threshold-relative values (threshold, threshold*2) and would
+# pass at ANY threshold, missing a misalignment with the dispatch caps.
+#
+# Real caps (strix-pr-dispatch resolve_turn_cap, verified 2026-06-21):
+#   PR app curve:  clamp(10,40, 5+5*files) -> 10,15,20,25,30,35,40 ceiling
+#   PR infra curve: clamp(8,30, 4+4*files) -> 8,12,16,20,24,28,30 ceiling
+#   Full-scope (weekly/infra/targeted/advisory/DAST): NO cap set -> CLI default 100
+# Invariant: PR is the ONLY caller that sets a cap (<=40); full = 100.
+# ---------------------------------------------------------------------------
+
+def _ttl(monkeypatch, cap):
+    return _build_llm(monkeypatch, max_iterations=cap)._cache_control().get("ttl", "5m")
+
+
+@pytest.mark.parametrize("cap", [8, 10, 12, 15, 16, 20, 24, 25, 28, 30, 35])
+def test_pr_cohort_caps_get_5m(monkeypatch, cap):
+    """Typical PR/diff scans (cap well under the 40 ceiling) must get 5m —
+    they run short + dense (median ~8 turns, turns every ~38s) and never
+    leave the cached preamble untouched >5min, so 1h would only burn the
+    cache-write premium."""
+    assert _ttl(monkeypatch, cap) == "5m", (
+        f"PR-cohort cap={cap} should route to 5m at threshold "
+        f"{LLM._CACHE_TTL_1H_THRESHOLD}"
+    )
+
+
+def test_full_scope_default_cap_gets_1h(monkeypatch):
+    """Full-scope scans set no STRIX_MAX_ITERATIONS -> CLI default 100 ->
+    must get 1h (median 68 turns, ~49min span, 66% have a >5min gap)."""
+    assert _ttl(monkeypatch, 100) == "1h"
+
+
+def test_pr_app_ceiling_boundary(monkeypatch):
+    """The 40-file-ceiling app PR sits exactly on the threshold. Gate is
+    `>=`, so a max-size 7+-file app PR (cap 40) currently elects 1h — a
+    small, genuinely-large slice that plausibly runs long enough to want it.
+    Pin the boundary so a future threshold/curve change is a conscious one."""
+    assert _ttl(monkeypatch, 39) == "5m"   # just under ceiling -> 5m
+    assert _ttl(monkeypatch, 40) == "1h"   # at ceiling -> 1h (>= gate)
+
+
+def test_no_cap_defaults_5m(monkeypatch):
+    """max_iterations=None (not passed) must not crash and must default 5m
+    (the `self.max_iterations and ...` guard)."""
+    assert _ttl(monkeypatch, None) == "5m"
