@@ -160,14 +160,27 @@ def test_get_symbol_at_unavailable_when_no_index(monkeypatch: pytest.MonkeyPatch
 
 
 # ---------------------------------------------------------------------------
-# find_implementations is always a stub in W2
+# find_implementations (unstubbed in e6f996a — reads SCIP relationship blobs)
 # ---------------------------------------------------------------------------
 
 
-def test_find_implementations_returns_stub_message() -> None:
+def test_find_implementations_unavailable_when_no_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no index discovered the tool degrades to the standard
+    # "code graph not available" output (it no longer returns the old W2
+    # "not yet supported" stub — that path was removed when the
+    # relationship-blob parser landed in e6f996a).
+    monkeypatch.setattr(code_graph_actions, "_open_index", lambda: None)
     result = code_graph_find_implementations("AnyInterface")
-    assert "not yet supported" in result["output"]
-    assert "find_references" in result["output"]
+    assert "code graph not available" in result["output"]
+
+
+def test_find_implementations_no_matches_against_fixture(patched_discover) -> None:
+    # The fixture index emits no is_implementation relationship records, so
+    # a real query resolves and returns "no implementation matches" rather
+    # than the removed stub string. Exercises the unstubbed query path.
+    result = code_graph_find_implementations("authorizeToParticipantAndAdminRole")
+    assert "no implementation matches" in result["output"]
+    assert "not yet supported" not in result["output"]
 
 
 # ---------------------------------------------------------------------------
