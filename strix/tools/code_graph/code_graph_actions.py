@@ -19,11 +19,13 @@ don't mutate any sandbox state.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from strix.tools.registry import register_tool
 
-from .query import CodeGraphIndex
+from .query import CodeGraphIndex, Location
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,22 @@ logger = logging.getLogger(__name__)
 # query returning hundreds of locations is unhelpful, the LLM is better
 # served by 50 and a follow-up if it needs more.
 LLM_RESULT_LIMIT = 50
+
+# code_graph_grep reads source around each hit, so its cap is far tighter
+# than the location-only tools: every reference shown costs (2*context+1)
+# lines of source. 15 windowed hits is a useful neighbourhood without
+# blowing the turn's token budget; the def body is always shown in full.
+GREP_REF_LIMIT = 15
+# Default lines of context above/below each reference line. The def body
+# is shown in full (its enclosing range), not windowed.
+GREP_DEFAULT_CONTEXT = 3
+# Defence cap: never window more than this many lines around a ref even
+# if the caller asks — keeps a pathological context= value bounded.
+GREP_MAX_CONTEXT = 10
+# Hard ceiling on a single def body we'll inline (generated/minified
+# files can have enormous "definitions"); beyond this we show the head
+# and point at the file.
+GREP_MAX_DEF_BODY_LINES = 120
 
 
 def _open_index() -> CodeGraphIndex | None:
@@ -240,3 +258,141 @@ def code_graph_get_symbol_at(file: str, line: int) -> dict[str, Any]:
 
     names = sorted({m.display_name for m in symbols})
     return {"output": f"{file}:{line} mentions:\n  " + "\n  ".join(names)}
+
+
+# ---------------------------------------------------------------------------
+# code_graph_grep — precise symbol resolution + source context, in one call.
+# Combines the graph's precision (no comment/string/vendored-dep false hits,
+# no same-named-symbol confusion) with grep's ergonomics (show me the code,
+# not just a file:line). Fixes the "locations not logic" gap that pushes the
+# agent back to read_file after every find_references.
+# ---------------------------------------------------------------------------
+
+
+def _workspace_root() -> Path:
+    """Where the target source is checked out inside the sandbox. Matches
+    the convention used by reporting_actions' groundedness check."""
+    return Path(os.environ.get("STRIX_WORKSPACE_ROOT", "/workspace"))
+
+
+def _read_lines(rel_path: str) -> list[str] | None:
+    """Read a workspace-relative source file into a list of lines (no
+    trailing newlines). Returns None if the file can't be read — the
+    caller degrades to showing the bare location."""
+    root = _workspace_root()
+    target = (root / rel_path).resolve()
+    # Defence: never read outside the workspace root (a malformed SCIP
+    # relative_path with .. should not escape the checkout).
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        logger.warning("code_graph_grep: refusing path outside workspace: %s", rel_path)
+        return None
+    try:
+        return target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, ValueError) as exc:
+        logger.debug("code_graph_grep: cannot read %s: %s", target, exc)
+        return None
+
+
+def _render_window(rel_path: str, lines: list[str], start_line: int, end_line: int) -> list[str]:
+    """Render source[start_line:end_line] (0-indexed, inclusive) with line
+    numbers, clamped to the file. SCIP positions are 0-indexed; we display
+    1-based line numbers to match what the agent sees in read_file/editors."""
+    # Readable loop over a list comprehension (ruff PERF401): the perf win is
+    # nil on ≤25 rendered lines, and the loop reads more clearly.
+    lo = max(0, start_line)
+    hi = min(len(lines) - 1, end_line)
+    out: list[str] = []
+    for i in range(lo, hi + 1):
+        # 1-based line number, right-aligned, then the source line verbatim.
+        out.append(f"  {i + 1:>5} {lines[i]}")  # noqa: PERF401
+    return out
+
+
+def _render_def_body(rel_path: str, loc: Location) -> list[str]:
+    """Show a definition's full enclosing range (the logic the agent would
+    otherwise read_file for). Falls back to a bare location line if the
+    source can't be read; truncates pathologically large bodies."""
+    header = f"● DEFINITION  {loc.render()}"
+    lines = _read_lines(rel_path)
+    if lines is None:
+        return [header, "    (source unavailable — read the file directly)"]
+    span = loc.end_line - loc.start_line + 1
+    if span > GREP_MAX_DEF_BODY_LINES:
+        last = loc.start_line + GREP_MAX_DEF_BODY_LINES - 1
+        body = _render_window(rel_path, lines, loc.start_line, last)
+        body.append(
+            f"    … definition body truncated at {GREP_MAX_DEF_BODY_LINES} lines "
+            f"(spans to line {loc.end_line + 1}); read the file for the rest."
+        )
+        return [header, *body]
+    return [header, *_render_window(rel_path, lines, loc.start_line, loc.end_line)]
+
+
+def _render_ref_window(
+    rel_path: str, lines: list[str] | None, loc: Location, context: int
+) -> list[str]:
+    """Show a reference site with ±context lines around it."""
+    header = f"● REFERENCE  {loc.render()}"
+    if lines is None:
+        return [header, "    (source unavailable — read the file directly)"]
+    window = _render_window(rel_path, lines, loc.start_line - context, loc.end_line + context)
+    return [header, *window]
+
+
+@register_tool(parallel_safe=True)
+def code_graph_grep(symbol: str, context: int = GREP_DEFAULT_CONTEXT) -> dict[str, Any]:
+    """Resolve `symbol` precisely via the code graph, then show its source:
+    the definition's full body plus each reference site with surrounding
+    context. One call replaces find_references + a fan-out of read_file,
+    and unlike grep returns zero false hits from comments, strings,
+    vendored deps, or unrelated same-named symbols.
+
+    `context` is the number of lines shown above/below each reference."""
+    context = max(0, min(int(context), GREP_MAX_CONTEXT))
+
+    idx = _open_index()
+    if idx is None:
+        return _render_unavailable()
+    try:
+        defs = idx.find_definition(symbol, limit=LLM_RESULT_LIMIT)
+        refs = idx.find_references(symbol, limit=GREP_REF_LIMIT, include_definition=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("code_graph_grep failed: %s", exc)
+        return {"error": f"code graph query failed: {exc}"}
+    finally:
+        idx.close()
+
+    if not defs and not refs:
+        return _render_no_matches("symbol", symbol)
+
+    blocks: list[str] = []
+
+    # Definition bodies (usually one; could be several for overloads /
+    # same-named symbols across files — the graph keeps them distinct).
+    for match, loc in defs:
+        if blocks:
+            blocks.append("")
+        blocks.append(f"# {match.display_name}")
+        blocks.extend(_render_def_body(loc.file, loc))
+
+    # Reference sites with context. Cache per-file reads so N refs in one
+    # file cost one read, not N.
+    if refs:
+        if blocks:
+            blocks.append("")
+        n_refs = len({(loc.file, loc.start_line) for _, loc in refs})
+        blocks.append(f"# references ({n_refs} shown, ±{context} lines)")
+        file_cache: dict[str, list[str] | None] = {}
+        for _match, loc in refs:
+            if loc.file not in file_cache:
+                file_cache[loc.file] = _read_lines(loc.file)
+            blocks.extend(_render_ref_window(loc.file, file_cache[loc.file], loc, context))
+        if len(refs) >= GREP_REF_LIMIT:
+            blocks.append(
+                f"… references capped at {GREP_REF_LIMIT}; use "
+                "code_graph_find_references for the full location list."
+            )
+
+    return {"output": "\n".join(blocks)}
