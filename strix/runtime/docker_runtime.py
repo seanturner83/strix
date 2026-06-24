@@ -607,20 +607,44 @@ class DockerRuntime(AbstractRuntime):
             try:
                 # Sweep indexer-side scaffolding so the agent loop sees a
                 # pristine target tree:
-                #   - node_modules + package-lock.json (TS path)
+                #   - node_modules (TS path)
                 #   - .venv / venv / __pycache__ (Python path)
-                #   - target/ + Cargo.lock if untracked (Rust path)
+                #   - target/ (Rust path)
                 # Don't remove tsconfig.json/package.json/pyproject.toml/
                 # go.mod/Cargo.toml — those are real source artifacts the
                 # LLM may need to read.
+                #
+                # Lockfiles need care: `npm install` / `cargo fetch` regenerate
+                # a committed lockfile in place, and `rm`-ing it unconditionally
+                # makes the agent loop's `git diff` see the COMMITTED, tracked
+                # lockfile as DELETED — raising a phantom "package-lock.json
+                # removed -> supply-chain tampering" (CWE-494) for a file the PR
+                # never touched (trade-api#4309 / GHAS#775: a real 4-line dep
+                # bump reported as a 13,877-line deletion). So rm the lockfiles
+                # (to drop indexer churn) then RESTORE any that were committed.
+                # Two subtleties, both load-bearing:
+                #   1. `git checkout HEAD --` (not bare `checkout --`): on git
+                #      >=2.23 the bare form does NOT restore a DELETED tracked
+                #      path; the explicit HEAD source does.
+                #   2. Restore each lockfile in its OWN checkout. A combined
+                #      `checkout HEAD -- a b` ABORTS (restoring nothing) if any
+                #      pathspec is absent from HEAD — and Node repos have no
+                #      Cargo.lock / Rust repos no package-lock.json, so a
+                #      combined call fails for nearly every repo. Per-file +
+                #      `|| true` makes a missing/untracked path a no-op for that
+                #      file only (untracked, indexer-generated lockfiles stay
+                #      swept; committed ones come back byte-for-byte).
                 container.exec_run(
                     [
                         "sh",
                         "-c",
                         f"cd /workspace/{target_name} && "
-                        "rm -rf node_modules package-lock.json "
+                        "rm -rf node_modules package-lock.json Cargo.lock "
                         ".venv venv __pycache__ "
-                        "target 2>&1 || true",
+                        "target 2>&1 || true; "
+                        "for lf in package-lock.json Cargo.lock; do "
+                        'git checkout HEAD -- "$lf" 2>/dev/null || true; '
+                        "done",
                     ],
                     user="pentester",
                 )
