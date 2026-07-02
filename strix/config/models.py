@@ -162,6 +162,14 @@ def _configure_litellm_compatibility() -> None:
     litellm.disable_streaming_logging = False
     litellm.suppress_debug_info = True
 
+    # litellm keeps the OpenAI `strict` tool field for Claude-on-Bedrock, but
+    # the Bedrock Converse API rejects it (tools.0.custom.strict: Extra inputs
+    # are not permitted) → every tool-calling scan against bedrock/*claude* 400s.
+    # drop_params doesn't cover it. Strip it in _bedrock_tools_pt.
+    from strix.config.litellm_bedrock_strict_patch import apply as _apply_strict_patch
+
+    _apply_strict_patch()
+
     _register_litellm_cost_callback()
 
 
