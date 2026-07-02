@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from strix.core.inputs import build_root_task, child_initial_input
+from strix.core.inputs import build_root_task, child_initial_input, resolve_max_tokens
 
 
 def _child_kwargs(parent_history: list[Any]) -> dict[str, Any]:
@@ -112,3 +112,59 @@ def test_build_root_task_diff_scope() -> None:
     assert "Scope Constraints:" in task
     assert "3 changed file(s)" in task
     assert "2 deleted file(s)" in task
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "openai/gpt-5.4",
+        "gpt-4o",
+        "gemini/gemini-1.5-flash",
+        "ollama/llama3",
+        "bedrock/us.amazon.nova-lite-v1:0",
+    ],
+)
+def test_resolve_max_tokens_non_claude_is_untouched(model_name: str) -> None:
+    # No ceiling is imposed on non-Claude models: None stays None (provider
+    # default) and an explicit value passes through verbatim.
+    assert resolve_max_tokens(model_name, None) is None
+    assert resolve_max_tokens(model_name, 16000) == 16000
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "bedrock/global.anthropic.claude-opus-4-8",
+        "bedrock/us.anthropic.claude-opus-4-8",
+        "bedrock/global.anthropic.claude-sonnet-4-6",
+    ],
+)
+def test_resolve_max_tokens_adaptive_claude_gets_default(model_name: str) -> None:
+    # The models the fix targets: unset -> family default, well under their
+    # (>=64k) ceiling so the value is the default itself, regardless of the
+    # region/provider prefix on the model id.
+    assert resolve_max_tokens(model_name, None) == 32000
+
+
+def test_resolve_max_tokens_clamps_default_to_small_ceiling() -> None:
+    # Older Claude tops out below the family default; the returned value must be
+    # the model's own ceiling, never the larger default (which would 400).
+    result = resolve_max_tokens("bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0", None)
+    assert result is not None
+    assert result <= 8192
+
+
+def test_resolve_max_tokens_clamps_explicit_override_to_ceiling() -> None:
+    # An over-large explicit value is clamped down to what the model accepts.
+    assert resolve_max_tokens("bedrock/global.anthropic.claude-opus-4-8", 500_000) == 128_000
+
+
+def test_resolve_max_tokens_unknown_claude_without_config_returns_none() -> None:
+    # A Claude model absent from litellm's cost map has no known ceiling; rather
+    # than guess a value that might exceed the real limit, fall back to None.
+    assert resolve_max_tokens("claude-does-not-exist-9", None) is None
+
+
+def test_resolve_max_tokens_unknown_claude_respects_explicit_config() -> None:
+    # If the ceiling is unknown but the user set a value, honor it as-is.
+    assert resolve_max_tokens("claude-does-not-exist-9", 12345) == 12345
