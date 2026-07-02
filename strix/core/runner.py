@@ -229,12 +229,10 @@ async def run_strix_scan(
         skills = list(scan_config.get("skills") or [])
         root_task = build_root_task(scan_config)
         # Per-role model config (seedcx 175ec25) MERGED with v1.1.0's
-        # force_required_tool_choice (#730) and max_budget_usd hooks, plus
-        # v1.2.0's per-turn request_timeout (#802/#803: stalled-stream fail-fast)
-        # threaded into the factory so every role gets it. NOTE: 1.1.0's
-        # make_model_settings dropped the max_tokens kwarg seedcx passed here —
-        # the clamped output-ceiling patch (a950bad) reintroduces it and is
-        # cherry-picked separately; kept out of this factory until then.
+        # force_required_tool_choice (#730), the clamped output ceiling
+        # (a950bad max_tokens), max_budget_usd hooks, and v1.2.0's per-turn
+        # request_timeout (#802/#803: stalled-stream fail-fast) — the role
+        # factory carries all of these into every role.
         _sandbox_cfg = SandboxRunConfig(client=bundle["client"], session=bundle["session"])
 
         def _run_config_for(role_model: str) -> RunConfig:
@@ -246,6 +244,7 @@ async def run_strix_scan(
                     model_name=role_model,
                     force_required_tool_choice=settings.llm.force_required_tool_choice,
                     request_timeout=settings.llm.timeout,
+                    max_tokens=settings.llm.max_tokens,
                 ),
                 sandbox=_sandbox_cfg,
                 trace_include_sensitive_data=False,

@@ -56,6 +56,13 @@ class LlmSettings(BaseSettings):
         default=False,
         alias="STRIX_FORCE_REQUIRED_TOOL_CHOICE",
     )
+    # Explicit output-token ceiling. Leave unset (None) to let make_model_settings
+    # decide: Anthropic/Claude models get a sensible default (they need one on
+    # Bedrock Converse — adaptive-thinking models otherwise send no maxTokens and
+    # truncate long tool calls), every other provider keeps its own default so
+    # local users on smaller-ceiling models (gpt/ollama/gemini) aren't forced past
+    # their limit. Any value set here is clamped to the model's known ceiling.
+    max_tokens: int | None = Field(default=None, alias="STRIX_MAX_TOKENS")
     timeout: int = Field(default=300, alias="LLM_TIMEOUT")
 
 
