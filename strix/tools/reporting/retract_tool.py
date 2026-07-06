@@ -27,7 +27,7 @@ can't need it and shouldn't be handed a findings-drop tool.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
@@ -35,10 +35,11 @@ from agents import RunContextWrapper, function_tool
 
 logger = logging.getLogger(__name__)
 
-# read_target_file(repo_relative_path) -> file contents, or None if absent/
-# unreadable. Injected by the caller (holds the sandbox session). None = no
-# reader wired → the guard fails safe (refuse).
-ReadTargetFileFn = Callable[[str], "str | None"]
+# read_target_file(repo_relative_path) -> awaitable file contents, or None if
+# absent/unreadable. Injected by the caller (holds the sandbox session), so the
+# concrete reader can `session.exec("cat", ...)` against the live /workspace
+# tree. None = no reader wired → the guard fails safe (refuse).
+ReadTargetFileFn = Callable[[str], Awaitable["str | None"]]
 
 _reader: ReadTargetFileFn | None = None
 
@@ -61,7 +62,7 @@ def _sink_locations(report: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _guard(report: dict[str, Any]) -> tuple[bool, str]:
+async def _guard(report: dict[str, Any]) -> tuple[bool, str]:
     """Return (allow, detail). allow=False → REFUSE the retract.
 
     - no reader wired → REFUSE (fail-safe: can't ground → don't drop).
@@ -76,7 +77,7 @@ def _guard(report: dict[str, Any]) -> tuple[bool, str]:
         return True, "no fix-site (fix_before) locations to verify — allowing"
     for loc in sinks:
         try:
-            content = _reader(str(loc["file"]))
+            content = await _reader(str(loc["file"]))
         except Exception:  # noqa: BLE001 — reader failure ≠ proof of absence
             return False, f"could not read {loc['file']} to verify — refusing"
         if content is None:
@@ -122,7 +123,7 @@ async def retract_vulnerability_report(
     if report is None:
         return {"success": True, "retracted": False, "reason": "id not present"}
 
-    allow, detail = _guard(report)
+    allow, detail = await _guard(report)
     if not allow:
         logger.warning("retract REFUSED for %s: %s", report_id, detail)
         return {"success": False, "retracted": False, "refused": True,

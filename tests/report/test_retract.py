@@ -12,10 +12,15 @@ against a lightweight fake state to avoid the full ReportState I/O stack.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 
 import pytest
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 _GUARD = Path(__file__).resolve().parents[2] / "strix" / "tools" / "reporting" / "retract_tool.py"
 
@@ -43,47 +48,54 @@ def _report(**over):
 
 # ---- groundedness guard (pure) --------------------------------------------
 
+def _reader(fn):
+    """Wrap a sync file->content fn as the async reader the guard now expects."""
+    async def r(path):
+        return fn(path)
+    return r
+
+
 def test_guard_fail_safe_refuses_without_reader():
     rt.set_target_file_reader(None)
-    allow, detail = rt._guard(_report())
+    allow, detail = _run(rt._guard(_report()))
     assert allow is False and "no target-file reader" in detail
 
 
 def test_guard_refuses_when_sink_still_present():
-    rt.set_target_file_reader(lambda f: "def q(uid):\n    query('SELECT * FROM u WHERE id=%s' % uid)\n")
-    allow, detail = rt._guard(_report())
+    rt.set_target_file_reader(_reader(lambda f: "def q(uid):\n    query('SELECT * FROM u WHERE id=%s' % uid)\n"))
+    allow, detail = _run(rt._guard(_report()))
     assert allow is False and "still present" in detail
     rt.set_target_file_reader(None)
 
 
 def test_guard_allows_when_sink_gone():
-    rt.set_target_file_reader(lambda f: "def q(uid):\n    query('SELECT * FROM u WHERE id=?', (uid,))\n")
-    allow, detail = rt._guard(_report())
+    rt.set_target_file_reader(_reader(lambda f: "def q(uid):\n    query('SELECT * FROM u WHERE id=?', (uid,))\n"))
+    allow, detail = _run(rt._guard(_report()))
     assert allow is True and "no longer present" in detail
     rt.set_target_file_reader(None)
 
 
 def test_guard_allows_when_file_deleted():
-    rt.set_target_file_reader(lambda f: None)  # file gone
-    allow, _ = rt._guard(_report())
+    rt.set_target_file_reader(_reader(lambda f: None))  # file gone
+    allow, _ = _run(rt._guard(_report()))
     assert allow is True
     rt.set_target_file_reader(None)
 
 
 def test_guard_allows_when_no_fix_before_sinks():
     # only a context snippet, no fix_before → nothing verifiable → allow
-    rt.set_target_file_reader(lambda f: "anything")
+    rt.set_target_file_reader(_reader(lambda f: "anything"))
     rep = _report(code_locations=[{"file": "app/db.py", "snippet": "context line"}])
-    allow, detail = rt._guard(rep)
+    allow, detail = _run(rt._guard(rep))
     assert allow is True and "no fix-site" in detail
     rt.set_target_file_reader(None)
 
 
 def test_guard_reader_error_refuses():
-    def boom(f):
+    async def boom(f):
         raise RuntimeError("sandbox down")
     rt.set_target_file_reader(boom)
-    allow, detail = rt._guard(_report())
+    allow, detail = _run(rt._guard(_report()))
     assert allow is False and "could not read" in detail
     rt.set_target_file_reader(None)
 
