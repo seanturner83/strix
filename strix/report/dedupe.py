@@ -321,8 +321,15 @@ async def check_duplicate(
 
     try:
         settings = load_settings()
+        # Dedup is a bounded classification — use a dedicated cheap model.
+        # CONVERGED (rebase 1.2->1.4): upstream #823 added DedupeSettings.model
+        # (the richer path — also carries per-call creds/endpoint via
+        # _dedupe_extra_args). Keep our STRIX_LLM_DEDUP (LlmSettings.model_dedup)
+        # as a fallback so existing ZH deployment env still selects the cheap
+        # model; precedence: DedupeSettings.model -> STRIX_LLM_DEDUP -> base.
         dedupe = settings.dedupe
-        model_name = (dedupe.model or "").strip() or settings.llm.model
+        model_name = ((dedupe.model or "").strip()
+                      or settings.llm.model_dedup or settings.llm.model)
         if not model_name:
             return {
                 "is_duplicate": False,

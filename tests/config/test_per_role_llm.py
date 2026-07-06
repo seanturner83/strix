@@ -57,7 +57,15 @@ def test_subagent_only_falls_to_base(monkeypatch):
     assert sub == "cheap/haiku"
 
 
-def test_dedup_role_field_present(monkeypatch):
+def test_dedup_role_falls_back_to_base(monkeypatch):
+    monkeypatch.setenv("STRIX_LLM", "base/model")
+    monkeypatch.delenv("STRIX_LLM_DEDUP", raising=False)
+    s = LlmSettings()
+    assert (s.model_dedup or s.model) == "base/model"
+
+
+def test_dedup_role_override(monkeypatch):
+    monkeypatch.setenv("STRIX_LLM", "base/model")
     monkeypatch.setenv("STRIX_LLM_DEDUP", "cheap/sonnet")
     s = LlmSettings()
     assert s.model_dedup == "cheap/sonnet"
