@@ -96,6 +96,23 @@ async def run_strix_scan(
             "No LLM model configured. Set STRIX_LLM env or pass model= to run_strix_scan().",
         )
     logger.info("LLM model resolved: %s", resolved_model)
+
+    # Per-role model resolution (cost-tier the fleet). Fallback CHAIN mirrors
+    # the fork's proven order, so a deployment can set just the orchestrator and
+    # have sub-agents + compressor inherit it before falling to the base model:
+    #   orchestrator: STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    #   sub-agent:    STRIX_LLM_SUBAGENT -> STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    #   compressor:   STRIX_LLM_COMPRESSOR -> STRIX_LLM_ORCHESTRATOR -> STRIX_LLM
+    # Unset everywhere = today's single-model behaviour, unchanged.
+    orchestrator_model = (settings.llm.model_orchestrator or resolved_model).strip()
+    subagent_model = (
+        settings.llm.model_subagent or settings.llm.model_orchestrator or resolved_model
+    ).strip()
+    if orchestrator_model != resolved_model or subagent_model != resolved_model:
+        logger.info(
+            "Per-role models: orchestrator=%s subagent=%s (base=%s)",
+            orchestrator_model, subagent_model, resolved_model,
+        )
     chat_completions_tools = uses_chat_completions_tool_schema(resolved_model, settings)
 
     if coordinator is None:
@@ -153,19 +170,28 @@ async def run_strix_scan(
         is_whitebox = any(t.get("type") == "local_code" for t in targets)
         skills = list(scan_config.get("skills") or [])
         root_task = build_root_task(scan_config)
-        model_settings = make_model_settings(
-            settings.llm.reasoning_effort,
-            model_name=resolved_model,
-            max_tokens=settings.llm.max_tokens,
+        _sandbox_cfg = SandboxRunConfig(client=bundle["client"], session=bundle["session"])
+
+        def _run_config_for(role_model: str) -> RunConfig:
+            return RunConfig(
+                model=role_model,
+                model_provider=StrixProvider(),
+                model_settings=make_model_settings(
+                    settings.llm.reasoning_effort,
+                    model_name=role_model,
+                    max_tokens=settings.llm.max_tokens,
+                ),
+                sandbox=_sandbox_cfg,
+                trace_include_sensitive_data=False,
+            )
+
+        # Root/orchestrator run_config; children get their own (subagent model).
+        run_config = _run_config_for(orchestrator_model)
+        child_run_config = (
+            run_config if subagent_model == orchestrator_model
+            else _run_config_for(subagent_model)
         )
-        run_config = RunConfig(
-            model=resolved_model,
-            model_provider=StrixProvider(),
-            model_settings=model_settings,
-            sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
-            trace_include_sensitive_data=False,
-        )
-        hooks = ReportUsageHooks(model=resolved_model)
+        hooks = ReportUsageHooks(model=orchestrator_model)
 
         scope_context = build_scope_context(scan_config)
 
@@ -235,7 +261,7 @@ async def run_strix_scan(
                 factory=child_agent_builder,
                 agents_db_path=agents_db,
                 sessions_to_close=sessions_to_close,
-                run_config=run_config,
+                run_config=child_run_config,
                 max_turns=max_turns,
                 interactive=interactive,
                 event_sink=event_sink,
@@ -263,7 +289,7 @@ async def run_strix_scan(
                 factory=child_agent_builder,
                 agents_db_path=agents_db,
                 sessions_to_close=sessions_to_close,
-                run_config=run_config,
+                run_config=child_run_config,
                 max_turns=max_turns,
                 interactive=interactive,
                 parent_ctx=context,
