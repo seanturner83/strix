@@ -482,6 +482,7 @@ def build_strix_agent(
     is_whitebox: bool = False,
     interactive: bool = False,
     chat_completions_tools: bool = False,
+    is_resume: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
     extra_tools: Sequence[Tool] | None = None,
     instructions_override: str | None = None,
@@ -511,6 +512,14 @@ def build_strix_agent(
     agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
     if is_root:
         tools: list[Tool] = [*_BASE_TOOLS, *agent_tools, finish_scan]
+        # retract_vulnerability_report is the inverse of create, needed ONLY on
+        # a resumed run: prior findings are rehydrated, and a since-fixed one
+        # must be droppable or it re-emits forever (fail-closed). Gate it on
+        # resume so a fresh scan is never handed a findings-drop tool it can't
+        # need. Root-only — the orchestrator owns the cumulative findings set.
+        if is_resume:
+            from strix.tools.reporting.retract_tool import retract_vulnerability_report
+            tools.append(retract_vulnerability_report)
     else:
         tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
     _ensure_unique_tool_names(tools)
