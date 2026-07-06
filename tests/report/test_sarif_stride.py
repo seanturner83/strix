@@ -85,6 +85,23 @@ def test_stride_cleartext_transmission_is_info_disclosure():
     assert "stride:I" in tags
 
 
+def test_stride_hardcoded_credentials_is_spoofing():
+    """CWE-798 (Hard-coded Credentials) is Spoofing (+ Info disclosure), NOT the
+    generic default — regression from exercising against real scan findings
+    where 798 was falling through to T+I."""
+    tags = _rule_tags(sarif.build_sarif_document([_report(cwe="CWE-798")]))
+    assert "stride:S" in tags
+    assert set(sarif._stride_legs_for_cwe("CWE-798")) != set(sarif._DEFAULT_STRIDE_LEGS)
+
+
+def test_stride_missing_authorization_is_elevation():
+    """CWE-862 (Missing Authorization) is Elevation of privilege — sibling of
+    863 Incorrect Authorization. Regression from real findings (was defaulting)."""
+    tags = _rule_tags(sarif.build_sarif_document([_report(cwe="CWE-862")]))
+    assert "stride:E" in tags
+    assert "stride:T" not in tags      # not the default
+
+
 @pytest.mark.parametrize("raw", ["CWE-306", "306", "cwe 306", "CWE306"])
 def test_stride_cwe_normalisation_variants(raw):
     """CWE id variants all resolve to the same legs (S+E for 306)."""

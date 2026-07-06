@@ -115,6 +115,9 @@ _CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
     "521": ("S",),        # Weak Password Requirements
     "613": ("S",),        # Insufficient Session Expiration
     "640": ("S",),        # Weak Password Recovery Mechanism
+    "259": ("S", "I"),    # Use of Hard-coded Password
+    "798": ("S", "I"),    # Use of Hard-coded Credentials
+    "1391": ("S",),       # Use of Weak Credentials
     # Tampering — integrity
     "20":   ("T",),       # Improper Input Validation
     "73":   ("T", "I"),   # External Control of File Name or Path
@@ -157,6 +160,7 @@ _CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
     "285":  ("E",),       # Improper Authorization
     "639":  ("E",),       # Authorization Bypass Through User-Controlled Key (IDOR/BOLA)
     "732":  ("E",),       # Incorrect Permission Assignment for Critical Resource
+    "862":  ("E",),       # Missing Authorization
     "863":  ("E",),       # Incorrect Authorization
     "1220": ("E",),       # Insufficient Granularity of Access Control
     # Multi-leg
