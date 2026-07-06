@@ -24,6 +24,7 @@ from strix.tools.agents_graph.tools import (
     view_agent_graph,
     wait_for_message,
 )
+from strix.tools.batch.tools import batch_terminal_execute, batch_view_files
 from strix.tools.finish.tool import finish_scan
 from strix.tools.load_skill.tool import load_skill
 from strix.tools.notes.tools import (
@@ -341,6 +342,8 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     update_note,
     delete_note,
     web_search,
+    batch_view_files,
+    batch_terminal_execute,
     create_vulnerability_report,
     create_dependency_report,
     list_requests,
