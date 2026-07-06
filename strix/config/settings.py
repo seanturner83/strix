@@ -21,6 +21,22 @@ class LlmSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
     model: str | None = Field(default=None, alias="STRIX_LLM")
+    # Per-role model overrides. Each falls back to `model` when unset, so the
+    # default single-model behaviour is unchanged. Lets a deployment cost-tier
+    # the fleet: a cheaper model for the many sub-agents / the memory compressor
+    # while the orchestrator keeps the strong model. All must use the same
+    # provider as `model` (LiteLLM routes them the same way).
+    model_orchestrator: str | None = Field(default=None, alias="STRIX_LLM_ORCHESTRATOR")
+    model_subagent: str | None = Field(default=None, alias="STRIX_LLM_SUBAGENT")
+    model_compressor: str | None = Field(default=None, alias="STRIX_LLM_COMPRESSOR")
+    # Reporting role: the model that writes the executive summary + per-finding
+    # writeups. On a PR-time gate scan the report is a means to pass/fail, not a
+    # human-read triage artifact, so a cheap fast model here is desirable while
+    # the reasoning stays strong. NOTE: v1's report is written inline by the
+    # orchestrator (finish_scan is an orchestrator tool, not a separate agent),
+    # so honouring this requires a dedicated reporting-agent spawn — tracked as
+    # a follow-up; the setting is defined now so the config surface is stable.
+    model_reporting: str | None = Field(default=None, alias="STRIX_LLM_REPORTING")
     api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
