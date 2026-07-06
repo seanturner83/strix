@@ -7,6 +7,32 @@ description: Time-boxed rapid assessment targeting high-impact vulnerabilities
 
 Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth over depth.
 
+## Frame your reasoning around four questions
+
+Even in time-boxed mode, anchor findings to four questions
+([Shostack's Four Question Frame for Threat Modeling](https://github.com/adamshostack/4QuestionFrame),
+licensed CC-BY):
+
+1. **What are we working on?** — what does this target do, what does it
+   handle, what trust boundaries does it cross.
+2. **What can go wrong?** — apply STRIDE per element where helpful
+   (Spoofing / Tampering / Repudiation / Information disclosure / Denial of
+   service / Elevation of privilege). State threats as
+   *"an attacker can [action] by [method] to [impact]"* — not as a list of
+   "assets at risk" or "likely attackers".
+3. **What are we going to do about it?** — propose a concrete
+   remediation tied to the threat.
+4. **Did we do a good (enough) job?** — for any control you cite as
+   already present, verify it: name the file/line/function. If you can't
+   verify it, flag it as unverified.
+
+In quick mode, depth-cut is on Q4 (verification budget) — never on Q2 (threat
+enumeration). Better to surface 5 well-stated threats than 20 fuzzy
+"assets at risk" bullets.
+
+For STRIDE-per-element matrices and common mitigations per leg, invoke the
+methodology skill via `load_skill(skills=['threat_modeling'])`.
+
 ## Approach
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.

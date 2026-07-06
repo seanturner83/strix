@@ -7,6 +7,34 @@ description: Balanced security assessment with systematic methodology and full a
 
 Balanced security assessment with structured methodology. Thorough coverage without exhaustive depth.
 
+## Frame your reasoning around four questions
+
+Before producing findings, anchor your analysis to four questions
+([Shostack's Four Question Frame for Threat Modeling](https://github.com/adamshostack/4QuestionFrame),
+licensed CC-BY):
+
+1. **What are we working on?** — what does this target do, what does it
+   handle, what trust boundaries does it cross.
+2. **What can go wrong?** — apply STRIDE per element where helpful
+   (Spoofing / Tampering / Repudiation / Information disclosure / Denial of
+   service / Elevation of privilege). State threats as
+   *"an attacker can [action] by [method] to [impact]"* — not as a list of
+   "assets at risk" or "likely attackers".
+3. **What are we going to do about it?** — propose a concrete
+   remediation tied to the threat. Where the right answer is at a different
+   layer (mesh policy, IAM, config) than the code, say so.
+4. **Did we do a good (enough) job?** — for any control you cite as
+   already present, verify it: name the file/line/function, not "should be
+   in middleware". If you can't verify it, flag it as unverified.
+
+If you find yourself producing a generic asset list or speculative-attacker
+list, stop and re-anchor on Q1+Q2 against the actual code paths or runtime
+surface you can directly observe.
+
+For deeper threat-modelling guidance — STRIDE-per-element matrices, the
+risk-scoring rubric, common mitigations per leg — invoke the methodology skill
+via `load_skill(skills=['threat_modeling'])`.
+
 ## Approach
 
 Systematic testing across the full attack surface. Understand the application before exploiting it.
