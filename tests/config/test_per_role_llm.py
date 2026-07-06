@@ -57,15 +57,27 @@ def test_subagent_only_falls_to_base(monkeypatch):
     assert sub == "cheap/haiku"
 
 
-def test_reporting_role_field_present(monkeypatch):
-    # the reporting role is defined (config surface stable) even though wiring
-    # is a follow-up — a deployment can set it without an unknown-env error.
-    monkeypatch.setenv("STRIX_LLM_REPORTING", "cheap/fast")
+def test_dedup_role_falls_back_to_base(monkeypatch):
+    monkeypatch.setenv("STRIX_LLM", "base/model")
+    monkeypatch.delenv("STRIX_LLM_DEDUP", raising=False)
     s = LlmSettings()
-    assert s.model_reporting == "cheap/fast"
+    assert (s.model_dedup or s.model) == "base/model"
 
 
-def test_compressor_role_field_present(monkeypatch):
-    monkeypatch.setenv("STRIX_LLM_COMPRESSOR", "cheap/compress")
+def test_dedup_role_override(monkeypatch):
+    monkeypatch.setenv("STRIX_LLM", "base/model")
+    monkeypatch.setenv("STRIX_LLM_DEDUP", "cheap/sonnet")
     s = LlmSettings()
-    assert s.model_compressor == "cheap/compress"
+    assert s.model_dedup == "cheap/sonnet"
+    # dedupe.py resolves `model_dedup or model` → the cheap model
+    assert (s.model_dedup or s.model) == "cheap/sonnet"
+
+
+def test_no_inert_roles_defined(monkeypatch):
+    # reporting + compressor were deliberately NOT shipped: v1 writes the report
+    # inline (measured: report is ~0.1-0.4% of scan input tokens — not worth a
+    # separate agent) and has no compaction path for a compressor model. Guard
+    # against re-adding an inert setting.
+    s = LlmSettings()
+    assert not hasattr(s, "model_reporting")
+    assert not hasattr(s, "model_compressor")

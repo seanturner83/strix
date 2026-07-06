@@ -28,15 +28,18 @@ class LlmSettings(BaseSettings):
     # provider as `model` (LiteLLM routes them the same way).
     model_orchestrator: str | None = Field(default=None, alias="STRIX_LLM_ORCHESTRATOR")
     model_subagent: str | None = Field(default=None, alias="STRIX_LLM_SUBAGENT")
-    model_compressor: str | None = Field(default=None, alias="STRIX_LLM_COMPRESSOR")
-    # Reporting role: the model that writes the executive summary + per-finding
-    # writeups. On a PR-time gate scan the report is a means to pass/fail, not a
-    # human-read triage artifact, so a cheap fast model here is desirable while
-    # the reasoning stays strong. NOTE: v1's report is written inline by the
-    # orchestrator (finish_scan is an orchestrator tool, not a separate agent),
-    # so honouring this requires a dedicated reporting-agent spawn — tracked as
-    # a follow-up; the setting is defined now so the config surface is stable.
-    model_reporting: str | None = Field(default=None, alias="STRIX_LLM_REPORTING")
+    # Dedup role: the finding-deduplication check (report/dedupe.py) is a bounded
+    # JSON classification — "does this candidate duplicate an existing finding?"
+    # — that fires on EVERY reported finding and needs no deep pentest reasoning.
+    # A genuine cheap-model candidate (unlike reporting, which is <0.4% of scan
+    # tokens, or a compressor, which has nothing to attach to). Falls back to the
+    # base model when unset.
+    model_dedup: str | None = Field(default=None, alias="STRIX_LLM_DEDUP")
+    # NOTE: no compressor role. The fork had STRIX_LLM_COMPRESSOR for its own
+    # memory-compressor module; v1 uses a plain SQLiteSession (no compaction),
+    # and the SDK's compaction session is OpenAI-Responses-specific — inert on
+    # the Bedrock/Claude path. An inert setting would be misleading, so it's
+    # omitted until/unless a real compaction path is adopted.
     api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),

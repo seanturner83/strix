@@ -167,7 +167,9 @@ async def check_duplicate(
 
     try:
         settings = load_settings()
-        model_name = settings.llm.model
+        # Dedup is a bounded classification — use the dedicated cheap-model role
+        # when set, falling back to the base model. See LlmSettings.model_dedup.
+        model_name = settings.llm.model_dedup or settings.llm.model
         if not model_name:
             return {
                 "is_duplicate": False,
