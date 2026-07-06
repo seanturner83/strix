@@ -1,5 +1,7 @@
+import contextlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,6 +149,24 @@ class ReportState:
                 len(self.vulnerability_reports),
             )
 
+    def _next_vuln_ordinal(self) -> int:
+        """Next ``vuln-NNNN`` ordinal, derived from the MAX id ever seen
+        (in-memory reports ∪ on-disk-saved ids) — NOT the list length.
+
+        Length-based ids collide once a finding has been retracted: physical
+        removal shrinks the list, so ``len + 1`` would reuse a live id and
+        overwrite the wrong on-disk MD. Max-based ids stay stable across
+        retractions so cross-references and dedup survive.
+        """
+        max_seen = 0
+        seen_ids = {r.get("id") for r in self.vulnerability_reports} | self._saved_vuln_ids
+        for rid in seen_ids:
+            if isinstance(rid, str):
+                m = re.fullmatch(r"vuln-(\d+)", rid)
+                if m:
+                    max_seen = max(max_seen, int(m.group(1)))
+        return max_seen + 1
+
     def add_vulnerability_report(
         self,
         title: str,
@@ -168,7 +188,7 @@ class ReportState:
         agent_id: str | None = None,
         agent_name: str | None = None,
     ) -> str:
-        report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
+        report_id = f"vuln-{self._next_vuln_ordinal():04d}"
 
         report: dict[str, Any] = {
             "id": report_id,
@@ -219,6 +239,74 @@ class ReportState:
             self.vulnerability_found_callback(report)
 
         self.save_run_data()
+
+        return report_id
+
+    def retract_vulnerability_report(self, report_id: str, reason: str) -> dict[str, Any]:
+        """Remove a previously-reported finding from the cumulative set.
+
+        On resume, prior findings are rehydrated from ``vulnerabilities.json``.
+        When a later push FIXES one, the agent re-validates and must be able to
+        DROP it — else rehydration is append-only and the fixed finding re-emits
+        into every subsequent SARIF, anchored to the synthetic SECURITY.md once
+        its real line is gone, producing a GHAS alert that can never
+        auto-resolve (fail-CLOSED). This primitive closes that gap.
+
+        Reverses ``add_vulnerability_report``'s side effects:
+          1. drop the report from the in-memory ``vulnerability_reports`` list
+          2. discard its id from ``_saved_vuln_ids`` + delete the stale ``.md``
+          3. ``save_run_data()`` rewrites CSV/JSON/SARIF wholesale from the
+             reduced set, so the retracted finding vanishes from all artifacts
+
+        report_id is NOT recycled — positional ``vuln-NNNN`` ids stay stable
+        (``add_vulnerability_report`` derives the next id from the max seen id,
+        not the list length, so a physical removal can't cause a later finding
+        to reuse a retracted id). Idempotent: retracting an unknown/already-gone
+        id is a no-op success.
+
+        NOTE: the caller (the retract tool) applies the groundedness guard —
+        re-verifying against the current tree that the vulnerable sink is
+        actually gone — BEFORE invoking this. This method performs the state
+        mutation; it does not itself decide whether the retraction is justified.
+        """
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError(
+                "retract_vulnerability_report requires a non-empty reason "
+                "(cite what was verified fixed, and where)",
+            )
+        before = len(self.vulnerability_reports)
+        retracted = next(
+            (r for r in self.vulnerability_reports if r.get("id") == report_id),
+            None,
+        )
+        if retracted is None:
+            logger.info("retract: %s not present (no-op)", report_id)
+            return {"success": True, "retracted": False, "reason": "id not present"}
+
+        self.vulnerability_reports = [
+            r for r in self.vulnerability_reports if r.get("id") != report_id
+        ]
+        self._saved_vuln_ids.discard(report_id)
+
+        # Delete the stale per-finding writeup so a future rehydration doesn't
+        # reload the retracted finding from disk. The CSV/JSON/SARIF are
+        # rewritten wholesale by save_run_data() below; the .md is the one
+        # append-only artefact, so it needs explicit removal.
+        with contextlib.suppress(OSError):
+            run_dir = self.get_run_dir()
+            (run_dir / "vulnerabilities" / f"{report_id}.md").unlink(missing_ok=True)
+
+        logger.info("Retracted vulnerability report %s (%s) — reason: %s",
+                    report_id, retracted.get("title", ""), reason)
+        self.save_run_data()
+        return {
+            "success": True,
+            "retracted": True,
+            "report_id": report_id,
+            "title": retracted.get("title"),
+            "remaining": before - 1,
+        }
         return report_id
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
@@ -339,8 +427,12 @@ class ReportState:
             if self.final_scan_result:
                 write_executive_report(run_dir, self.final_scan_result)
 
-            if self.vulnerability_reports:
-                write_vulnerabilities(run_dir, self.vulnerability_reports, self._saved_vuln_ids)
+            # Always call write_vulnerabilities (even for an empty set) so a
+            # retract-to-zero truncates the stale CSV/JSON rather than leaving a
+            # prior finding on disk — the CSV/JSON are the rehydration source, so
+            # a stale one would resurrect the retracted finding on the next
+            # resume (fail-closed regression the retract primitive exists to fix).
+            write_vulnerabilities(run_dir, self.vulnerability_reports, self._saved_vuln_ids)
 
             # SARIF 2.1.0 emitter for CI / ASPM integration. Always emit (even
             # empty) so a clean run overwrites a prior findings.sarif rather than

@@ -358,6 +358,7 @@ def build_strix_agent(
     is_whitebox: bool = False,
     interactive: bool = False,
     chat_completions_tools: bool = False,
+    is_resume: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
 ) -> SandboxAgent[Any]:
     """Build a SandboxAgent for either root or child use.
@@ -377,6 +378,14 @@ def build_strix_agent(
 
     if is_root:
         tools: list[Tool] = [*_BASE_TOOLS, finish_scan]
+        # retract_vulnerability_report is the inverse of create, needed ONLY on
+        # a resumed run: prior findings are rehydrated, and a since-fixed one
+        # must be droppable or it re-emits forever (fail-closed). Gate it on
+        # resume so a fresh scan is never handed a findings-drop tool it can't
+        # need. Root-only — the orchestrator owns the cumulative findings set.
+        if is_resume:
+            from strix.tools.reporting.retract_tool import retract_vulnerability_report
+            tools.append(retract_vulnerability_report)
     else:
         tools = [*_BASE_TOOLS, agent_finish]
 
