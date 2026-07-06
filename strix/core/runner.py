@@ -309,6 +309,37 @@ async def run_strix_scan(
             system_prompt_context=root_context,
         )
 
+        # On resume, wire a sandbox-backed reader for the retract tool's
+        # groundedness guard so it can re-verify a "fixed" claim against the
+        # live /workspace tree. Whitebox only — the guard checks source sinks;
+        # for non-whitebox targets there is no tree to read, so the guard stays
+        # fail-safe (refuse). The reader cats the file inside the container.
+        if is_resume and is_whitebox:
+            from strix.tools.reporting.retract_tool import set_target_file_reader
+
+            _session = bundle["session"]
+            _ws_paths = [
+                f"/workspace/{sub}" if sub else "/workspace"
+                for sub in (
+                    (t.get("details") or {}).get("workspace_subdir")
+                    for t in targets
+                    if t.get("type") == "local_code"
+                )
+            ] or ["/workspace"]
+
+            async def _read_target_file(rel_path: str) -> str | None:
+                rel = rel_path.lstrip("/")
+                for base in _ws_paths:
+                    try:
+                        result = await _session.exec("cat", f"{base}/{rel}", timeout=15)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if getattr(result, "exit_code", 1) == 0:
+                        return result.stdout
+                return None  # not found under any workspace root → treat as gone
+
+            set_target_file_reader(_read_target_file)
+
         root_agent = build_strix_agent(
             name="Strix",
             skills=skills,
@@ -317,6 +348,7 @@ async def run_strix_scan(
             is_whitebox=is_whitebox,
             interactive=interactive,
             chat_completions_tools=chat_completions_tools,
+            is_resume=is_resume,
             system_prompt_context=root_context,
             instructions_override=root_instructions,
         )
