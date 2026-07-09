@@ -81,3 +81,26 @@ def test_no_inert_roles_defined(monkeypatch):
     s = LlmSettings()
     assert not hasattr(s, "model_reporting")
     assert not hasattr(s, "model_compressor")
+
+
+def test_fallback_map_empty_when_unset(monkeypatch):
+    monkeypatch.delenv("STRIX_LLM_FALLBACK", raising=False)
+    assert LlmSettings().fallback_map() == {}
+
+
+def test_fallback_map_parses_pairs(monkeypatch):
+    monkeypatch.setenv(
+        "STRIX_LLM_FALLBACK",
+        "bedrock/us.anthropic.claude-fable-5=bedrock/us.anthropic.claude-sonnet-5,"
+        "a/b=c/d",
+    )
+    assert LlmSettings().fallback_map() == {
+        "bedrock/us.anthropic.claude-fable-5": "bedrock/us.anthropic.claude-sonnet-5",
+        "a/b": "c/d",
+    }
+
+
+def test_fallback_map_skips_malformed(monkeypatch):
+    # bare tokens (no '='), empty sides, and stray whitespace are dropped.
+    monkeypatch.setenv("STRIX_LLM_FALLBACK", " a=b , bad , =x , y= , c=d ")
+    assert LlmSettings().fallback_map() == {"a": "b", "c": "d"}
