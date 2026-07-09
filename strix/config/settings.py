@@ -28,15 +28,31 @@ class LlmSettings(BaseSettings):
     # provider as `model` (LiteLLM routes them the same way).
     model_orchestrator: str | None = Field(default=None, alias="STRIX_LLM_ORCHESTRATOR")
     model_subagent: str | None = Field(default=None, alias="STRIX_LLM_SUBAGENT")
-    model_compressor: str | None = Field(default=None, alias="STRIX_LLM_COMPRESSOR")
-    # Reporting role: the model that writes the executive summary + per-finding
-    # writeups. On a PR-time gate scan the report is a means to pass/fail, not a
-    # human-read triage artifact, so a cheap fast model here is desirable while
-    # the reasoning stays strong. NOTE: v1's report is written inline by the
-    # orchestrator (finish_scan is an orchestrator tool, not a separate agent),
-    # so honouring this requires a dedicated reporting-agent spawn — tracked as
-    # a follow-up; the setting is defined now so the config surface is stable.
-    model_reporting: str | None = Field(default=None, alias="STRIX_LLM_REPORTING")
+    # Dedup role: the finding-deduplication check (report/dedupe.py) is a bounded
+    # JSON classification — "does this candidate duplicate an existing finding?"
+    # — that fires on EVERY reported finding and needs no deep pentest reasoning.
+    # A genuine cheap-model candidate (unlike reporting, which is <0.4% of scan
+    # tokens, or a compressor, which has nothing to attach to). Falls back to the
+    # base model when unset.
+    model_dedup: str | None = Field(default=None, alias="STRIX_LLM_DEDUP")
+    # Refusal fallback map: "primary=fallback,primary2=fallback2". When an agent
+    # turn is blocked by the provider's content filter (Bedrock Converse
+    # stopReason=content_filtered — Mythos-class models like Claude Fable 5 refuse
+    # a materially higher share of offensive-security prompts), the run swaps the
+    # blocked model for its mapped fallback and retries the SAME session (prior
+    # context carries over), rather than burning the recovery budget re-prompting
+    # a model that will keep refusing. No fallback mapped for the blocked model →
+    # the agent fails cleanly. Ports the triager's STRIX_TRIAGE_L2_FALLBACK_MODELS
+    # pattern. Empty/unset → today's behaviour (no fallback). NOTE: the Bedrock
+    # `fallback-credit-2026-06-01` token-credit beta is NOT wired — the credit
+    # token is only returned via the raw invoke_model API, and Strix runs through
+    # Converse, which does not surface it (verified 2026-07-09).
+    model_fallback: str | None = Field(default=None, alias="STRIX_LLM_FALLBACK")
+    # NOTE: no compressor/reporting role. The fork briefly had STRIX_LLM_COMPRESSOR
+    # + STRIX_LLM_REPORTING (175ec25) but dropped them (6b45fc3) as inert on v1:
+    # v1 uses a plain SQLiteSession (no compaction), and reporting is written
+    # inline by the orchestrator (finish_scan is an orchestrator tool, not a
+    # separate agent). Omitted rather than defined-but-inert.
     api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
@@ -64,6 +80,26 @@ class LlmSettings(BaseSettings):
     # their limit. Any value set here is clamped to the model's known ceiling.
     max_tokens: int | None = Field(default=None, alias="STRIX_MAX_TOKENS")
     timeout: int = Field(default=300, alias="LLM_TIMEOUT")
+
+    def fallback_map(self) -> dict[str, str]:
+        """Parse ``model_fallback`` into {primary_model: fallback_model}.
+
+        Format: ``"primary1=fallback1,primary2=fallback2"``. Malformed / empty
+        entries are skipped; unset returns an empty map (no fallback). Mirrors
+        the triager's ``_build_fallback_map``.
+        """
+        spec = (self.model_fallback or "").strip()
+        if not spec:
+            return {}
+        out: dict[str, str] = {}
+        for raw_pair in spec.split(","):
+            pair = raw_pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            primary, fallback = (p.strip() for p in pair.split("=", 1))
+            if primary and fallback:
+                out[primary] = fallback
+        return out
 
 
 class RuntimeSettings(BaseSettings):

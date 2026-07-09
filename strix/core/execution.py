@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import uuid
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from agents.sandbox.errors import ExecTransportError
 from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from openai import APIError
 
+from strix.config import load_settings
 from strix.core.hooks import BudgetExceededError
 from strix.core.inputs import child_initial_input
 from strix.core.sessions import open_agent_session, strip_all_images_from_session
@@ -36,6 +38,22 @@ logger = logging.getLogger(__name__)
 StreamEventSink = Callable[[str, Any], None]
 
 _INPUT_REJECTION_CODES = frozenset({400, 404, 422})
+
+# Recovery budget for non-lifecycle (text-only / empty / content-filtered) turns
+# in non-interactive mode. A genuinely-recoverable agent calls a lifecycle tool
+# within a turn or two of being nudged; a model that is refusing (Bedrock
+# content_filter) or otherwise stuck will keep producing empty turns forever.
+# Previously this was ``max_turns`` (500), so a refusing model could burn the
+# whole budget (~$84 observed on a fable-5 offensive scan, 2026-07-09). Cap it
+# low: the fallback swap below is the real recovery path, this is the backstop.
+_NONINTERACTIVE_RECOVERY_LIMIT = 3
+
+
+def _model_name(model: object) -> str | None:
+    """Best-effort model-name string from a RunConfig.model (str | Model | None)."""
+    if isinstance(model, str):
+        return model
+    return getattr(model, "model", None)
 
 
 async def run_agent_loop(
@@ -280,7 +298,9 @@ async def _run_noninteractive_until_lifecycle(
     result: RunResultBase | None = None
     input_data: Any = initial_input
     invalid_final_outputs = 0
-    invalid_final_output_limit = max(1, max_turns)
+    invalid_final_output_limit = _NONINTERACTIVE_RECOVERY_LIMIT
+    fallback_map = load_settings().llm.fallback_map()
+    fallbacks_used: set[str] = set()
 
     while True:
         if coordinator.budget_stopped:
@@ -315,12 +335,41 @@ async def _run_noninteractive_until_lifecycle(
             _final_output_preview(result),
         )
 
+        # Refusal fallback: a non-lifecycle turn with no usable output is the
+        # signal a model is refusing (Bedrock content_filter) rather than just
+        # slipping into prose. If a fallback model is mapped for the current
+        # model and we haven't already swapped to it, switch and retry the SAME
+        # session (prior context carries over) instead of spending the recovery
+        # budget re-prompting a model that will keep refusing.
+        current_model = _model_name(run_config.model)
+        fallback_model = fallback_map.get(current_model) if current_model else None
+        if fallback_model and fallback_model not in fallbacks_used:
+            fallbacks_used.add(fallback_model)
+            logger.warning(
+                "agent %s: model %s produced no actionable output "
+                "(likely a content-filter refusal); falling back to %s and retrying",
+                agent_id,
+                current_model,
+                fallback_model,
+            )
+            run_config = dataclasses.replace(run_config, model=fallback_model)
+            # Reset the recovery counter: the fallback model gets its own budget.
+            invalid_final_outputs = 0
+            input_data = await _append_noninteractive_tool_required_message(
+                session=session,
+                context=context,
+                attempt=invalid_final_outputs,
+                limit=invalid_final_output_limit,
+            )
+            continue
+
         if invalid_final_outputs >= invalid_final_output_limit:
             await coordinator.set_status(agent_id, "crashed")
             await _notify_parent_on_crash(coordinator, agent_id, "crashed")
             raise MaxTurnsExceeded(
                 "Agent exhausted non-interactive recovery attempts without calling "
-                "finish_scan or agent_finish."
+                "finish_scan or agent_finish (last model: "
+                f"{_model_name(run_config.model)})."
             )
 
         input_data = await _append_noninteractive_tool_required_message(
