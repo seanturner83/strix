@@ -167,3 +167,50 @@ def test_missing_scip_binary_raises_immediately(
     scip = _touch(tmp_path / "py.scip")
     with pytest.raises(IndexerError, match="scip CLI missing"):
         _convert_to_sqlite((scip,), out_dir)
+
+
+# --- build_index per-language degradation -----------------------------
+#
+# A language indexer can RAISE (not just return None) when its marker is
+# present but the tool then fails — e.g. package.json without tsconfig.json
+# makes scip-typescript exit rc=1. build_index must isolate each language so
+# one hard failure degrades to the next instead of aborting all indexing.
+
+def test_build_index_degrades_past_failing_first_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    go_scip = _touch(out_dir / "go.scip", b"<scip>")
+
+    # TS is tried first and RAISES (package.json w/o tsconfig); Go succeeds.
+    monkeypatch.setattr(
+        indexer, "_index_typescript",
+        lambda t, o: (_ for _ in ()).throw(IndexerError("scip-typescript rc=1: missing tsconfig.json")))
+    monkeypatch.setattr(indexer, "_index_go", lambda t, o: go_scip)
+    monkeypatch.setattr(indexer, "_index_python", lambda t, o: None)
+    monkeypatch.setattr(indexer, "_index_rust", lambda t, o: None)
+    monkeypatch.setattr(indexer, "_convert_to_sqlite",
+                        lambda paths, o: _touch(o / "code_graph.sqlite", b"db"))
+
+    result = indexer.build_index(tmp_path, out_dir)
+    # Go still indexed despite TS raising first.
+    assert go_scip in result.scip_paths
+    assert result.sqlite_path.exists()
+
+
+def test_build_index_raises_only_when_all_languages_fail_or_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    # One language raises, the rest detect nothing → no scip_paths at all.
+    monkeypatch.setattr(
+        indexer, "_index_typescript",
+        lambda t, o: (_ for _ in ()).throw(IndexerError("scip-typescript rc=1")))
+    monkeypatch.setattr(indexer, "_index_go", lambda t, o: None)
+    monkeypatch.setattr(indexer, "_index_python", lambda t, o: None)
+    monkeypatch.setattr(indexer, "_index_rust", lambda t, o: None)
+
+    with pytest.raises(IndexerError, match="no supported source languages"):
+        indexer.build_index(tmp_path, out_dir)

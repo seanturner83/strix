@@ -478,18 +478,34 @@ def build_index(target_dir: Path, out_dir: Path) -> IndexResult:
     # language detected wins. TS first to match the common shape of
     # zh services (TS auth/business-logic with Python scripts);
     # multi-language merge is W5 follow-up.
-    ts_index = _index_typescript(target_dir, out_dir)
-    if ts_index is not None:
-        scip_paths.append(ts_index)
-    go_index = _index_go(target_dir, out_dir)
-    if go_index is not None:
-        scip_paths.append(go_index)
-    py_index = _index_python(target_dir, out_dir)
-    if py_index is not None:
-        scip_paths.append(py_index)
-    rs_index = _index_rust(target_dir, out_dir)
-    if rs_index is not None:
-        scip_paths.append(rs_index)
+    #
+    # Per-language isolation: a language's indexer can RAISE (not just return
+    # None) when its marker is present but the tool then fails — e.g. a repo
+    # with package.json but no tsconfig.json makes scip-typescript exit rc=1.
+    # Without isolation that exception aborts build_index entirely, so a
+    # multi-language repo (package.json + go.mod + requirements.txt) whose
+    # FIRST-tried language fails loses ALL code-graph indexing, including the
+    # languages that would have indexed fine. Guard each call so one
+    # language's hard failure degrades to the next instead of killing the run.
+    # (Observed: composite-actions-smoke-test, package.json w/o tsconfig →
+    # empty code_graph, no guard enrichment for its Go/Python either.)
+    indexers = (
+        ("typescript", _index_typescript),
+        ("go", _index_go),
+        ("python", _index_python),
+        ("rust", _index_rust),
+    )
+    for lang, index_fn in indexers:
+        try:
+            idx = index_fn(target_dir, out_dir)
+        except IndexerError as exc:
+            logger.warning(
+                "code_graph: %s indexer failed (%s); continuing with other "
+                "languages", lang, exc,
+            )
+            continue
+        if idx is not None:
+            scip_paths.append(idx)
 
     if not scip_paths:
         raise IndexerError(
