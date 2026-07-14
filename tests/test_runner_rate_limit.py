@@ -40,6 +40,13 @@ async def test_persistent_rate_limit_stops_gracefully(
             force_required_tool_choice=False,
             timeout=300,
             prompt_cache=True,
+            # seedcx per-role + fallback fields the runner now reads: the stub
+            # must mirror the real LlmSettings surface.
+            model_orchestrator=None,
+            model_subagent=None,
+            model_dedup=None,
+            model_fallback=None,
+            max_tokens=None,
         ),
         runtime=types.SimpleNamespace(max_context_images=3),
     )

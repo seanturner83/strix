@@ -48,7 +48,16 @@ def _patch_engine_scaffold(
             force_required_tool_choice=False,
             timeout=300,
             prompt_cache=True,
+            # seedcx per-role + fallback fields the runner now reads: the stub
+            # must mirror the real LlmSettings surface.
+            model_orchestrator=None,
+            model_subagent=None,
+            model_dedup=None,
+            model_fallback=None,
+            max_tokens=None,
         ),
+        # v1.2.0 #779: runner reads settings.runtime.max_context_images when
+        # building the root agent context.
         runtime=types.SimpleNamespace(max_context_images=3),
     )
     monkeypatch.setattr(runner, "load_settings", lambda: settings)
