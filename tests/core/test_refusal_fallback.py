@@ -24,6 +24,10 @@ from strix.core import execution as ex
 class _FakeCoordinator:
     def __init__(self) -> None:
         self.status = "running"
+        # v1.1 budget gate: run_agent_loop reads coordinator.budget_stopped at
+        # the top of every iteration (max_budget_usd feature). The fake must
+        # expose it (False = never budget-stopped in these tests).
+        self.budget_stopped = False
 
     async def set_status(self, agent_id: str, status: str) -> None:
         self.status = status

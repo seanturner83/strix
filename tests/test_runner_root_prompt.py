@@ -45,6 +45,13 @@ def _patch_engine_scaffold(
             model="openai/gpt-4o",
             reasoning_effort="high",
             force_required_tool_choice=False,
+            # seedcx per-role + fallback fields the runner now reads (v1.1
+            # integration): the stub must mirror the real LlmSettings surface.
+            model_orchestrator=None,
+            model_subagent=None,
+            model_dedup=None,
+            model_fallback=None,
+            max_tokens=None,
         )
     )
     monkeypatch.setattr(runner, "load_settings", lambda: settings)
