@@ -52,6 +52,10 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-http>=1.40.0",
   "scrubadub>=2.0.1",
   "defusedxml>=0.7.1",
+  # Used by the structured_query resolver and the scip_k8s code_graph leg.
+  # Was previously only present transitively (via litellm/traceloop); pin it
+  # explicitly so a transitive-dep bump can't silently remove it.
+  "pyyaml>=6.0",
 ]
 
 [project.scripts]

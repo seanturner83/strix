@@ -441,6 +441,35 @@ def _index_terraform(target: Path, out_dir: Path) -> Path | None:
         return None
 
 
+def _index_k8s(target: Path, out_dir: Path) -> Path | None:
+    """SCIP index for Kubernetes/Helm. Detection: any Chart.yaml or
+    kustomization.yaml. Renders (helm template / kustomize build) then resolves
+    by-name cross-object refs (workload→SA, RoleBinding→SA/Role, Pod→Secret,
+    Ingress→Service) into SCIP. Returns None when there's no k8s config or the
+    render tooling (helm/kustomize) is unavailable — degrades cleanly like the
+    other legs. Closes the k8s code-graph gap: per-manifest scanners (Checkov)
+    can't see cross-object RBAC/secret chains; this makes them queryable for
+    the agent's privesc reasoning + the triager's reachability grounding.
+    v1: by-name edges only (label-selector edges are Phase 2)."""
+    if not _has_files_matching(target, "Chart.yaml", "kustomization.yaml"):
+        return None
+    if not (_binary_exists("kustomize") or _binary_exists("helm")):
+        # Sandbox may predate the helm/kustomize install; degrade rather than
+        # fail (same posture as terraform-ls).
+        logger.warning("code_graph: helm/kustomize missing; skipping k8s index")
+        return None
+    try:
+        # Import inside the try (see _index_terraform): scip_k8s pulls in the
+        # vendored scip_pb2 + pyyaml; any import-time error stays contained to
+        # this leg instead of killing indexing for every language.
+        from .scip_k8s import index as k8s_index
+
+        return k8s_index(target, out_dir)
+    except Exception as exc:  # noqa: BLE001 — indexer must never break the scan
+        logger.warning("code_graph: k8s index failed: %s", exc)
+        return None
+
+
 def _convert_to_sqlite(scip_paths: tuple[Path, ...], out_dir: Path) -> Path:
     if not _binary_exists("scip"):
         raise IndexerError("scip CLI missing from sandbox")
@@ -525,6 +554,7 @@ def build_index(target_dir: Path, out_dir: Path) -> IndexResult:
         ("python", _index_python),
         ("rust", _index_rust),
         ("terraform", _index_terraform),
+        ("kubernetes", _index_k8s),
     )
     for lang, index_fn in indexers:
         try:
