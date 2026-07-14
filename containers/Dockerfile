@@ -116,6 +116,22 @@ RUN ARCH="$(uname -m)" && \
     rm /tmp/scip.tar.gz && \
     scip --version
 
+# SEC-tf: terraform-ls (HashiCorp LSP) backs the scip_terraform indexer leg —
+# closes the tf-* code-graph gap (no upstream scip-terraform exists). Pinned to
+# v0.36.5. Ships as a release zip with arch names amd64/arm64.
+RUN ARCH="$(uname -m)" && \
+    case "$ARCH" in \
+        x86_64)  TFLS_ARCH="amd64" ;; \
+        aarch64) TFLS_ARCH="arm64" ;; \
+        *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    TFLS_VERSION="0.36.5" && \
+    curl -fLsS "https://releases.hashicorp.com/terraform-ls/${TFLS_VERSION}/terraform-ls_${TFLS_VERSION}_linux_${TFLS_ARCH}.zip" \
+        -o /tmp/terraform-ls.zip && \
+    sudo unzip -o /tmp/terraform-ls.zip terraform-ls -d /usr/local/bin && \
+    rm /tmp/terraform-ls.zip && \
+    terraform-ls --version
+
 RUN set -eux; \
     TS_PARSER_DIR="/home/pentester/.tree-sitter/parsers"; \
     mkdir -p "${TS_PARSER_DIR}"; \

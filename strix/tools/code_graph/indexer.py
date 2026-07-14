@@ -411,6 +411,29 @@ def _index_rust(target: Path, out_dir: Path) -> Path | None:
     return out if out.exists() else None
 
 
+def _index_terraform(target: Path, out_dir: Path) -> Path | None:
+    """SCIP index for Terraform/HCL via the scip_terraform bridge (drives
+    terraform-ls). Detection: any *.tf. Returns None when there's no terraform
+    or terraform-ls is unavailable (degrades cleanly — same posture as the other
+    legs). Closes the tf-* code-graph gap: no upstream scip-terraform exists, so
+    this bridges terraform-ls's definition/reference resolution into SCIP.
+    Reference-level (not full semantic) — enough for the triager's reachability /
+    guard grounding on IaC findings."""
+    if not _has_files_matching(target, "*.tf"):
+        return None
+    if not _binary_exists("terraform-ls"):
+        # Not a hard error: the sandbox may predate the terraform-ls install
+        # (Dockerfile SEC-tf); degrade to no-tf-index rather than fail the run.
+        logger.warning("code_graph: terraform-ls missing; skipping terraform index")
+        return None
+    from .scip_terraform import index as tf_index
+    try:
+        return tf_index(target, out_dir)
+    except Exception as exc:  # noqa: BLE001 — indexer must never break the scan
+        logger.warning("code_graph: terraform index failed: %s", exc)
+        return None
+
+
 def _convert_to_sqlite(scip_paths: tuple[Path, ...], out_dir: Path) -> Path:
     if not _binary_exists("scip"):
         raise IndexerError("scip CLI missing from sandbox")
@@ -494,6 +517,7 @@ def build_index(target_dir: Path, out_dir: Path) -> IndexResult:
         ("go", _index_go),
         ("python", _index_python),
         ("rust", _index_rust),
+        ("terraform", _index_terraform),
     )
     for lang, index_fn in indexers:
         try:
