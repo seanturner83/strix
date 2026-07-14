@@ -85,8 +85,23 @@ class LSPClient:
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
         n = int(headers.get("content-length", "0"))
-        body = self._proc.stdout.read(n)
-        return json.loads(body.decode("utf-8"))
+        # stdout is a pipe: a single read(n) is NOT guaranteed to return n
+        # bytes — the kernel returns whatever is buffered (often ~64 KiB),
+        # so a large documentSymbol response arrives truncated and
+        # json.loads dies with "Unterminated string". Loop until the full
+        # Content-Length body is collected (or the server closes early).
+        chunks: list[bytes] = []
+        remaining = n
+        while remaining > 0:
+            chunk = self._proc.stdout.read(remaining)
+            if not chunk:
+                raise LSPError(
+                    f"language server closed mid-body "
+                    f"({n - remaining}/{n} bytes read)"
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return json.loads(b"".join(chunks).decode("utf-8"))
 
     # --- JSON-RPC ----------------------------------------------------------
     def _request(self, method: str, params: Any,

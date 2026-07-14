@@ -11,10 +11,11 @@ canned documentSymbol / references responses. Validates:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest import mock
 
-from strix.tools.code_graph.scip_terraform import emit, indexer, scip_pb2
+from strix.tools.code_graph.scip_terraform import emit, indexer, lsp_client, scip_pb2
 
 
 def test_descriptor_from_documentsymbol_names():
@@ -116,3 +117,60 @@ def test_index_resolves_cross_file_references(tmp_path):
 def test_index_returns_none_without_terraform(tmp_path):
     (tmp_path / "main.py").write_text("print('no terraform here')\n")
     assert indexer.index(tmp_path, tmp_path) is None
+
+
+class _ShortReadStdout:
+    """Fake process stdout that mimics a pipe: readline() for the header
+    block, and read(n) that returns AT MOST `chunk` bytes per call (a real
+    pipe never guarantees a full n-byte read). Exercises the framing loop
+    that the mocked-LSPClient tests never touch."""
+
+    def __init__(self, payload: bytes, chunk: int = 65536):
+        self._buf = payload
+        self._pos = 0
+        self._chunk = chunk
+
+    def readline(self) -> bytes:
+        nl = self._buf.index(b"\n", self._pos) + 1
+        line = self._buf[self._pos:nl]
+        self._pos = nl
+        return line
+
+    def read(self, n: int) -> bytes:
+        end = min(self._pos + min(n, self._chunk), len(self._buf))
+        out = self._buf[self._pos:end]
+        self._pos = end
+        return out
+
+
+def test_read_message_reassembles_body_across_short_reads():
+    # Body larger than the 64 KiB pipe chunk — a single read(n) returns it
+    # truncated, so json.loads would hit "Unterminated string" unless the
+    # reader loops. This is the exact failure the tf-aws-iam-sso canary hit.
+    big = {"jsonrpc": "2.0", "id": 1,
+           "result": [{"name": f"variable \"v{i}\"", "kind": 13} for i in range(4000)]}
+    body = json.dumps(big).encode("utf-8")
+    assert len(body) > 65536  # guard: the test must actually cross the boundary
+    framed = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+    client = lsp_client.LSPClient.__new__(lsp_client.LSPClient)
+    client._proc = mock.Mock()
+    client._proc.stdout = _ShortReadStdout(framed, chunk=65536)
+
+    msg = client._read_message()
+    assert msg["id"] == 1
+    assert len(msg["result"]) == 4000
+
+
+def test_read_message_raises_on_truncated_body():
+    body = b'{"jsonrpc":"2.0","id":2,"result":[]}'
+    # Declare more than we deliver → server-closed-mid-body.
+    framed = f"Content-Length: {len(body) + 50}\r\n\r\n".encode("ascii") + body
+    client = lsp_client.LSPClient.__new__(lsp_client.LSPClient)
+    client._proc = mock.Mock()
+    client._proc.stdout = _ShortReadStdout(framed, chunk=65536)
+    try:
+        client._read_message()
+        raise AssertionError("expected LSPError on truncated body")
+    except lsp_client.LSPError:
+        pass
