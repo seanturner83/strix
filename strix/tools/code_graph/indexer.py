@@ -426,8 +426,15 @@ def _index_terraform(target: Path, out_dir: Path) -> Path | None:
         # (Dockerfile SEC-tf); degrade to no-tf-index rather than fail the run.
         logger.warning("code_graph: terraform-ls missing; skipping terraform index")
         return None
-    from .scip_terraform import index as tf_index
     try:
+        # Import inside the try: scip_terraform pulls in the vendored
+        # scip_pb2, whose protobuf runtime-version guard can raise at
+        # IMPORT time (not call time). Keeping the import here contains any
+        # such error to the tf leg (degrades to None), rather than letting
+        # it escape both this except and the dispatch loop's
+        # `except IndexerError` and kill indexing for every language.
+        from .scip_terraform import index as tf_index
+
         return tf_index(target, out_dir)
     except Exception as exc:  # noqa: BLE001 — indexer must never break the scan
         logger.warning("code_graph: terraform index failed: %s", exc)
