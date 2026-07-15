@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
@@ -192,6 +193,20 @@ class DockerRuntime(AbstractRuntime):
 
     def _create_container(self, scan_id: str, max_retries: int = 2) -> Container:
         base_name = f"strix-scan-{scan_id}"
+        # The container HOSTNAME (not the name) must be <= 64 bytes: the kernel's
+        # __NEW_UTS_LEN cap makes runc's sethostname() at container-init fail with
+        # EINVAL ("sethostname: invalid argument" -> "failed to create shim task"
+        # -> 500) for anything longer. `strix-scan-{scan_id}` where scan_id is
+        # `weekly[-infra]-{repo}-{sha8}` blows past 64 for long repo names
+        # (partial-participant-rules-command = 60, +'-r{attempt}' retry suffix
+        # -> 63/66 -> over), which silently failed ~8% of weekly scans on repos
+        # with long names. The container NAME can stay long/unique (Docker allows
+        # ~128 + needs the retry suffix for 409-avoidance) — only the hostname is
+        # capped. Decouple them: derive a stable, bounded hostname from a hash of
+        # scan_id so it's <= 64 AND identical across the -r{attempt} retries.
+        # (Regression of a prior length fix that wasn't on this fork ref.)
+        _hn_hash = hashlib.sha1(scan_id.encode()).hexdigest()[:12]
+        sandbox_hostname = f"strix-{_hn_hash}"  # 18 bytes, well under 64
         image_name = Config.get("strix_image")
         if not image_name:
             raise ValueError("STRIX_IMAGE must be configured")
@@ -235,7 +250,7 @@ class DockerRuntime(AbstractRuntime):
                     command="sleep infinity",
                     detach=True,
                     name=container_name,
-                    hostname=container_name,
+                    hostname=sandbox_hostname,  # bounded <=64; NOT container_name (see above)
                     ports={
                         f"{CONTAINER_TOOL_SERVER_PORT}/tcp": self._tool_server_port,
                         f"{CONTAINER_CAIDO_PORT}/tcp": self._caido_port,
