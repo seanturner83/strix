@@ -335,7 +335,18 @@ async def run_strix_scan(
                     except Exception:  # noqa: BLE001
                         continue
                     if getattr(result, "exit_code", 1) == 0:
-                        return result.stdout
+                        # SDK ExecResult.stdout is BYTES. The retract-tool guard
+                        # does `needle in content` with a str needle, so a raw
+                        # bytes return raises TypeError on EVERY retract — the
+                        # uncaught "persistent internal tool error" that made
+                        # grounded retraction impossible on v1.x (SEC-6802).
+                        # Decode to text here; the guard is a text substring check.
+                        stdout = result.stdout
+                        return (
+                            stdout.decode("utf-8", errors="replace")
+                            if isinstance(stdout, (bytes, bytearray))
+                            else stdout
+                        )
                 return None  # not found under any workspace root → treat as gone
 
             set_target_file_reader(_read_target_file)
