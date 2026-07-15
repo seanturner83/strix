@@ -230,7 +230,43 @@ def make_model_settings(
         )
     if force_required_tool_choice and _accepts_required_tool_choice(model_name):
         model_settings = model_settings.resolve(ModelSettings(tool_choice="required"))
+    if _is_claude_model(model_name):
+        model_settings = model_settings.resolve(
+            ModelSettings(extra_args=_claude_cache_extra_args()),
+        )
     return model_settings
+
+
+def _claude_cache_extra_args() -> dict[str, Any]:
+    """Bedrock/Anthropic Claude prompt-cache breakpoints, passed through to
+    litellm via ModelSettings.extra_args.
+
+    The v1.x SDK-harness rewrite dropped the 0.8 fork's hand-rolled
+    ``_add_cache_control`` (it lived in the deleted ``strix/llm/`` layer), so
+    v1 sent EVERY turn uncached — ``Cached Tokens 0``, ~4x Bedrock cost on a
+    multi-turn agentic scan that re-sends a large, stable system prompt + tool
+    schemas each turn.
+
+    litellm ships a supported hook (``AnthropicCacheControlHook``) that fires
+    whenever ``cache_control_injection_points`` is present in the call kwargs
+    and works for the Bedrock Converse Claude path (emits ``cachePoint`` blocks;
+    honours Anthropic's 4-breakpoint cap, reserving one for the tool_config
+    point). We mark the two big STABLE segments:
+
+      - the system prompt (``role: system``) — by far the largest repeated span
+      - the tool schemas (``tool_config``) — sizeable and identical every turn
+
+    That's 2 of the 4 allowed breakpoints, leaving headroom for any client- or
+    SDK-supplied ones. Conversation-tail turns are left uncached (they change
+    every turn, so a breakpoint there would never hit). Read-through on the
+    stable prefix is where the win is.
+    """
+    return {
+        "cache_control_injection_points": [
+            {"location": "message", "role": "system"},
+            {"location": "tool_config"},
+        ],
+    }
 
 
 def child_initial_input(
