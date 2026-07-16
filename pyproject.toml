@@ -44,7 +44,6 @@ dependencies = [
   "requests>=2.32.0",
   "cvss>=3.2",
   "caido-sdk-client>=0.2.0",
-  "boto3>=1.43.1",
 ]
 
 [project.optional-dependencies]
