@@ -2321,7 +2321,6 @@ name = "strix-agent"
 version = "1.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "boto3" },
     { name = "caido-sdk-client" },
     { name = "cvss" },
     { name = "docker" },
@@ -2357,7 +2356,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.43.1" },
     { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.28.0" },
     { name = "caido-sdk-client", specifier = ">=0.2.0" },
     { name = "cvss", specifier = ">=3.2" },
