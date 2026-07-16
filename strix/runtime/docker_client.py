@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import uuid
 from typing import Any
 
@@ -38,12 +39,56 @@ from agents.sandbox.sandboxes.docker import (
 from agents.sandbox.session.sandbox_session import SandboxSession
 from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from docker.models.containers import Container  # type: ignore[import-untyped, unused-ignore]
+from docker.types import LogConfig  # type: ignore[import-untyped, unused-ignore]
 from docker.types import Mount as DockerSDKMount  # type: ignore[import-untyped, unused-ignore]
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped, unused-ignore]
 from requests.exceptions import RequestException
 
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_resource_limits(create_kwargs: dict[str, Any]) -> None:
+    """Apply optional cgroup resource caps from the environment. Unset/blank
+    values leave docker's default (unbounded), so this is opt-in per host.
+    Cherry-picked from usestrix/strix 84185db + 575e10a + 1698264 (v1.1
+    post-release; not in our v1.1.0 base)."""
+    mem_limit = os.environ.get("STRIX_SANDBOX_MEM_LIMIT", "").strip()
+    if mem_limit:
+        create_kwargs["mem_limit"] = mem_limit
+
+    shm_size = os.environ.get("STRIX_SANDBOX_SHM_SIZE", "").strip()
+    if shm_size:
+        create_kwargs["shm_size"] = shm_size
+
+    cpus = os.environ.get("STRIX_SANDBOX_CPUS", "").strip()
+    if cpus:
+        with contextlib.suppress(ValueError, OverflowError):
+            nano_cpus = int(float(cpus) * 1_000_000_000)
+            if 0 < nano_cpus <= 2**63 - 1:
+                create_kwargs["nano_cpus"] = nano_cpus
+
+    pids_limit = os.environ.get("STRIX_SANDBOX_PIDS_LIMIT", "").strip()
+    if pids_limit:
+        with contextlib.suppress(ValueError):
+            create_kwargs["pids_limit"] = int(pids_limit)
+
+
+def _apply_log_limits(create_kwargs: dict[str, Any]) -> None:
+    """Bound the container's json-file log so a runaway process in the sandbox
+    (e.g. a tool that busy-loops writing to stdout) cannot fill the host disk
+    and take the Docker daemon down with it. Defaults ON (docker's default is
+    unbounded, unsafe for an autonomous agent). On-disk cap = max-size *
+    max-file; set STRIX_SANDBOX_LOG_MAX_SIZE=0/off to opt out. Cherry-picked
+    from usestrix/strix e2eb39a (#785)."""
+    max_size = os.environ.get("STRIX_SANDBOX_LOG_MAX_SIZE", "50m").strip()
+    if max_size.lower() in ("0", "off", "none", "unlimited"):
+        return
+    max_file = os.environ.get("STRIX_SANDBOX_LOG_MAX_FILE", "3").strip() or "3"
+    create_kwargs["log_config"] = LogConfig(
+        type=LogConfig.types.JSON,
+        config={"max-size": max_size, "max-file": max_file},
+    )
 
 
 class StrixDockerSandboxClient(DockerSandboxClient):
@@ -131,6 +176,13 @@ class StrixDockerSandboxClient(DockerSandboxClient):
                         read_only=spec.get("read_only", True),
                     )
                 )
+
+        # Opt-in cgroup caps (STRIX_SANDBOX_MEM_LIMIT etc.) + default-on log
+        # bound. mem_limit converts a chaotic node-level OOM (kernel reaper
+        # kills an unbounded sandbox mid-exec → exit 137) into a clean,
+        # catchable container-OOM.
+        _apply_resource_limits(create_kwargs)
+        _apply_log_limits(create_kwargs)
 
         logger.debug(
             "Creating sandbox container: image=%s caps=%s exposed_ports=%s",
