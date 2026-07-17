@@ -250,21 +250,51 @@ def _claude_cache_extra_args() -> dict[str, Any]:
     litellm ships a supported hook (``AnthropicCacheControlHook``) that fires
     whenever ``cache_control_injection_points`` is present in the call kwargs
     and works for the Bedrock Converse Claude path (emits ``cachePoint`` blocks;
-    honours Anthropic's 4-breakpoint cap, reserving one for the tool_config
-    point). We mark the two big STABLE segments:
+    honours Anthropic's 4-breakpoint cap). We mark THREE segments:
 
       - the system prompt (``role: system``) — by far the largest repeated span
       - the tool schemas (``tool_config``) — sizeable and identical every turn
+      - the conversation tail (``index: -1``) — a ROLLING breakpoint on the last
+        message, so the accumulated turn history caches incrementally
 
-    That's 2 of the 4 allowed breakpoints, leaving headroom for any client- or
-    SDK-supplied ones. Conversation-tail turns are left uncached (they change
-    every turn, so a breakpoint there would never hit). Read-through on the
-    stable prefix is where the win is.
+    That's 3 of the 4 allowed breakpoints, leaving headroom for any client- or
+    SDK-supplied one.
+
+    The conversation-tail breakpoint is the important one and its prior absence
+    was a costing bug, not a design choice. An earlier version of this docstring
+    claimed the tail was "left uncached (they change every turn, so a breakpoint
+    there would never hit)". That reasoning is WRONG: an agent transcript is
+    APPEND-ONLY — prior turns are immutable and each turn only appends the new
+    assistant/tool messages (verified: request input_tokens grow monotonically
+    across a scan; the harness never trims or rewrites history mid-run). So a
+    breakpoint at ``index: -1`` re-caches the whole immutable prefix-so-far every
+    turn and hits on the next one. Without it, only the FIXED prefix (system +
+    tools, ~56k tokens) was cached while the growing conversation body was
+    re-sent at full input price every turn; measured on a real 29-turn full-repo
+    rescan, cache-read collapsed 90% -> 22% as the uncached tail grew to ~200k
+    tokens/turn (the ``Cached Tokens`` counter stayed pinned at the prefix size
+    for the whole scan). Adding the rolling tail breakpoint lifts modelled
+    cache-read to ~96% and cuts full-price input ~16x (proj. ~$23 -> ~$4-5 on
+    that scan). It helps every Claude scan; the win scales with turn count, so
+    it matters most on the long full-scope scans (weekly-merges/infra,
+    targeted-rescan) that the migration is headed for.
+
+    NOTE on TTL: we deliberately keep the DEFAULT 5-minute ephemeral TTL, not
+    the 1h extended TTL the 0.8 fork used (SEC-7045). Gap analysis of the v1.x
+    full scans shows they turn fast — max inter-turn gap 63s, median 0s, zero
+    gaps >5min over an 8-min span — so a 5m cache never expires between turns.
+    1h would only add the 1.25x->2x cache-WRITE premium for no read benefit. The
+    cost lever here is caching the conversation, NOT extending the TTL.
+
+    Both message points degrade gracefully on older litellm (an unrecognised
+    location is simply not injected — no error), and negative indices are
+    resolved by the hook against the live message list (``index += len(messages)``).
     """
     return {
         "cache_control_injection_points": [
             {"location": "message", "role": "system"},
             {"location": "tool_config"},
+            {"location": "message", "index": -1},
         ],
     }
 

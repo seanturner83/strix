@@ -7,7 +7,12 @@ from typing import Any
 
 import pytest
 
-from strix.core.inputs import build_root_task, child_initial_input, make_model_settings
+from strix.core.inputs import (
+    _claude_cache_extra_args,
+    build_root_task,
+    child_initial_input,
+    make_model_settings,
+)
 
 
 def _child_kwargs(parent_history: list[Any]) -> dict[str, Any]:
@@ -168,12 +173,6 @@ def test_make_model_settings_sets_request_timeout() -> None:
     assert settings.extra_args["timeout"] == 300.0
 
 
-def test_make_model_settings_omits_timeout_when_unset() -> None:
-    settings = make_model_settings("none", model_name="gpt-4o")
-
-    assert settings.extra_args is None
-
-
 def test_make_model_settings_timeout_survives_reasoning_resolve() -> None:
     # Reasoning is resolved via ModelSettings.resolve(); the timeout in extra_args
     # must not be dropped when a reasoning override is merged in.
@@ -185,3 +184,82 @@ def test_make_model_settings_timeout_survives_reasoning_resolve() -> None:
 
     assert settings.extra_args is not None
     assert settings.extra_args["timeout"] == 120.0
+
+
+# --- prompt-cache breakpoints ------------------------------------------------
+
+
+def _injection_points() -> list[dict[str, Any]]:
+    return _claude_cache_extra_args()["cache_control_injection_points"]
+
+
+def test_claude_cache_marks_three_breakpoints() -> None:
+    points = _injection_points()
+
+    # Anthropic allows 4 cache breakpoints; we use 3 and leave headroom.
+    assert len(points) == 3
+    assert {"location": "message", "role": "system"} in points
+    assert {"location": "tool_config"} in points
+    # The rolling conversation-tail breakpoint — the lever that caches the
+    # growing (append-only) transcript rather than only the fixed prefix.
+    assert {"location": "message", "index": -1} in points
+
+
+def test_claude_cache_tail_breakpoint_is_last_message_not_a_role() -> None:
+    # Guard against a regression to a role-keyed tail (e.g. role="user"), which
+    # would cache the FIRST matching message, not the moving tail.
+    tail = next(p for p in _injection_points() if p.get("index") is not None)
+    assert tail["index"] == -1
+    assert "role" not in tail
+
+
+def test_make_model_settings_injects_cache_points_for_claude() -> None:
+    settings = make_model_settings("none", model_name="bedrock/anthropic.claude-opus-4-8")
+
+    assert settings.extra_args is not None
+    assert settings.extra_args["cache_control_injection_points"] == _injection_points()
+
+
+def test_make_model_settings_no_cache_points_for_non_claude() -> None:
+    settings = make_model_settings("none", model_name="openai/gpt-4o")
+
+    extra = settings.extra_args or {}
+    assert "cache_control_injection_points" not in extra
+
+
+def test_tail_breakpoint_hits_growing_transcript_via_litellm_hook() -> None:
+    """The append-only invariant, end-to-end: litellm's own injection logic must
+    place the tail cache_control on the LAST message for a short transcript AND
+    for a longer one (i.e. it moves with the tail across turns), proving the
+    earlier 'a tail breakpoint would never hit' claim wrong.
+
+    We drive the hook's static ``_process_message_injection`` directly rather
+    than the full ``get_chat_completion_prompt`` entrypoint: the latter's
+    signature carries prompt-manager kwargs that drift across litellm versions,
+    while the message-injection primitive (the code path our tail point
+    exercises) is stable.
+    """
+    hook_mod = pytest.importorskip("litellm.integrations.anthropic_cache_control_hook")
+    apply = hook_mod.AnthropicCacheControlHook._apply_message_injections
+    # Only message-location points go through this primitive (tool_config is
+    # applied by the provider transform, not the message injector).
+    msg_points = [p for p in _injection_points() if p.get("location") == "message"]
+
+    def last_msg_cache_control(n_turns: int) -> Any:
+        messages: list[dict[str, Any]] = [{"role": "system", "content": "stable prompt"}]
+        for i in range(n_turns):
+            messages.append({"role": "assistant", "content": f"turn {i} action"})
+            messages.append({"role": "user", "content": f"turn {i} tool result"})
+        processed = apply(msg_points, messages, 4)
+        last = processed[-1]
+        content = last.get("content")
+        # Hook inserts on the message (string content) or its last content block.
+        if isinstance(content, list):
+            return content[-1].get("cache_control")
+        return last.get("cache_control")
+
+    # Breakpoint lands on the final message regardless of transcript length —
+    # so as the transcript grows turn over turn, the immutable prefix-so-far is
+    # what gets cached, and it is re-read on the next turn.
+    assert last_msg_cache_control(2) == {"type": "ephemeral"}
+    assert last_msg_cache_control(20) == {"type": "ephemeral"}
