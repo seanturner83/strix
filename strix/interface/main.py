@@ -1006,8 +1006,33 @@ def pull_docker_image() -> None:
     console.print()
 
 
+def _register_optional_addons() -> None:
+    """Register optional Strix addons that ship as separate packages.
+
+    The strix-code-graph addon (SCIP query tools + in-sandbox indexer) does NOT
+    self-register on import — its ``bootstrap.register()`` must be called
+    explicitly, and it early-returns unless ``STRIX_CODE_GRAPH`` is truthy. We
+    invoke it here rather than rely on entry-point auto-discovery, which this
+    fork does not implement. Fully guarded: a missing package (ImportError) or
+    any registration failure is logged and swallowed so the addon is strictly
+    additive — core Strix runs unchanged whether or not it's installed.
+    """
+    try:
+        from strix_code_graph.bootstrap import register as _register_code_graph
+    except ImportError:
+        return  # addon not installed — nothing to do
+    try:
+        _register_code_graph()
+    except Exception:  # noqa: BLE001 — an optional addon must never break startup
+        logging.getLogger(__name__).warning(
+            "strix-code-graph: register() raised; continuing without code graph",
+            exc_info=True,
+        )
+
+
 def main() -> None:
     configure_dependency_logging()
+    _register_optional_addons()
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
