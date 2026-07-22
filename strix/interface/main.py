@@ -541,6 +541,22 @@ Examples:
     )
 
     parser.add_argument(
+        "--scope-paths",
+        type=str,
+        help=(
+            "Explicit list of file paths (comma-separated, repo-root-relative) "
+            "to scope this scan to, bypassing the git-diff computation entirely. "
+            "When set, --diff-base is ignored and only the supplied paths are "
+            "considered analyzable. Useful when the caller has out-of-band "
+            "information about which paths matter — e.g. a CI workflow that "
+            "wants to scope a PR scan to only the files touched by non-bot "
+            "commits, excluding lockfile bumps and generated boilerplate. "
+            "Must be used with --scope-mode diff. Each path must exist in the "
+            "working tree; missing paths are filtered out with a warning."
+        ),
+    )
+
+    parser.add_argument(
         "--config",
         type=str,
         help="Path to a custom config file (JSON) to use instead of ~/.strix/cli-config.json",
@@ -973,6 +989,7 @@ def main() -> None:
                 local_sources=args.local_sources,
                 scope_mode=args.scope_mode,
                 diff_base=args.diff_base,
+                scope_paths=getattr(args, "scope_paths", None),
                 non_interactive=args.non_interactive,
             )
         except ValueError as e:
