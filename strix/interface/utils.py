@@ -932,6 +932,67 @@ def _should_activate_auto_scope(
     return False
 
 
+def _resolve_repo_explicit_paths(
+    source: dict[str, str], explicit_paths: list[str], env: dict[str, str]
+) -> RepoDiffScope:
+    """Build a RepoDiffScope from a caller-supplied path list, bypassing git diff.
+
+    Used when --scope-paths is set. Verifies each path exists in the working
+    tree (silently drops missing ones with a stderr warning). All supplied
+    paths land in analyzable_files; we don't split into added/modified
+    because the caller didn't tell us the per-path status. Renamed/deleted
+    are always empty in this mode — explicit-paths semantics is "scope to
+    these living files", not "rebuild a diff structure".
+
+    Existing scope-instruction code only consumes analyzable_files +
+    deleted_files for scoping, so the simplification is safe.
+    """
+    source_path = source.get("source_path", "")
+    workspace_subdir = source.get("workspace_subdir")
+    repo_path = Path(source_path)
+
+    if not _is_git_repo(repo_path):
+        raise ValueError(f"Source is not a git repository: {source_path}")
+
+    present: list[str] = []
+    missing: list[str] = []
+    for rel in explicit_paths:
+        # Defense: reject absolute / parent-traversal paths so a malicious
+        # caller can't escape the repo root. Mirrors the path-validation
+        # posture in the dispatch workflow.
+        if rel.startswith("/") or ".." in rel.split("/"):
+            missing.append(f"{rel} (rejected: absolute or parent-traversal)")
+            continue
+        if (repo_path / rel).exists():
+            present.append(rel)
+        else:
+            missing.append(rel)
+
+    if missing:
+        sys.stderr.write(
+            f"[scope-paths] dropped {len(missing)} missing/rejected path(s) for "
+            f"{source_path}: {missing[:5]}{'...' if len(missing) > 5 else ''}\n"
+        )
+
+    if not present:
+        raise ValueError(
+            f"--scope-paths resolved to zero existing files for {source_path}. "
+            f"Supplied {len(explicit_paths)} path(s), none found in working tree."
+        )
+
+    return RepoDiffScope(
+        source_path=source_path,
+        workspace_subdir=workspace_subdir,
+        base_ref="(explicit --scope-paths)",
+        merge_base="(explicit --scope-paths)",
+        added_files=[],
+        modified_files=present,
+        renamed_files=[],
+        deleted_files=[],
+        analyzable_files=present,
+    )
+
+
 def _resolve_repo_diff_scope(
     source: dict[str, str], diff_base: str | None, env: dict[str, str]
 ) -> RepoDiffScope:
@@ -1004,12 +1065,27 @@ def resolve_diff_scope_context(
     scope_mode: str,
     diff_base: str | None,
     non_interactive: bool,
+    scope_paths: str | None = None,
     env: dict[str, str] | None = None,
 ) -> DiffScopeResult:
     if scope_mode not in _SUPPORTED_SCOPE_MODES:
         raise ValueError(f"Unsupported scope mode: {scope_mode}")
 
     env_map = dict(os.environ if env is None else env)
+
+    # Explicit --scope-paths overrides the git-diff computation. Must be
+    # used with --scope-mode diff (the only mode where scoping is
+    # meaningful). For 'full', the supplied paths would be ignored anyway,
+    # so refuse early with a clear error. For 'auto', accept and treat
+    # like 'diff' since the caller has explicitly opted into scoping.
+    explicit_paths: list[str] = []
+    if scope_paths:
+        explicit_paths = [p.strip() for p in scope_paths.split(",") if p.strip()]
+        if scope_mode == "full":
+            raise ValueError(
+                "--scope-paths requires --scope-mode diff (or auto); "
+                "got --scope-mode full which disables scoping."
+            )
 
     if scope_mode == "full":
         return DiffScopeResult(
@@ -1018,7 +1094,7 @@ def resolve_diff_scope_context(
             metadata={"active": False, "mode": scope_mode},
         )
 
-    if scope_mode == "auto":
+    if scope_mode == "auto" and not explicit_paths:
         should_activate = _should_activate_auto_scope(local_sources, non_interactive, env_map)
         if not should_activate:
             return DiffScopeResult(
@@ -1041,7 +1117,10 @@ def resolve_diff_scope_context(
             skipped_non_git.append(source_path)
             continue
         try:
-            repo_scopes.append(_resolve_repo_diff_scope(source, diff_base, env_map))
+            if explicit_paths:
+                repo_scopes.append(_resolve_repo_explicit_paths(source, explicit_paths, env_map))
+            else:
+                repo_scopes.append(_resolve_repo_diff_scope(source, diff_base, env_map))
         except ValueError as e:
             if scope_mode == "auto":
                 skipped_diff_scope.append(f"{source_path} (diff-scope skipped: {e})")
