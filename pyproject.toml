@@ -51,8 +51,10 @@ dependencies = [
   # runner needs it so register()/the @function_tool query tools/the
   # session-setup callback load in the orchestrator; the sandbox image ALSO
   # installs it (for the in-container `python3 -m strix_code_graph.indexer`).
-  # Not on PyPI → git-pinned via [tool.uv.sources] below. Dormant unless
-  # STRIX_CODE_GRAPH=1 (it early-returns in register()), so a core dep is safe.
+  # Not on PyPI → SHA-pinned via [tool.uv.sources] below (Strix asks addons be
+  # pinned). Default-ON in register(); opt-OUT via STRIX_CODE_GRAPH=0. Safe as a
+  # core dep — it only activates when the SCIP sandbox image + toolchain are
+  # present, and degrades cleanly otherwise.
   "strix-code-graph",
 ]
 
@@ -61,7 +63,7 @@ vertex = ["google-auth>=2.0.0"]
 bedrock = ["boto3>=1.28.0"]
 
 [tool.uv.sources]
-strix-code-graph = { git = "https://github.com/seanturner83/strix-code-graph.git", rev = "c2e9ee460f989d91d83b1efcb63888a65d5e1dda" }
+strix-code-graph = { git = "https://github.com/seanturner83/strix-code-graph.git", rev = "aa7fc234afab9338ee641e08af2a4a89c571fc66" }
 
 [project.scripts]
 strix = "strix.interface.main:main"
