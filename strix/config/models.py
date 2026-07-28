@@ -170,6 +170,13 @@ def _configure_litellm_compatibility() -> None:
 
     _apply_strict_patch()
 
+    # A truncated tool-call arguments blob (Claude hitting the output ceiling
+    # mid-tool-call) otherwise aborts the whole run when litellm re-serializes
+    # message history to Bedrock on the next turn. Degrade to empty-args instead.
+    from strix.config.litellm_bedrock_toolcall_repair_patch import apply as _apply_toolcall_repair
+
+    _apply_toolcall_repair()
+
     _register_litellm_cost_callback()
 
 
