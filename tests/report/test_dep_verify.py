@@ -1,12 +1,13 @@
-"""Deterministic dependency version-range verify (OSV-backed).
+"""Deterministic dependency version-range verify (provider-pluggable, OSV default).
 
 Load-bearing behaviours (a SAFE FP reducer for dep-CVE findings):
-  1. In-range -> emit (real). OSV lists the CVE for the installed version.
-  2. Out-of-range -> REJECT. OSV knows advisories for the version but NOT the
+  1. In-range -> emit (real). Provider lists the CVE for the installed version.
+  2. Out-of-range -> REJECT. Provider knows advisories for the version but NOT the
      cited CVE (installed version outside the range / mis-attributed).
-  3. Fail-open everywhere: OSV empty (coverage gap), OSV error/non-200, missing
-     fields, non-CVE/GHSA id, unknown ecosystem -> emit (None). Never suppress a
-     real dep finding on uncertainty.
+  3. Fail-open everywhere: provider can't answer (None), empty set (coverage gap),
+     missing fields, non-CVE/GHSA id, unknown ecosystem, disabled provider -> emit.
+     Never suppress a real dep finding on uncertainty.
+  4. Provider-pluggable: OSV default, custom URL for mirrors, 'none' disables.
 """
 
 from __future__ import annotations
@@ -21,77 +22,70 @@ def _cand(**kw):
     return base
 
 
-class _Resp:
-    def __init__(self, status, vulns):
-        self.status_code = status
-        self._vulns = vulns
+class _FakeProvider:
+    """Returns a fixed affecting-set (or None for can't-answer)."""
+    def __init__(self, affecting):
+        self._a = affecting
 
-    def json(self):
-        return {"vulns": self._vulns}
-
-
-def _patch_osv(monkeypatch, resp):
-    import requests
-    monkeypatch.setattr(requests, "post", lambda *a, **k: resp)
+    def affecting(self, pkg, ecosystem, version):
+        return self._a
 
 
-def test_in_range_emits(monkeypatch):
-    # OSV lists the cited CVE as affecting this version -> real, emit (None).
-    _patch_osv(monkeypatch, _Resp(200, [{"id": "GHSA-x", "aliases": ["CVE-2021-23337"]}]))
-    assert dv.verify_dependency(_cand()) is None
+def _prov(affecting):
+    return _FakeProvider(affecting)
 
 
-def test_out_of_range_rejects(monkeypatch):
-    # OSV knows advisories for this version but NOT the cited CVE -> out of range.
-    _patch_osv(monkeypatch, _Resp(200, [{"id": "GHSA-other", "aliases": ["CVE-2020-0000"]}]))
-    out = dv.verify_dependency(_cand())
+# --- verdict logic (explicit provider, no network) ---
+
+def test_in_range_emits():
+    # provider lists the cited CVE as affecting this version -> real, emit.
+    assert dv.verify_dependency(_cand(), _prov({"GHSA-X", "CVE-2021-23337"})) is None
+
+
+def test_out_of_range_rejects():
+    # provider knows advisories for this version but NOT the cited CVE -> out of range.
+    out = dv.verify_dependency(_cand(), _prov({"GHSA-OTHER", "CVE-2020-0000"}))
     assert out is not None
     assert out["verify_rejected"] is True
     assert out["dep_version_out_of_range"] is True
     assert "CVE-2021-23337" in out["error"]
 
 
-def test_osv_empty_fails_open(monkeypatch):
-    # No advisories at all for this package@version -> coverage gap, emit.
-    _patch_osv(monkeypatch, _Resp(200, []))
-    assert dv.verify_dependency(_cand()) is None
+def test_empty_set_fails_open():
+    # definitive "no advisories affect this version" -> coverage-gap risk -> emit.
+    assert dv.verify_dependency(_cand(), _prov(set())) is None
 
 
-def test_osv_non200_fails_open(monkeypatch):
-    _patch_osv(monkeypatch, _Resp(503, []))
-    assert dv.verify_dependency(_cand()) is None
+def test_provider_cant_answer_fails_open():
+    # None = unreachable/error/not-covered -> emit.
+    assert dv.verify_dependency(_cand(), _prov(None)) is None
 
 
-def test_osv_error_fails_open(monkeypatch):
-    import requests
-    def _boom(*a, **k): raise requests.RequestException("timeout")
-    monkeypatch.setattr(requests, "post", _boom)
-    assert dv.verify_dependency(_cand()) is None
+def test_matches_via_alias_or_id():
+    assert dv.verify_dependency(_cand(cve="", ghsa="GHSA-JF85-CPCP-J695"),
+                                _prov({"GHSA-JF85-CPCP-J695"})) is None
 
 
-def test_matches_via_alias_or_id(monkeypatch):
-    # cited a GHSA; OSV advisory keyed by GHSA id directly -> in range, emit.
-    _patch_osv(monkeypatch, _Resp(200, [{"id": "GHSA-jf85-cpcp-j695"}]))
-    assert dv.verify_dependency(_cand(cve="", ghsa="GHSA-jf85-cpcp-j695")) is None
-
-
-def test_missing_fields_emit(monkeypatch):
-    # any missing field -> can't make a definitive call -> emit (no OSV call needed)
+def test_missing_fields_emit():
     for miss in ("cve", "package_name", "installed_version", "package_ecosystem"):
         c = _cand(); c[miss] = ""
         if miss == "cve":
             c["ghsa"] = ""
-        assert dv.verify_dependency(c) is None, miss
+        # provider that WOULD reject, to prove the guard short-circuits before it
+        assert dv.verify_dependency(c, _prov({"CVE-9999-0000"})) is None, miss
 
 
-def test_unknown_ecosystem_emits(monkeypatch):
-    assert dv.verify_dependency(_cand(package_ecosystem="cocoapods-weird")) is None
+def test_unknown_ecosystem_emits():
+    assert dv.verify_dependency(_cand(package_ecosystem="cocoapods-weird"),
+                                _prov({"CVE-9999-0000"})) is None
 
 
-def test_non_cve_identifier_emits(monkeypatch):
-    # vendor-specific id (not CVE/GHSA) isn't OSV-resolvable -> emit
-    assert dv.verify_dependency(_cand(cve="RUSTSEC-2021-0001")) is None
+def test_non_cve_identifier_emits():
+    assert dv.verify_dependency(_cand(cve="RUSTSEC-2021-0001"),
+                                _prov({"CVE-9999-0000"})) is None
 
+
+# --- ecosystem normalisation ---
 
 def test_ecosystem_normalization():
     assert dv._norm_ecosystem("PyPI") == "PyPI"
@@ -99,3 +93,62 @@ def test_ecosystem_normalization():
     assert dv._norm_ecosystem("golang") == "Go"
     assert dv._norm_ecosystem("node") == "npm"
     assert dv._norm_ecosystem("bogus") is None
+
+
+# --- provider resolution (the pluggable toggle) ---
+
+class _S:
+    def __init__(self, provider="osv", osv_url="https://api.osv.dev/v1/query"):
+        self.provider = provider
+        self.osv_url = osv_url
+
+
+def test_resolve_provider_osv_default():
+    p = dv._resolve_provider(_S())
+    assert isinstance(p, dv.OsvProvider)
+    assert p.url == "https://api.osv.dev/v1/query"
+
+
+def test_resolve_provider_custom_mirror_url():
+    p = dv._resolve_provider(_S(osv_url="https://osv.internal.corp/v1/query"))
+    assert isinstance(p, dv.OsvProvider)
+    assert p.url == "https://osv.internal.corp/v1/query"
+
+
+def test_resolve_provider_none_disables():
+    assert dv._resolve_provider(_S(provider="none")) is None
+    assert dv._resolve_provider(_S(provider="")) is None
+
+
+def test_resolve_provider_unknown_disables():
+    assert dv._resolve_provider(_S(provider="snyk")) is None
+
+
+def test_osv_provider_parses_query(monkeypatch):
+    # OsvProvider.affecting: mock requests.post, assert it flattens ids+aliases.
+    import requests
+
+    class _R:
+        status_code = 200
+        def json(self):
+            return {"vulns": [{"id": "GHSA-a", "aliases": ["CVE-2021-23337"]},
+                              {"id": "GHSA-b"}]}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _R())
+    got = dv.OsvProvider("https://api.osv.dev/v1/query").affecting("lodash", "npm", "4.17.20")
+    assert got == {"GHSA-A", "CVE-2021-23337", "GHSA-B"}
+
+
+def test_osv_provider_non200_returns_none(monkeypatch):
+    import requests
+    class _R:
+        status_code = 503
+        def json(self): return {}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _R())
+    assert dv.OsvProvider("u").affecting("p", "npm", "1.0") is None
+
+
+def test_osv_provider_error_returns_none(monkeypatch):
+    import requests
+    def _boom(*a, **k): raise requests.RequestException("timeout")
+    monkeypatch.setattr(requests, "post", _boom)
+    assert dv.OsvProvider("u").affecting("p", "npm", "1.0") is None

@@ -831,11 +831,12 @@ async def _do_create_dependency(  # noqa: PLR0912
             }
 
         # Deterministic version-range verify (the dep-CVE sibling of the code-sink
-        # verify pass). OFF unless STRIX_VERIFY=1; fail-open — only rejects when
-        # OSV.dev proves the installed version is OUT of the cited CVE's range.
-        # No LLM: a dep-CVE FP is a factual version-range question.
+        # verify pass). Its OWN toggle STRIX_DEP_VERIFY (default off), independent
+        # of the LLM verifier — a dep-CVE FP is a factual version-range question,
+        # no LLM. Provider-pluggable (OSV default). Fail-open: only rejects when the
+        # provider proves the installed version is OUT of the cited CVE's range.
         from strix.config import load_settings
-        if load_settings().verify.enabled:
+        if load_settings().dep_verify.enabled:
             from strix.report.dep_verify import verify_dependency
 
             dep_verdict = verify_dependency({

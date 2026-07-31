@@ -150,6 +150,34 @@ class VerifySettings(BaseSettings):
     api_base: str | None = Field(default=None, alias="VERIFY_LLM_API_BASE")
 
 
+class DepVerifySettings(BaseSettings):
+    """Deterministic dependency version-range verify (report/dep_verify.py).
+
+    A dependency-CVE false positive is a FACTUAL question — is the installed
+    version actually in the advisory's affected range? — not the code-reachability
+    reasoning the LLM verify pass does. So it's a separate, deterministic check
+    (no LLM) with its OWN toggle: a user may want the cheap version-range check
+    without the LLM verifier, or vice versa.
+
+    PROVIDER-PLUGGABLE (Strix is global FOSS — not everyone can/will call a
+    hosted advisory API: air-gapped scans, data-residency rules, orgs with their
+    own advisory DB). `provider` selects the source:
+      "osv"  -> query an OSV-schema API (default https://api.osv.dev, override
+                `osv_url` for a self-hosted OSV mirror — same /v1/query contract).
+      "none" -> disabled (also the effect of enabled=False).
+    OFF by default; fail-open (any uncertainty emits the finding).
+    """
+
+    model_config = _BASE_CONFIG
+
+    enabled: bool = Field(default=False, alias="STRIX_DEP_VERIFY")
+    provider: str = Field(default="osv", alias="STRIX_DEP_VERIFY_PROVIDER")
+    # OSV-schema endpoint. Point at a self-hosted OSV mirror for air-gapped /
+    # data-residency deployments (the /v1/query request+response contract is
+    # identical, so no code changes — just the URL).
+    osv_url: str = Field(default="https://api.osv.dev/v1/query", alias="STRIX_OSV_URL")
+
+
 class ContextSettings(BaseSettings):
     """Context-window management: per-tool-output caps and history compaction."""
 
@@ -214,6 +242,7 @@ class Settings(BaseSettings):
     llm: LlmSettings = Field(default_factory=LlmSettings)
     dedupe: DedupeSettings = Field(default_factory=DedupeSettings)
     verify: VerifySettings = Field(default_factory=VerifySettings)
+    dep_verify: DepVerifySettings = Field(default_factory=DepVerifySettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
