@@ -111,6 +111,45 @@ class DedupeSettings(BaseSettings):
     api_base: str | None = Field(default=None, alias="DEDUPE_LLM_API_BASE")
 
 
+class VerifySettings(BaseSettings):
+    """In-scan verify-before-emit pass (report/verify.py).
+
+    A per-finding adjudication that fires right before a report is persisted (a
+    sibling of the dedup-reject): re-derive the source->sink chain from the
+    reported code + PoC and decide REAL vs FALSE_POSITIVE. Cuts the confident-but-
+    wrong FP class that the report-tool's prompt-level "only file verified findings"
+    guard can't (measured on the VLB corpus: verification moves the ROC curve;
+    wording only slides the operating point). OFF by default — opt-in, since it
+    adds one bounded LLM call per candidate finding.
+
+    Safety: only a FALSE_POSITIVE verdict with confidence >= min_confidence rejects
+    the report; REAL / uncertain / any error emits the finding (fail-open — a
+    verifier miss must never suppress a real finding). min_severity avoids spending
+    the call on low-severity noise; the strong classes (high/critical) are where a
+    wrong emit costs the most and where verification pays off.
+    """
+
+    model_config = _BASE_CONFIG
+
+    enabled: bool = Field(default=False, alias="STRIX_VERIFY")
+    # Own cheap-model role — verification is a bounded re-derivation, not a deep
+    # pentest. Falls back to STRIX_LLM_DEDUP then the base model (dedupe and verify
+    # are the same "cheap bounded classifier" tier).
+    model: str | None = Field(default=None, alias="STRIX_VERIFY_MODEL")
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None, alias="STRIX_VERIFY_REASONING_EFFORT"
+    )
+    # Only verify findings at or above this severity (crit>high>medium>low>info).
+    # Default high: the confident-but-wrong FP tail that hurts is concentrated in
+    # the high/crit grades a scanner over-claims.
+    min_severity: str = Field(default="high", alias="STRIX_VERIFY_MIN_SEVERITY")
+    # A FALSE_POSITIVE below this confidence does NOT reject (asymmetric: hold on
+    # doubt — never suppress a possible-real finding).
+    min_confidence: float = Field(default=0.7, ge=0.0, le=1.0, alias="STRIX_VERIFY_MIN_CONFIDENCE")
+    api_key: str | None = Field(default=None, alias="VERIFY_LLM_API_KEY")
+    api_base: str | None = Field(default=None, alias="VERIFY_LLM_API_BASE")
+
+
 class ContextSettings(BaseSettings):
     """Context-window management: per-tool-output caps and history compaction."""
 
@@ -174,6 +213,7 @@ class Settings(BaseSettings):
 
     llm: LlmSettings = Field(default_factory=LlmSettings)
     dedupe: DedupeSettings = Field(default_factory=DedupeSettings)
+    verify: VerifySettings = Field(default_factory=VerifySettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)

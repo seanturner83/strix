@@ -280,6 +280,16 @@ async def _do_create(  # noqa: PLR0912
                 "reason": dedupe.get("reason", ""),
             }
 
+        # In-scan verify-before-emit pass (sibling of the dedup-reject above,
+        # same chokepoint). OFF unless STRIX_VERIFY=1; fail-open — only a
+        # confident FALSE_POSITIVE returns a reject dict, everything else is None
+        # and the finding is persisted below. Never suppresses a real finding.
+        from strix.report.verify import verify_finding
+
+        verdict = await verify_finding(candidate, severity)
+        if verdict is not None:
+            return verdict
+
         report_id = report_state.add_vulnerability_report(
             title=title,
             description=description,
