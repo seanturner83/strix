@@ -276,6 +276,14 @@ def _configure_litellm_compatibility() -> None:
     litellm.disable_streaming_logging = False
     litellm.suppress_debug_info = True
 
+    # Register Claude-5-family models (sonnet-5/opus-5) in litellm's cost map so
+    # the #772 supports_prompt_caching gate lets caching through — litellm 1.90.1
+    # doesn't map them yet, so without this they run UNCACHED (rebase regression
+    # vs the 1.2 fork). Must run before make_model_settings reads the map.
+    from strix.config.litellm_costmap_patch import apply as _apply_costmap
+
+    _apply_costmap()
+
     # litellm keeps the OpenAI `strict` tool field for Claude-on-Bedrock, but
     # the Bedrock Converse API rejects it (tools.0.custom.strict: Extra inputs
     # are not permitted) → every tool-calling scan against bedrock/*claude* 400s.
