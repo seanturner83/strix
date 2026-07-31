@@ -830,6 +830,24 @@ async def _do_create_dependency(  # noqa: PLR0912
                 "reason": dedupe.get("reason", ""),
             }
 
+        # Deterministic version-range verify (the dep-CVE sibling of the code-sink
+        # verify pass). OFF unless STRIX_VERIFY=1; fail-open — only rejects when
+        # OSV.dev proves the installed version is OUT of the cited CVE's range.
+        # No LLM: a dep-CVE FP is a factual version-range question.
+        from strix.config import load_settings
+        if load_settings().verify.enabled:
+            from strix.report.dep_verify import verify_dependency
+
+            dep_verdict = verify_dependency({
+                "cve": parsed_cve, "package_name": package_name,
+                "installed_version": installed_version,
+                "package_ecosystem": package_ecosystem,
+            })
+            if dep_verdict is not None:
+                logger.info("dep-verify rejected %s %s@%s (out of range)",
+                            parsed_cve, package_name, installed_version)
+                return dep_verdict
+
         report_id = report_state.add_vulnerability_report(
             title=title,
             description=description,
