@@ -24,6 +24,9 @@ from strix.core import execution as ex
 class _FakeCoordinator:
     def __init__(self) -> None:
         self.status = "running"
+        # rebase 1.2->1.4: run_agent_loop also reads coordinator.reserve_stopped
+        # (sub-agent budget reserve, #893) — mirror the real coordinator surface.
+        self.reserve_stopped = False
         # v1.1 budget gate: run_agent_loop reads coordinator.budget_stopped at
         # the top of every iteration (max_budget_usd feature). The fake must
         # expose it (False = never budget-stopped in these tests).
@@ -48,7 +51,10 @@ def _stub_loop_helpers(monkeypatch):
 
     monkeypatch.setattr(ex, "_agent_status", _status)
     monkeypatch.setattr(ex, "_append_noninteractive_tool_required_message", _noop)
-    monkeypatch.setattr(ex, "_notify_parent_on_crash", _noop)
+    # rebase 1.2->1.4: upstream renamed _notify_parent_on_crash ->
+    # _notify_parent_on_terminal(coordinator, agent_id, status) (wake-parent-on-
+    # terminal-state refactor, #082d4ae).
+    monkeypatch.setattr(ex, "_notify_parent_on_terminal", _noop)
 
 
 async def _run(coordinator, run_config):
