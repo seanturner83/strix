@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -93,18 +94,41 @@ async def create_or_reuse(
     # agent-browser CDP daemon's localhost traffic from looping back
     # through Caido.
     container_caido_url = f"http://127.0.0.1:{_CONTAINER_CAIDO_PORT}"
+    container_env = {
+        "PYTHONUNBUFFERED": "1",
+        "HOST_GATEWAY": "host.docker.internal",
+        "http_proxy": container_caido_url,
+        "https_proxy": container_caido_url,
+        "ALL_PROXY": container_caido_url,
+        "NO_PROXY": "localhost,127.0.0.1",
+    }
+    # SEC-6848: forward Go/NPM module-resolution env into the sandbox at
+    # container-create time. The SCIP code-graph indexer runs IN-container via
+    # session.exec(), which has NO env= kwarg — so vars the CI sets on the
+    # RUNNER (GOPROXY -> go.infra.0hash.com, etc.) never reach scip-go's
+    # go/packages type-check. Without them, private github.com/seedcx/* modules
+    # don't resolve -> empty SCIP index, exit 0, silently swallowed -> Go
+    # findings land location-less. The container Environment IS injected at
+    # create (resolved in DockerSandboxClient._create_container), so setting
+    # them here is the one channel that crosses the boundary. Re-homes the
+    # forwarding that lived in the pre-v1 docker_runtime.py (commit 9c0c37d,
+    # dropped in the v1.x runtime rewrite). Only forwards vars actually present
+    # in the orchestrator env (which inherits the CI's $GITHUB_ENV exports), so
+    # a non-CI / no-proxy run is unchanged.
+    _forwarded = {}
+    for _var in ("GOPROXY", "GOSUMDB", "GOPRIVATE", "GOFLAGS", "GONOSUMCHECK", "STRIX_GO_MODCACHE"):
+        _val = os.environ.get(_var, "").strip()
+        if _val:
+            container_env[_var] = _val
+            _forwarded[_var] = _val
+    logger.info(
+        "code_graph: forwarding %d Go env var(s) into sandbox: %s",
+        len(_forwarded),
+        ", ".join(f"{k}={v}" for k, v in _forwarded.items()) or "(none present in orchestrator env)",
+    )
     manifest = Manifest(
         entries=entries,
-        environment=Environment(
-            value={
-                "PYTHONUNBUFFERED": "1",
-                "HOST_GATEWAY": "host.docker.internal",
-                "http_proxy": container_caido_url,
-                "https_proxy": container_caido_url,
-                "ALL_PROXY": container_caido_url,
-                "NO_PROXY": "localhost,127.0.0.1",
-            },
-        ),
+        environment=Environment(value=container_env),
     )
 
     backend_name = load_settings().runtime.backend
