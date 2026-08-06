@@ -115,10 +115,17 @@ async def create_or_reuse(
     # dropped in the v1.x runtime rewrite). Only forwards vars actually present
     # in the orchestrator env (which inherits the CI's $GITHUB_ENV exports), so
     # a non-CI / no-proxy run is unchanged.
+    _forwarded = {}
     for _var in ("GOPROXY", "GOSUMDB", "GOPRIVATE", "GOFLAGS", "GONOSUMCHECK", "STRIX_GO_MODCACHE"):
         _val = os.environ.get(_var, "").strip()
         if _val:
             container_env[_var] = _val
+            _forwarded[_var] = _val
+    logger.info(
+        "code_graph: forwarding %d Go env var(s) into sandbox: %s",
+        len(_forwarded),
+        ", ".join(f"{k}={v}" for k, v in _forwarded.items()) or "(none present in orchestrator env)",
+    )
     manifest = Manifest(
         entries=entries,
         environment=Environment(value=container_env),
