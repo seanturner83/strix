@@ -155,6 +155,101 @@ _REQUIRED_FIELDS = {
 _VALID_FIX_EFFORT = frozenset({"trivial", "low", "medium", "high"})
 
 
+# Agents were observed calling this tool with dummy content to check the tool
+# WORKS before using it for real — a "transport check". Observed live on
+# zh-global-infrastructure#16850: a HIGH / CVSS 7.7 report titled "Test title
+# placeholder", description "Test description placeholder for transport check.",
+# poc_script_code "echo test", target
+# infrastructure/ep3-prd/aws/us-east-2/main/cluster1/platform/aws-auth/terragrunt.hcl.
+# It passed every gate (all fields non-empty, CVSS vector syntactically valid),
+# reached the PR gate as a genuine HIGH finding on a production IAM auth file, and
+# had to be dismissed by hand.
+#
+# There is no legitimate reason to smoke-test this tool: it is exercised by the
+# test suite on every commit, and a probe costs a reviewer real time because
+# `aws-auth/terragrunt.hcl` looks like a plausible target. So SUPPRESS the
+# behaviour rather than sanctioning a test path — a sanctioned path would
+# institutionalise a call with no purpose and still emit something a downstream
+# consumer has to filter.
+#
+# Matched on placeholder IDIOMS, not the bare word "test": a real finding can
+# legitimately say "the test suite lacks coverage for this path" or target
+# `internal/testutil/harness.go`. Every phrase below is one that cannot appear in
+# a genuine report written about real code.
+_PLACEHOLDER_MARKERS = (
+    "placeholder",
+    "transport check",
+    "lorem ipsum",
+    "test title",
+    "test description",
+    "test impact",
+    "test analysis",
+    "test remediation",
+    "test poc",
+    "your title here",
+    "todo",
+    "fixme",
+    "tbd",
+    "xxx",
+    "foo bar",
+    "asdf",
+)
+
+# Short fields where an exact dummy value is unambiguous. Checked with equality
+# rather than substring so a real one-line PoC is never rejected.
+_PLACEHOLDER_EXACT = frozenset(
+    {
+        "test",
+        "n/a",
+        "na",
+        "none",
+        "-",
+        "echo test",
+        "echo hello",
+        "true",
+        "string",
+        "example",
+    }
+)
+
+_PLACEHOLDER_MSG = (
+    "This report looks like a TOOL TEST, not a finding: {hits}. "
+    "create_vulnerability_report needs no smoke test — it is covered by the test "
+    "suite and is known to work. Do NOT submit placeholder, dummy or "
+    "'transport check' content: a probe emits a real severity-rated finding into "
+    "the PR gate and someone has to dismiss it by hand. "
+    "If you have a genuine vulnerability, resubmit with the actual title, "
+    "description, impact, analysis, PoC and remediation derived from the code you "
+    "read. If you do not have one, submit nothing — that is a valid outcome."
+)
+
+
+def _detect_placeholder(fields: dict[str, Any]) -> list[str]:
+    """Field names carrying obvious test/dummy content, with what matched.
+
+    Deliberately deterministic rather than delegated to the STRIX_VERIFY pass:
+    that verifier is fail-open and asymmetric (only a FALSE_POSITIVE verdict at
+    or above min_confidence suppresses, default 0.8) and gated on min_severity,
+    so placeholder suppression there would be probabilistic and would skip
+    anything below HIGH. A string comparison is free and certain, and it fails in
+    the safe direction — real findings do not contain these phrases.
+    """
+    hits: list[str] = []
+    for name in _REQUIRED_FIELDS:
+        raw = str(fields.get(name) or "").strip()
+        if not raw:
+            continue  # the empty-field check above already reports this
+        low = raw.lower()
+        if low in _PLACEHOLDER_EXACT:
+            hits.append(f"{name}={raw!r}")
+            continue
+        for marker in _PLACEHOLDER_MARKERS:
+            if marker in low:
+                hits.append(f"{name} contains {marker!r}")
+                break
+    return hits
+
+
 async def _do_create(  # noqa: PLR0912
     *,
     title: str,
@@ -194,6 +289,13 @@ async def _do_create(  # noqa: PLR0912
     for name, msg in _REQUIRED_FIELDS.items():
         if not str(fields.get(name) or "").strip():
             errors.append(msg)
+
+    # Non-empty is not the same as meaningful. "Test title placeholder" satisfies
+    # every check above; this catches the tool-test probe before it becomes a
+    # severity-rated finding in the PR gate.
+    placeholder_hits = _detect_placeholder(fields)
+    if placeholder_hits:
+        errors.append(_PLACEHOLDER_MSG.format(hits=", ".join(placeholder_hits[:6])))
 
     fix_effort = (fix_effort or "").strip().lower()
     if fix_effort not in _VALID_FIX_EFFORT:

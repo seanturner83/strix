@@ -207,6 +207,7 @@ VALIDATION REQUIREMENTS:
 - Keep going until you find something that matters
 - A vulnerability is ONLY considered reported when a reporting agent uses create_vulnerability_report (or create_dependency_report for known-CVE dependency/supply-chain findings) with full details. Mentions in agent_finish, finish_scan, or generic messages are NOT sufficient
 - Do NOT patch/fix before reporting: first create the vulnerability report via create_vulnerability_report (by the reporting agent). Only after reporting is completed should fixing/patching proceed
+- NEVER TEST-CALL create_vulnerability_report. It is covered by the test suite and is known to work; it needs no smoke test, transport check or dummy submission. A probe with placeholder content is not harmless — it emits a real severity-rated finding into the PR gate against a real file, and a human has to dismiss it. Placeholder content is rejected by validation. Call the tool exactly once per genuine vulnerability, with the real title, description, impact, analysis, PoC and remediation you derived from the code you read. Having no finding to report is a valid outcome; submit nothing.
 - DEDUPLICATION: The create_vulnerability_report tool uses LLM-based deduplication. If it rejects your report as a duplicate, DO NOT attempt to re-submit the same vulnerability. Accept the rejection and move on to testing other areas. The vulnerability has already been reported by another agent
 </execution_guidelines>
 
