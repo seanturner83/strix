@@ -2483,7 +2483,7 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.0" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "rich" },
-    { name = "strix-code-graph", git = "https://github.com/seanturner83/strix-code-graph.git?rev=aa7fc234afab9338ee641e08af2a4a89c571fc66" },
+    { name = "strix-code-graph", git = "https://github.com/seanturner83/strix-code-graph.git?rev=d00832c23330016259f3fa1588841db137ee9cf1" },
     { name = "textual", specifier = ">=6.0.0" },
 ]
 provides-extras = ["vertex", "bedrock"]
@@ -2503,7 +2503,7 @@ dev = [
 [[package]]
 name = "strix-code-graph"
 version = "0.1.0"
-source = { git = "https://github.com/seanturner83/strix-code-graph.git?rev=aa7fc234afab9338ee641e08af2a4a89c571fc66#aa7fc234afab9338ee641e08af2a4a89c571fc66" }
+source = { git = "https://github.com/seanturner83/strix-code-graph.git?rev=d00832c23330016259f3fa1588841db137ee9cf1#d00832c23330016259f3fa1588841db137ee9cf1" }
 dependencies = [
     { name = "protobuf" },
     { name = "strix-agent" },

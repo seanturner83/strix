@@ -65,7 +65,7 @@ vertex = ["google-auth>=2.0.0"]
 bedrock = ["boto3>=1.28.0"]
 
 [tool.uv.sources]
-strix-code-graph = { git = "https://github.com/seanturner83/strix-code-graph.git", rev = "aa7fc234afab9338ee641e08af2a4a89c571fc66" }
+strix-code-graph = { git = "https://github.com/seanturner83/strix-code-graph.git", rev = "d00832c23330016259f3fa1588841db137ee9cf1" }
 
 [project.scripts]
 strix = "strix.interface.main:main"
