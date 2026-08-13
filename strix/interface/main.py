@@ -309,6 +309,70 @@ def _subscription_error_hint(exc: BaseException) -> str | None:
     return None
 
 
+async def _warm_up_probe(model: Any, model_settings: Any, *, timeout: float | None) -> None:
+    """Fire the warm-up connectivity probe, retrying transient provider errors.
+
+    SEC-7400: warm_up_llm() is a startup connectivity check that runs BEFORE the
+    agent loop. Its ``get_response`` probe was a SINGLE bare call — a transient
+    Bedrock 5xx here (ServiceUnavailable / internalServerException, frequent on
+    Opus 4.8) fell straight through to ``sys.exit(1)`` with "LLM CONNECTION
+    FAILED", killing the whole scan before the runtime retry budget
+    (``DEFAULT_MODEL_RETRY`` / ``run_agent_loop``) could ever engage. Observed:
+    protoc-lint-data-classification#4 (2026-08-13) died in 13.8s on iteration 1;
+    a re-dispatch of the SAME sha cleared it.
+
+    Reuse the runtime loop's OWN transient classifier + backoff
+    (``_is_transient_model_error`` / ``_transient_model_retry_delay`` in
+    core.execution) so warm-up rides out the same blips the scan itself tolerates
+    and stays in lockstep with it — a real config/auth error (non-transient) is
+    NOT retried and still fails fast.
+    """
+    # Imported here (not module-top) to keep the classifier in lockstep with the
+    # runtime loop without widening main.py's import-time surface.
+    from strix.core.execution import (
+        _MAX_TRANSIENT_MODEL_RETRIES,
+        _is_transient_model_error,
+        _transient_model_retry_delay,
+    )
+
+    attempt = 0
+    while True:
+        try:
+            await asyncio.wait_for(
+                model.get_response(
+                    system_instructions="You are a helpful assistant.",
+                    input="Reply with just 'OK'.",
+                    model_settings=model_settings,
+                    tools=[],
+                    output_schema=None,
+                    handoffs=[],
+                    tracing=ModelTracing.DISABLED,
+                    previous_response_id=None,
+                    conversation_id=None,
+                    prompt=None,
+                ),
+                timeout=timeout,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            # asyncio.wait_for raises TimeoutError on the outer deadline; treat it
+            # like the runtime loop treats APITimeoutError — a transient worth one
+            # more shot within the budget.
+            transient = _is_transient_model_error(exc) or isinstance(exc, asyncio.TimeoutError)
+            if attempt >= _MAX_TRANSIENT_MODEL_RETRIES or not transient:
+                raise
+            attempt += 1
+            delay = _transient_model_retry_delay(attempt)
+            logger.warning(
+                "warm-up: transient model/provider error (attempt %d/%d, backoff %.1fs): %r",
+                attempt,
+                _MAX_TRANSIENT_MODEL_RETRIES,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+
+
 async def warm_up_llm(show_model_warning: bool = True) -> None:
     console = Console()
     logger.info("Warming up LLM connection")
@@ -378,21 +442,7 @@ async def warm_up_llm(show_model_warning: bool = True) -> None:
             )
 
         model = StrixProvider().get_model(raw_model)
-        await asyncio.wait_for(
-            model.get_response(
-                system_instructions="You are a helpful assistant.",
-                input="Reply with just 'OK'.",
-                model_settings=ModelSettings(),
-                tools=[],
-                output_schema=None,
-                handoffs=[],
-                tracing=ModelTracing.DISABLED,
-                previous_response_id=None,
-                conversation_id=None,
-                prompt=None,
-            ),
-            timeout=llm.timeout,
-        )
+        await _warm_up_probe(model, ModelSettings(), timeout=llm.timeout)
         logger.info("LLM warm-up succeeded for model %s", (llm.model or "").strip())
 
         if settings.dedupe.model:
@@ -405,21 +455,7 @@ async def warm_up_llm(show_model_warning: bool = True) -> None:
             # separate-provider dedupe model authenticates during warm-up too.
             deduper_extra = _dedupe_extra_args(settings.dedupe)
             deduper_settings = ModelSettings(extra_args=deduper_extra or None)
-            await asyncio.wait_for(
-                deduper.get_response(
-                    system_instructions="You are a helpful assistant.",
-                    input="Reply with just 'OK'.",
-                    model_settings=deduper_settings,
-                    tools=[],
-                    output_schema=None,
-                    handoffs=[],
-                    tracing=ModelTracing.DISABLED,
-                    previous_response_id=None,
-                    conversation_id=None,
-                    prompt=None,
-                ),
-                timeout=llm.timeout,
-            )
+            await _warm_up_probe(deduper, deduper_settings, timeout=llm.timeout)
             logger.info("LLM warm-up succeeded for dedupe model %s", dedupe_model)
 
     except Exception as e:
