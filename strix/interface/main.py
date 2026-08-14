@@ -31,7 +31,7 @@ from strix.config.models import (
     is_known_openai_bare_model,
     is_recommended_or_frontier_model,
 )
-from strix.core.inputs import DEFAULT_MAX_TURNS
+from strix.core.inputs import resolve_default_max_turns
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.interface.cli import run_cli
 from strix.interface.tui import run_tui
@@ -679,10 +679,11 @@ Examples:
         dest="max_turns",
         metavar="N",
         type=_positive_int,
-        default=DEFAULT_MAX_TURNS,
+        default=resolve_default_max_turns(),
         help=(
             "Maximum turns per agent (> 0, default %(default)s). Each agent is force-stopped "
-            "when it reaches this limit, with graduated wrap-up warnings as it is approached."
+            "when it reaches this limit, with graduated wrap-up warnings as it is approached. "
+            "Default resolves from the STRIX_MAX_ITERATIONS env var when set, else 500."
         ),
     )
 

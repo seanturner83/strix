@@ -213,6 +213,21 @@ class RuntimeSettings(BaseSettings):
     max_local_copy_mb: int = Field(default=1024, alias="STRIX_MAX_LOCAL_COPY_MB")
     # Max screenshot/image tool outputs kept live per agent context (0 = none).
     max_context_images: int = Field(default=3, ge=0, alias="STRIX_MAX_CONTEXT_IMAGES")
+    # Per-agent turn-cap override, sourced from the pre-v1.x env var name for
+    # back-compat with fleet callers that never migrated. Before the v1.x
+    # SDK-harness rewrite, STRIX_MAX_ITERATIONS directly set the agent turn
+    # cap; v1.x replaced that with the --max-turns CLI flag (argparse default
+    # DEFAULT_MAX_TURNS=500 in strix.core.inputs) and dropped the env-var path
+    # entirely. Callers that only ever set the env var — e.g. seedcx/strix-
+    # scan-workflow's dynamic per-diff-shape cap, computed in strix-pr-
+    # dispatch.yml's resolve_turn_cap step and exported as STRIX_MAX_ITERATIONS
+    # — were silently disconnected: the env var was set but nothing read it,
+    # so every scan ran at the hardcoded 500-turn ceiling instead of the
+    # intended per-PR cap. None = no override; strix.core.inputs.
+    # resolve_default_max_turns() falls back to DEFAULT_MAX_TURNS. An explicit
+    # --max-turns CLI arg still wins over this (argparse only consults this
+    # value as its *default*, used when the flag is omitted).
+    max_turns: int | None = Field(default=None, gt=0, alias="STRIX_MAX_ITERATIONS")
 
 
 class TelemetrySettings(BaseSettings):

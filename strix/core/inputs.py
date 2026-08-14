@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from agents.model_settings import ModelSettings
 from openai.types.shared import Reasoning
 
+from strix.config import load_settings
 from strix.config.models import (
     DEFAULT_MODEL_RETRY,
     bedrock_route_supports_prompt_caching,
@@ -25,6 +26,19 @@ if TYPE_CHECKING:
 
 
 DEFAULT_MAX_TURNS = 500
+
+
+def resolve_default_max_turns() -> int:
+    """Effective ``--max-turns`` default: STRIX_MAX_ITERATIONS if set, else DEFAULT_MAX_TURNS.
+
+    Restores the pre-v1.x behaviour where STRIX_MAX_ITERATIONS bounded the
+    per-agent turn cap (see RuntimeSettings.max_turns for the full history).
+    Only consulted as argparse's *default* for ``--max-turns`` — an explicit
+    CLI flag always wins, matching the value's role before the SDK-harness
+    rewrite dropped the env-var path.
+    """
+    configured = load_settings().runtime.max_turns
+    return configured if configured is not None else DEFAULT_MAX_TURNS
 
 
 def _accepts_required_tool_choice(model_name: str | None) -> bool:
