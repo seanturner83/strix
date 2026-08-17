@@ -20,8 +20,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_STAGE_LABELS: tuple[str, ...] = ("NOTICE", "URGENT", "CRITICAL")
-_TURN_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
+_STAGE_LABELS: tuple[str, ...] = ("NOTICE", "URGENT", "CRITICAL", "FINAL")
+# The 1.00 band is the "you are AT the turn budget" stage — it fires the hard
+# finish-now directive. The orchestrator reserves extra SDK turns beyond this
+# cap (resolve_turn_finalize_reserve) so the agent can actually execute
+# finish_scan after this warning instead of being force-stopped mid-thought.
+_TURN_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95, 1.00)
 _ROOT_BUDGET_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
 _SUBAGENT_BUDGET_WARN_BANDS: tuple[float, ...] = (0.75, 0.80, 0.85)
 _SUBAGENT_BUDGET_RESERVE = 0.90
@@ -79,6 +83,12 @@ _ROOT_DIRECTIVES: tuple[str, ...] = (
         "secure your findings and call finish_scan now — anything left unfinished when the "
         "limit is hit is discarded."
     ),
+    (
+        "As the root agent, you have REACHED your turn budget. Call finish_scan on THIS "
+        "turn to compile and deliver the final report — only a small reserve of "
+        "finalization turns remains before a hard stop. Do NOT start anything new or "
+        "spawn sub-agents."
+    ),
 )
 _SUBAGENT_DIRECTIVES: tuple[str, ...] = (
     (
@@ -95,6 +105,11 @@ _SUBAGENT_DIRECTIVES: tuple[str, ...] = (
         "As a sub-agent, STOP all other work and finish immediately: report any confirmed "
         "vulnerability right now and call agent_finish to hand your results back to your "
         "parent before you are cut off."
+    ),
+    (
+        "As a sub-agent, you have REACHED your turn budget. Call agent_finish on THIS turn "
+        "to hand back any confirmed, validated result — only a small reserve of "
+        "finalization turns remains before a hard stop. Do NOT start anything new."
     ),
 )
 
@@ -119,6 +134,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         max_budget_usd: float | None = None,
         max_turns: int | None = None,
         interactive: bool = False,
+        finalize_reserve: int = 0,
     ) -> None:
         if max_budget_usd is not None and (
             not math.isfinite(max_budget_usd) or max_budget_usd <= 0
@@ -131,6 +147,9 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         self._budget_increment = max_budget_usd
         self._max_turns = max_turns
         self._interactive = interactive
+        # Extra SDK turns granted beyond ``max_turns`` (the soft cap the bands
+        # fire against) so the agent can finish_scan after the FINAL directive.
+        self._finalize_reserve = max(int(finalize_reserve), 0)
 
     def extend_budget(self) -> None:
         if self._max_budget_usd is None or self._budget_increment is None:
@@ -165,13 +184,25 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         stage = _crossed_stage(turns_used / self._max_turns, _TURN_WARN_BANDS)
         if stage is None:
             return
-        remaining = max(self._max_turns - turns_used, 0)
         pct = round(100 * turns_used / self._max_turns)
-        content = (
-            f"[{_urgency(stage)}] Turn budget: {turns_used}/{self._max_turns} used ({pct}%). "
-            f"About {remaining} turn(s) remain before this agent is force-stopped and any "
-            f"in-progress work is discarded. {_wrapup_directive(context, stage)}"
-        )
+        if stage >= len(_TURN_WARN_BANDS) - 1:
+            # FINAL: at/over the soft cap. The SDK still allows ~finalize_reserve
+            # turns before a hard stop — tell the agent to finalize NOW rather
+            # than implying its work is already lost.
+            content = (
+                f"[{_urgency(stage)}] Turn budget REACHED: {turns_used}/{self._max_turns} "
+                f"({pct}%). Only ~{self._finalize_reserve} finalization turn(s) remain "
+                f"before a hard stop discards unfinished work. "
+                f"{_wrapup_directive(context, stage)}"
+            )
+        else:
+            remaining = max(self._max_turns - turns_used, 0)
+            content = (
+                f"[{_urgency(stage)}] Turn budget: {turns_used}/{self._max_turns} used "
+                f"({pct}%). About {remaining} turn(s) remain before this agent is "
+                f"force-stopped and any in-progress work is discarded. "
+                f"{_wrapup_directive(context, stage)}"
+            )
         input_items.append({"role": "user", "content": content})
 
     def _maybe_warn_budget(
