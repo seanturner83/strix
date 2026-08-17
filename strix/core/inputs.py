@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 from agents.model_settings import ModelSettings
@@ -26,6 +27,25 @@ if TYPE_CHECKING:
 
 
 DEFAULT_MAX_TURNS = 500
+DEFAULT_TURN_FINALIZE_RESERVE = 3
+
+
+def resolve_turn_finalize_reserve() -> int:
+    """Extra SDK turns granted BEYOND the caller's turn cap so the agent can
+    actually run finish_scan/agent_finish after the "budget reached" directive,
+    instead of being force-stopped mid-thought (MaxTurnsExceeded).
+
+    The warn/force-finish hooks fire against the SOFT cap (``max_turns``); the
+    SDK is allowed ``max_turns + reserve``. ``STRIX_TURN_FINALIZE_RESERVE``
+    overrides the default; clamped to >= 0 (0 disables the reserve).
+    """
+    raw = os.environ.get("STRIX_TURN_FINALIZE_RESERVE", "").strip()
+    if not raw:
+        return DEFAULT_TURN_FINALIZE_RESERVE
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return DEFAULT_TURN_FINALIZE_RESERVE
 
 
 def resolve_default_max_turns() -> int:

@@ -37,6 +37,7 @@ from strix.core.inputs import (
     build_root_task,
     build_scope_context,
     make_model_settings,
+    resolve_turn_finalize_reserve,
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
@@ -143,12 +144,24 @@ async def run_strix_scan(
     agents_db = state_dir / "agents.db"
     is_resume = agents_path.exists()
 
+    # Reserve extra SDK turns beyond the caller's cap so the agent can run
+    # finish_scan after the "budget reached" directive instead of being
+    # force-stopped mid-thought (MaxTurnsExceeded). The warn/force-finish hooks
+    # fire against the SOFT cap (``max_turns``); the SDK (Runner.run) is allowed
+    # ``max_turns + reserve``. If it still doesn't finish, the graceful
+    # MaxTurnsExceeded soft-stop in _run_cycle is the backstop.
+    finalize_reserve = resolve_turn_finalize_reserve()
+    sdk_max_turns = max_turns + finalize_reserve
+
     logger.info(
-        "%s Strix scan %s (image=%s, max_turns=%d, interactive=%s, run_dir=%s)",
+        "%s Strix scan %s (image=%s, max_turns=%d +%d finalize-reserve (SDK cap=%d), "
+        "interactive=%s, run_dir=%s)",
         "Resuming" if is_resume else "Starting",
         scan_id,
         image,
         max_turns,
+        finalize_reserve,
+        sdk_max_turns,
         interactive,
         run_dir,
     )
@@ -303,6 +316,7 @@ async def run_strix_scan(
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,
             interactive=interactive,
+            finalize_reserve=finalize_reserve,
         )
         if interactive:
             coordinator.set_budget_extender(hooks.extend_budget)
@@ -397,7 +411,7 @@ async def run_strix_scan(
                 agents_db_path=agents_db,
                 sessions_to_close=sessions_to_close,
                 run_config=child_run_config,
-                max_turns=max_turns,
+                max_turns=sdk_max_turns,
                 interactive=interactive,
                 event_sink=event_sink,
                 hooks=hooks,
@@ -426,7 +440,7 @@ async def run_strix_scan(
                 agents_db_path=agents_db,
                 sessions_to_close=sessions_to_close,
                 run_config=child_run_config,
-                max_turns=max_turns,
+                max_turns=sdk_max_turns,
                 interactive=interactive,
                 parent_ctx=context,
                 root_id=root_id,
@@ -465,7 +479,7 @@ async def run_strix_scan(
             initial_input=initial_input,
             run_config=run_config,
             context=context,
-            max_turns=max_turns,
+            max_turns=sdk_max_turns,
             coordinator=coordinator,
             agent_id=root_id,
             interactive=interactive,
