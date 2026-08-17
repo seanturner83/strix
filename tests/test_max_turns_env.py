@@ -11,21 +11,32 @@ entirely, so the computed cap silently stopped reaching the agent loop.
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
 
 from strix.config import loader
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from strix.config.settings import RuntimeSettings
 from strix.core.inputs import DEFAULT_MAX_TURNS, resolve_default_max_turns
 from strix.interface.main import parse_arguments
 
 
 @pytest.fixture(autouse=True)
-def _reset_settings_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_settings_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("STRIX_MAX_ITERATIONS", raising=False)
     monkeypatch.setattr(loader, "_cached", None)
-    monkeypatch.setattr(loader, "_override", None)
+    # Point the JSON-override fallback at a path that doesn't exist, not
+    # None (which falls through to the real ~/.strix/cli-config.json on
+    # disk). Without this, these tests are only hermetic on a machine
+    # that's never run `strix` locally with a persisted config -- any
+    # real ambient value (e.g. a prior local STRIX_MAX_ITERATIONS=2 run)
+    # silently leaks in as the "unset" case's answer.
+    monkeypatch.setattr(loader, "_override", tmp_path / "unused-cli-config.json")
 
 
 def test_runtime_settings_reads_strix_max_iterations(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,6 +45,20 @@ def test_runtime_settings_reads_strix_max_iterations(monkeypatch: pytest.MonkeyP
 
 
 def test_runtime_settings_max_turns_defaults_to_none() -> None:
+    assert RuntimeSettings().max_turns is None
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_runtime_settings_blank_env_means_unset(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """strix-scan-workflow's composite action declares max_iterations with
+    default: "" and unconditionally exports it as STRIX_MAX_ITERATIONS, so
+    most callers set this to a present-but-blank string, not an absent one.
+    A blank value must mean "no override", not a pydantic int-coercion crash
+    on every invocation including --help (SEC-7400 follow-up, weekly-scan
+    outage 2026-08-15)."""
+    monkeypatch.setenv("STRIX_MAX_ITERATIONS", blank)
     assert RuntimeSettings().max_turns is None
 
 

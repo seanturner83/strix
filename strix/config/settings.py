@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -228,6 +228,20 @@ class RuntimeSettings(BaseSettings):
     # --max-turns CLI arg still wins over this (argparse only consults this
     # value as its *default*, used when the flag is omitted).
     max_turns: int | None = Field(default=None, gt=0, alias="STRIX_MAX_ITERATIONS")
+
+    @field_validator("max_turns", mode="before")
+    @classmethod
+    def _blank_env_means_unset(cls, value: object) -> object:
+        # strix-scan-workflow's composite action declares its max_iterations
+        # input with default: "" and unconditionally exports it as
+        # STRIX_MAX_ITERATIONS regardless of whether the caller passed a real
+        # value — so most callers set this env var to a present-but-blank
+        # string, not an absent one. Without this, pydantic's int coercion
+        # raises on "" and crashes parse_arguments() on every invocation,
+        # including --help (SEC-7400 follow-up, weekly-scan outage).
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
 
 class TelemetrySettings(BaseSettings):
