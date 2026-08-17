@@ -621,12 +621,32 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 if session is not None:
                     input_data = []
                 continue
+            if isinstance(exc, MaxTurnsExceeded):
+                # The turn cap is a SOFT budget stop, not a crash — in CI
+                # (non-interactive) as well as the TUI. Park the agent as
+                # "stopped" so the scan finalizes (incremental SARIF +
+                # session_meta + resumable bundle) and the next push RESUMES,
+                # rather than letting MaxTurnsExceeded propagate out of the
+                # non-interactive run and discard all in-progress work — the
+                # observed failure: a red scan, wasted $/tokens, and a full
+                # cold re-scan next push because no resumable state was written.
+                # Previously this graceful path ran ONLY when interactive; the
+                # non-interactive `raise` below re-threw it. Real errors still
+                # fail loud there.
+                logger.info(
+                    "agent %s hit the turn cap; parking as stopped for graceful "
+                    "finalize + resume",
+                    agent_id,
+                )
+                await coordinator.set_status(
+                    agent_id, "stopped", error=str(exc) or type(exc).__name__
+                )
+                await _notify_parent_on_terminal(coordinator, agent_id, "stopped")
+                return None
             if not interactive:
                 raise
-            if isinstance(exc, MaxTurnsExceeded):
-                status: Status = "stopped"
-            elif isinstance(exc, UserError | AgentsException | APIError):
-                status = "failed"
+            if isinstance(exc, UserError | AgentsException | APIError):
+                status: Status = "failed"
             else:
                 status = "crashed"
             logger.exception("agent run failed for %s; parking as %s", agent_id, status)
