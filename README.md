@@ -332,6 +332,28 @@ Every [REST API](https://docs.app.strix.ai) operation has a matching `strix clou
 
 See the [cloud CLI documentation](https://docs.strix.ai/cloud/cli) for scopes, workspaces, billing, and source-upload options.
 
+#### Sign in with a Claude subscription
+
+You can also run Strix on your Claude Pro/Max subscription. Strix drives your installed
+[Claude Code](https://docs.claude.com/en/docs/claude-code) CLI, so Claude Code owns the
+sign-in — Strix never stores your Claude credentials:
+
+```bash
+strix auth login claude      # delegates to the Claude Code CLI (claude auth login)
+
+export STRIX_LLM="claude-code/claude-opus-4-8"   # claude-code/<model> runs on the subscription
+strix --target ./app-directory
+
+strix auth status            # show the active sign-in
+strix auth logout claude     # sign out of Claude Code (global to the CLI)
+```
+
+The `claude` CLI must be installed and signed in **on the host running Strix**. This is
+the subscription, not an API key, so usage shows real token counts at $0 cost. Because
+Anthropic controls the subscription billing terms, behaviour can change without a Strix
+release. Multi-agent scans burst hard against subscription rate limits — Max 20x is
+realistically needed; on Pro, prefer a quick scan with fewer agents.
+
 #### Connect your own MCP servers
 
 Strix can connect to Model Context Protocol (MCP) servers you list and expose their tools to the agent during a run. Create `~/.strix/mcp-servers.json` with a JSON list of local `stdio` servers or remote `http` servers:
