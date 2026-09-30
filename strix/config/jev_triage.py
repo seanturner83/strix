@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import urllib.error
 
 from strix.config.jev_client import api_key, post
@@ -24,6 +25,23 @@ from strix.config.triage import TIERS
 logger = logging.getLogger(__name__)
 
 _TIMEOUT_S = 10.0  # per-turn: keep it tight, fall back to heuristic if slow
+# Safe tier for a low-confidence classification: the most capable one. A security
+# tool should not downgrade a possibly-critical turn to a weak model on a guess.
+_SAFE_TIER = "reasoning"
+
+
+def _min_confidence() -> float:
+    """Below this, don't trust the classification — route to the safe tier.
+
+    Default 0.0 (trust Jev's pick). Raise it to be conservative: with a
+    high floor most turns route to the frontier tier until a Jevstiller student,
+    calibrated on our own traffic, is confident enough to clear it. That's the
+    dial that trades quota saving against the risk of a bad downgrade.
+    """
+    try:
+        return float(os.environ.get("STRIX_TRIAGE_MIN_CONFIDENCE", "").strip())
+    except ValueError:
+        return 0.0
 
 # Domain framing carried in the request — this is the pentest-specific knowledge
 # upstream Jev lacks, and exactly what a Jevstiller student distils and adapts.
@@ -73,6 +91,9 @@ async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
         logger.warning("Jev triage failed (%s); falling back to heuristic", exc)
         return None
 
-    if choice in TIERS:
-        return choice, f"jev tier={choice} confidence={confidence:.2f}"
-    return None
+    if choice not in TIERS:
+        return None
+    floor = _min_confidence()
+    if confidence < floor:
+        return _SAFE_TIER, f"jev {choice}@{confidence:.2f} < floor {floor:.2f} -> safe tier"
+    return choice, f"jev tier={choice} confidence={confidence:.2f}"
