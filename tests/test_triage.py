@@ -100,7 +100,10 @@ def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
             seen["called"] = True
             return sentinel
 
-    model = _TriageModel(_FakeInner())  # type: ignore[arg-type]
+    def _factory(_model_id: str, _api_base: str | None) -> Any:
+        raise AssertionError("shadow mode must not build a tier model")
+
+    model = _TriageModel(_FakeInner(), _factory)  # type: ignore[arg-type]
     result = asyncio.run(
         model.get_response(
             None,
@@ -117,3 +120,45 @@ def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
     )
     assert result is sentinel
     assert seen.get("called") is True
+
+
+def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live mode serves the turn from the tier's model, not the default."""
+    monkeypatch.setenv("STRIX_TRIAGE", "live")
+    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)  # -> heuristic backend
+    for tier in ("MECHANICAL", "STANDARD", "REASONING"):
+        monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
+    default_sentinel, tier_sentinel = object(), object()
+    built: dict[str, Any] = {}
+
+    class _Default:
+        async def get_response(self, *_a: Any, **_k: Any) -> Any:
+            return default_sentinel
+
+    class _Tier:
+        async def get_response(self, *_a: Any, **_k: Any) -> Any:
+            return tier_sentinel
+
+    def _factory(model_id: str, _api_base: str | None) -> Any:
+        built["model_id"] = model_id
+        return _Tier()
+
+    model = _TriageModel(_Default(), _factory)  # type: ignore[arg-type]
+    # A mechanical tool -> mechanical tier -> haiku in the default map.
+    result = asyncio.run(
+        model.get_response(
+            None,
+            [_call("list_coverage")],
+            None,  # type: ignore[arg-type]
+            _TOOLS,  # type: ignore[arg-type]
+            None,
+            [],
+            None,  # type: ignore[arg-type]
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+    assert result is tier_sentinel  # routed to the tier model, not the default
+    assert built["model_id"] == "claude-code/claude-haiku-4-5"

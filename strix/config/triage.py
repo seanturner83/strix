@@ -58,9 +58,10 @@ _MECHANICAL_TOOLS = frozenset(
 
 
 def triage_mode() -> str:
-    """``"off"`` (default) or ``"shadow"`` (classify + log, never route)."""
+    """``"off"`` (default), ``"shadow"`` (classify + log, serve from default), or
+    ``"live"`` (classify + log + route the turn to the tier's model)."""
     mode = os.environ.get("STRIX_TRIAGE", "").strip().lower()
-    return mode if mode in ("shadow",) else "off"
+    return mode if mode in ("shadow", "live") else "off"
 
 
 def triage_backend() -> str:

@@ -46,7 +46,7 @@ from strix.llm import request_log
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from agents.agent_output import AgentOutputSchemaBase
     from agents.handoffs import Handoff
@@ -505,35 +505,50 @@ class _TurnGuardModel(Model):
 
 
 class _TriageModel(Model):
-    """Shadow-mode OODA triage on the per-turn loop.
+    """OODA triage on the per-turn loop — dynamic model selection.
 
-    On each *agent* turn (tools present) it classifies the route the turn could
-    take — ``cheap`` for a likely-routine step, ``big`` otherwise — and logs it,
-    but always serves from the inner (big) model. Phase 1 measures how much of
-    the hot path is routable at zero quality risk; real routing comes later.
+    On each *agent* turn (tools present) it classifies the turn's capability tier
+    (``triage.classify_turn``), maps it to a model (``model_tiers.tier_model``),
+    and logs the plan. In ``shadow`` mode it then serves from the default
+    (orchestrator) model — zero-risk measurement. In ``live`` mode it serves the
+    turn from the tier's model, so routine turns leave the frontier/subscription
+    model for a cheaper or local one. One-shot calls (no tools) always use the
+    default. Tier models are built via ``factory`` (no triage wrap) and cached.
     """
 
-    def __init__(self, inner: Model) -> None:
-        self._inner = inner
+    def __init__(
+        self, default_model: Model, factory: Callable[[str, str | None], Model]
+    ) -> None:
+        self._default = default_model
+        self._factory = factory
+        self._cache: dict[tuple[str, str | None], Model] = {}
 
     async def close(self) -> None:
-        await self._inner.close()
+        await self._default.close()
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
-        return self._inner.get_retry_advice(request)
+        return self._default.get_retry_advice(request)
 
-    async def _shadow(
+    async def _route(
         self, model_input: str | list[TResponseInputItem], tools: list[Tool]
-    ) -> None:
+    ) -> Model:
+        from strix.config.model_tiers import tier_model
         from strix.config.triage import classify_turn, triage_mode
 
-        if triage_mode() == "off" or not tools:
-            return
-        from strix.config.model_tiers import tier_model
-
+        mode = triage_mode()
+        if mode == "off" or not tools:
+            return self._default
         tier, reason = await classify_turn(model_input, tools)
-        model_id, _ = tier_model(tier)
-        logger.info("triage tier=%s model=%s reason=%s", tier, model_id, reason)
+        model_id, api_base = tier_model(tier)
+        logger.info("triage tier=%s model=%s mode=%s reason=%s", tier, model_id, mode, reason)
+        if mode != "live":
+            return self._default  # shadow: log the plan, serve from the default model
+        key = (model_id, api_base)
+        model = self._cache.get(key)
+        if model is None:
+            model = self._factory(model_id, api_base)
+            self._cache[key] = model
+        return model
 
     async def get_response(
         self,
@@ -549,8 +564,8 @@ class _TriageModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
-        await self._shadow(input, tools)
-        return await self._inner.get_response(
+        model = await self._route(input, tools)
+        return await model.get_response(
             system_instructions,
             input,
             model_settings,
@@ -577,8 +592,8 @@ class _TriageModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        await self._shadow(input, tools)
-        async for event in self._inner.stream_response(
+        model = await self._route(input, tools)
+        async for event in model.stream_response(
             system_instructions,
             input,
             model_settings,
@@ -773,7 +788,7 @@ class StrixProvider(MultiProvider):
             return self._get_fallback_provider("litellm"), f"ollama_chat/{stripped_model_name}"
         return self._get_fallback_provider("litellm"), original_model_name
 
-    def get_model(self, model_name: str | None) -> Model:
+    def _build_model(self, model_name: str | None) -> Model:
         llm = load_settings().llm
         cc_slug = claude_code.claude_code_model(model_name)
         slug = codex.subscription_model(model_name)
@@ -832,17 +847,32 @@ class StrixProvider(MultiProvider):
                 # is done, so an idle gap is meaningless here; the request
                 # timeout bounds it instead.
                 idle_timeout = 0.0
-        guarded: Model = _TurnGuardModel(
+        return _TurnGuardModel(
             model,
             max_tool_calls_per_turn=llm.max_tool_calls_per_turn,
             stream_idle_timeout=idle_timeout,
         )
+
+    def get_model(self, model_name: str | None) -> Model:
+        model = self._build_model(model_name)
         from strix.config.triage import triage_mode
 
-        if triage_mode() != "off":
-            # Self-scopes to agent turns (tools present); one-shot calls pass through.
-            guarded = _TriageModel(guarded)
-        return guarded
+        if triage_mode() == "off":
+            return model
+        # Per-turn dynamic model selection. Tier models are built via
+        # _tier_model_factory (which calls _build_model, no triage wrap) so the
+        # wrapper can never wrap itself.
+        return _TriageModel(model, _tier_model_factory)
+
+
+def _tier_model_factory(model_id: str, api_base: str | None) -> Model:
+    """Build a guarded model for a triage tier — no triage wrap (avoids recursion)."""
+    if api_base:
+        llm = load_settings().llm
+        provider = StrixProvider(api_key=llm.api_key or "local", base_url=api_base)
+    else:
+        provider = StrixProvider()
+    return provider._build_model(model_id)
 
 
 def _routes_via_litellm(model: Model) -> bool:
