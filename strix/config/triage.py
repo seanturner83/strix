@@ -64,9 +64,18 @@ def triage_mode() -> str:
 
 
 def triage_backend() -> str:
-    """``"heuristic"`` (default) or ``"jev"``."""
+    """``"jev"`` when a TypeSafe/Jevstiller endpoint is configured, else ``"heuristic"``.
+
+    Explicit ``STRIX_TRIAGE_BACKEND`` wins. Otherwise we lean on Jev/Jevstiller
+    as the System-1 whenever it is available — the heuristic is only the
+    fail-open floor for when no S1 service is configured (or a call errors).
+    """
     backend = os.environ.get("STRIX_TRIAGE_BACKEND", "").strip().lower()
-    return backend if backend in ("heuristic", "jev") else "heuristic"
+    if backend in ("heuristic", "jev"):
+        return backend
+    from strix.config.jev_client import api_key  # noqa: PLC0415  # avoid import cost when off
+
+    return "jev" if api_key() else "heuristic"
 
 
 def _last_tool_name(model_input: str | list[Any]) -> str | None:

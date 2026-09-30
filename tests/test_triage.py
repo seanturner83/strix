@@ -51,12 +51,18 @@ def test_no_recent_tool_defaults_to_reasoning() -> None:
 def test_mode_and_backend_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRIX_TRIAGE", raising=False)
     monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     assert triage.triage_mode() == "off"
+    # No explicit backend, no Jev endpoint -> heuristic floor.
+    assert triage.triage_backend() == "heuristic"
+    # No explicit backend but a Jev endpoint configured -> lean on Jev (S1).
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert triage.triage_backend() == "jev"
+    # Explicit backend always wins.
+    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "heuristic")
     assert triage.triage_backend() == "heuristic"
     monkeypatch.setenv("STRIX_TRIAGE", "shadow")
     assert triage.triage_mode() == "shadow"
-    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
-    assert triage.triage_backend() == "jev"
 
 
 def test_digest_is_compact_not_the_whole_context() -> None:

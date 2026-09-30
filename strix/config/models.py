@@ -529,8 +529,11 @@ class _TriageModel(Model):
 
         if triage_mode() == "off" or not tools:
             return
+        from strix.config.model_tiers import tier_model
+
         tier, reason = await classify_turn(model_input, tools)
-        logger.info("triage tier=%s reason=%s", tier, reason)
+        model_id, _ = tier_model(tier)
+        logger.info("triage tier=%s model=%s reason=%s", tier, model_id, reason)
 
     async def get_response(
         self,
