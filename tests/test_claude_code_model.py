@@ -22,6 +22,7 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from strix.agents.prompt import CACHE_POINT
 from strix.config import claude_bridge, claude_code, claude_process, codex, loader
 from strix.config.loader import load_settings
 from strix.config.models import (
@@ -178,6 +179,43 @@ def test_get_response_returns_model_response(monkeypatch: pytest.MonkeyPatch) ->
     )
     calls = [i for i in response.output if isinstance(i, ResponseFunctionToolCall)]
     assert [c.name for c in calls] == ["shell", "browser"]
+
+
+def test_run_strips_cache_point_marker_from_system_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt templates carry `<cache_point>` markers for the LiteLLM cache
+    split; this transport has no cache-point wire, so they must be stripped
+    rather than leaked verbatim into the prompt sent to `claude -p`."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_turn(_slug: str, message: dict[str, Any], **_: Any) -> dict[str, Any]:
+        captured["message"] = message
+        return _result_event("simple_text.jsonl")
+
+    monkeypatch.setattr(claude_process, "run_turn", _fake_run_turn)
+    model = _ClaudeCodeModel("claude-opus-4-8")
+
+    system = f"You are Strix.{CACHE_POINT}\n# Scope{CACHE_POINT}\nonly api/"
+    asyncio.run(
+        model.get_response(
+            system,
+            [{"role": "user", "content": "go"}],
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+
+    text = _message_text(captured["message"])
+    assert CACHE_POINT not in text
+    assert "You are Strix." in text
+    assert "only api/" in text
 
 
 def test_reasoning_effort_becomes_extra_args() -> None:

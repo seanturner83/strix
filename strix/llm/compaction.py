@@ -20,6 +20,7 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from strix.config import load_settings
 from strix.config.claude_bridge import ClaudeStreamError
 from strix.config.models import StrixProvider
+from strix.config.roles import resolve_role_model
 from strix.core.inputs import make_model_settings
 from strix.core.sessions import replace_session_items, session_write_lock
 from strix.llm.context_budget import context_window, count_tokens, output_limit
@@ -310,9 +311,21 @@ def _extract_text(response: ModelResponse) -> str:
 
 async def _summarize(model: str, prompt: str, max_tokens: int) -> str | None:
     llm = load_settings().llm
+    # Route the summary *generation* to the compressor role (the System-1.5
+    # split). ``model`` stays the compacting agent's model for the size/budget
+    # maths in maybe_compact; only the summarisation call may run elsewhere.
+    # It falls back to that same model when no compressor role is configured,
+    # because a weak summariser drops decision-relevant context.
+    role_model, role_api_base = resolve_role_model("compressor", llm)
+    gen_model = role_model or model
+    provider = (
+        StrixProvider(api_key=llm.api_key or "local", base_url=role_api_base)
+        if role_api_base
+        else StrixProvider()
+    )
     model_settings = make_model_settings(
         None,
-        model_name=model,
+        model_name=gen_model,
         request_timeout=llm.timeout,
         prompt_cache=False,
         extra_headers=llm.extra_headers,
@@ -320,8 +333,8 @@ async def _summarize(model: str, prompt: str, max_tokens: int) -> str | None:
     ).resolve(ModelSettings(max_tokens=max_tokens))
     try:
         response = (
-            await StrixProvider()
-            .get_model(model)
+            await provider
+            .get_model(gen_model)
             .get_response(
                 system_instructions=None,
                 input=prompt,
@@ -336,7 +349,7 @@ async def _summarize(model: str, prompt: str, max_tokens: int) -> str | None:
             )
         )
     except Exception:
-        logger.exception("compaction summary call failed for model %s", model)
+        logger.exception("compaction summary call failed for model %s", gen_model)
         return None
     content = _extract_text(response).strip()
     if not content:

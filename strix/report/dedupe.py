@@ -325,7 +325,7 @@ def _extract_text(response: ModelResponse) -> str:
     return "".join(parts)
 
 
-async def check_duplicate(
+async def check_duplicate(  # noqa: PLR0911  # backend dispatch adds an early return
     candidate: dict[str, Any], existing_reports: list[dict[str, Any]]
 ) -> dict[str, Any]:
     if not existing_reports:
@@ -339,6 +339,16 @@ async def check_duplicate(
     dependency_duplicate = _check_dependency_duplicate(candidate, existing_reports)
     if dependency_duplicate is not None:
         return dependency_duplicate
+
+    # System-1 backend: route the fixed-shape dedup decision to a Jev classifier
+    # when selected (STRIX_DEDUPE_BACKEND=jev). Fail-safe: a None result falls
+    # through to the LLM path below.
+    from strix.report.jev_dedupe import jev_check_duplicate, jev_enabled
+
+    if jev_enabled():
+        jev_result = await jev_check_duplicate(candidate, existing_reports)
+        if jev_result is not None:
+            return jev_result
 
     try:
         settings = load_settings()

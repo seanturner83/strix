@@ -777,7 +777,7 @@ def _do_delete(
     }
 
 
-async def _do_create(
+async def _do_create(  # noqa: PLR0911  # verify gate adds an early rejection return
     *,
     title: str,
     description: str,
@@ -931,6 +931,25 @@ async def _do_create(
                 "confidence": dedupe.get("confidence", 0.0),
                 "reason": dedupe.get("reason", ""),
             }
+
+        # System-1 verify gate: reject a confident false positive before persist.
+        # Fail-open — only a confident false_positive verdict blocks the finding.
+        from strix.report.jev_verify import jev_check_false_positive
+        from strix.report.jev_verify import jev_enabled as verify_enabled
+
+        if verify_enabled():
+            verdict = await jev_check_false_positive(candidate)
+            if verdict is not None and verdict.get("is_false_positive"):
+                return {
+                    "success": False,
+                    "error": (
+                        "Finding rejected as a likely false positive by the verify gate — "
+                        "re-examine the evidence before re-reporting"
+                    ),
+                    "false_positive": True,
+                    "confidence": verdict.get("confidence", 0.0),
+                    "reason": verdict.get("reason", ""),
+                }
 
         report_id = report_state.add_vulnerability_report(
             **report_fields,

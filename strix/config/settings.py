@@ -49,6 +49,19 @@ class LlmSettings(BaseSettings):
         alias="LLM_EXTRA_HEADERS",
         repr=False,
     )
+    # Per-role model routing (the System-2 / System-1.5 split). Each is optional
+    # and falls back to STRIX_LLM; see strix.config.roles.resolve_role_model for
+    # the fallback chains. Lets the orchestrator run on one backend (e.g. a Claude
+    # subscription) while bulk, off-critical-path work (compaction, sub-agents)
+    # routes to a cheaper/local endpoint.
+    orchestrator_model: str | None = Field(default=None, alias="STRIX_LLM_ORCHESTRATOR")
+    subagent_model: str | None = Field(default=None, alias="STRIX_LLM_SUBAGENT")
+    compressor_model: str | None = Field(default=None, alias="STRIX_LLM_COMPRESSOR")
+    orchestrator_api_base: str | None = Field(
+        default=None, alias="STRIX_LLM_ORCHESTRATOR_API_BASE"
+    )
+    subagent_api_base: str | None = Field(default=None, alias="STRIX_LLM_SUBAGENT_API_BASE")
+    compressor_api_base: str | None = Field(default=None, alias="STRIX_LLM_COMPRESSOR_API_BASE")
     reasoning_effort: ReasoningEffort = Field(default="high", alias="STRIX_REASONING_EFFORT")
     force_required_tool_choice: bool = Field(
         default=False,
@@ -57,6 +70,14 @@ class LlmSettings(BaseSettings):
     prompt_cache: bool = Field(
         default=True,
         alias="STRIX_PROMPT_CACHE",
+    )
+    # Providers cache prompts in fixed-size token blocks, so a fully cached prompt
+    # can read back up to a block short. 128 covers the largest common size
+    # (OpenAI; DeepSeek and GLM use 64, vLLM defaults to 16).
+    cache_block_tokens: int = Field(default=128, ge=1, alias="STRIX_CACHE_BLOCK_TOKENS")
+    openrouter_sticky_sessions: bool = Field(
+        default=False,
+        alias="STRIX_OPENROUTER_STICKY_SESSIONS",
     )
     disable_streaming: bool = Field(
         default=False,

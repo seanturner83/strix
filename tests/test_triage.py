@@ -1,0 +1,113 @@
+"""OODA turn triage: tier classification, backends, mode gating, delegation."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any
+
+from strix.config import triage
+from strix.config.models import _TriageModel
+
+
+if TYPE_CHECKING:
+    import pytest
+
+
+_TOOLS = ["a-tool"]  # non-empty => an agent turn
+
+
+def _call(name: str) -> dict[str, Any]:
+    return {"type": "function_call", "name": name}
+
+
+def _tier(model_input: Any, tools: Any = _TOOLS) -> str:
+    return asyncio.run(triage.classify_turn(model_input, tools))[0]
+
+
+def test_mechanical_last_tool_is_mechanical_tier() -> None:
+    assert _tier([_call("list_coverage")]) == "mechanical"
+    assert _tier([_call("get_threat_model")]) == "mechanical"
+
+
+def test_reasoning_tool_is_reasoning_tier() -> None:
+    assert _tier([_call("browser")]) == "reasoning"
+
+
+def test_uses_the_most_recent_call() -> None:
+    conv = [_call("read_file"), {"type": "message"}, _call("python")]
+    assert _tier(conv) == "reasoning"
+
+
+def test_no_tools_is_non_agent_turn() -> None:
+    tier, reason = asyncio.run(triage.classify_turn([_call("read_file")], []))
+    assert tier == "reasoning"
+    assert reason == "non-agent turn"
+
+
+def test_no_recent_tool_defaults_to_reasoning() -> None:
+    assert _tier([{"type": "message"}]) == "reasoning"
+
+
+def test_mode_and_backend_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRIX_TRIAGE", raising=False)
+    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    assert triage.triage_mode() == "off"
+    assert triage.triage_backend() == "heuristic"
+    monkeypatch.setenv("STRIX_TRIAGE", "shadow")
+    assert triage.triage_mode() == "shadow"
+    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
+    assert triage.triage_backend() == "jev"
+
+
+def test_digest_is_compact_not_the_whole_context() -> None:
+    conv = [
+        _call("read_file"),
+        {"type": "function_call_output", "output": "X" * 5000},
+    ]
+    d = triage.digest(conv)
+    assert d["last_tool"] == "read_file"
+    assert 0 < len(d["last_output"]) <= 600  # truncated, not the full 5000
+
+
+def test_jev_backend_falls_back_to_heuristic_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
+
+    async def _none(_digest: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr("strix.config.jev_triage.jev_classify_tier", _none)
+    # Jev unavailable → heuristic decides (mechanical tool → mechanical tier).
+    assert _tier([_call("list_coverage")]) == "mechanical"
+
+
+def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shadow mode must classify but never alter what the inner model returns."""
+    monkeypatch.setenv("STRIX_TRIAGE", "shadow")
+    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    sentinel = object()
+    seen: dict[str, Any] = {}
+
+    class _FakeInner:
+        async def get_response(self, *_args: Any, **_kwargs: Any) -> Any:
+            seen["called"] = True
+            return sentinel
+
+    model = _TriageModel(_FakeInner())  # type: ignore[arg-type]
+    result = asyncio.run(
+        model.get_response(
+            None,
+            [_call("read_file")],
+            None,  # type: ignore[arg-type]
+            _TOOLS,  # type: ignore[arg-type]
+            None,
+            [],
+            None,  # type: ignore[arg-type]
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+    assert result is sentinel
+    assert seen.get("called") is True
