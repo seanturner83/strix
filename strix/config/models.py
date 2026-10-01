@@ -875,6 +875,24 @@ def _tier_model_factory(model_id: str, api_base: str | None) -> Model:
     return provider._build_model(model_id)
 
 
+async def subagent_model_for_task(task: str) -> Model | None:
+    """A per-mission model for a spawned sub-agent, or ``None`` to inherit.
+
+    Live routing only: classify the mission once (Jev), map it to a tier model,
+    and bind the sub-agent to it for its whole life — cache-coherent, and it
+    bypasses the per-turn triager (the sub-agent runs on one model throughout).
+    """
+    from strix.config.model_tiers import tier_model
+    from strix.config.triage import classify_mission, triage_mode
+
+    if triage_mode() != "live" or not task:
+        return None
+    tier, reason = await classify_mission(task)
+    model_id, api_base = tier_model(tier)
+    logger.info("subagent routed: tier=%s model=%s reason=%s", tier, model_id, reason)
+    return _tier_model_factory(model_id, api_base)
+
+
 def _routes_via_litellm(model: Model) -> bool:
     """LiteLLM-backed models are captured by the LiteLLM callback, not the wrapper."""
     from agents.extensions.models.litellm_model import LitellmModel

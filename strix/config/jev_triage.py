@@ -61,23 +61,20 @@ _TIER_CRITERIA = {
 }
 
 
-async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
-    """Return ``(tier, reason)`` from Jev, or ``None`` to fall back."""
+async def _classify(state: dict[str, str], instructions: str) -> tuple[str, str] | None:
+    """Ask Jev for a capability tier over ``state``; apply the confidence floor.
+
+    Returns ``(tier, reason)`` or ``None`` to fall back. Below the floor the
+    classification isn't trusted and routes to the safe (frontier) tier.
+    """
     if not api_key():
         return None
     criteria = {tier: _TIER_CRITERIA.get(tier, tier) for tier in TIERS}
     payload = {
         "model": "jev-latest",
-        "state": json.dumps(digest),
+        "state": json.dumps(state),
         "questions": {
-            "tier": {
-                "type": "choice",
-                "instructions": (
-                    "Given the last action in an autonomous security-testing agent's turn, "
-                    "what capability tier does the NEXT step most likely need?"
-                ),
-                "criteria": criteria,
-            }
+            "tier": {"type": "choice", "instructions": instructions, "criteria": criteria}
         },
     }
     try:
@@ -88,7 +85,7 @@ async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
         choice = str(answer.get("choice") or "").strip()
         confidence = float(answer.get("confidence") or 0.0)
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, OSError) as exc:
-        logger.warning("Jev triage failed (%s); falling back to heuristic", exc)
+        logger.warning("Jev classify failed (%s); falling back", exc)
         return None
 
     if choice not in TIERS:
@@ -97,3 +94,25 @@ async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
     if confidence < floor:
         return _SAFE_TIER, f"jev {choice}@{confidence:.2f} < floor {floor:.2f} -> safe tier"
     return choice, f"jev tier={choice} confidence={confidence:.2f}"
+
+
+async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
+    """Classify a single turn's tier from a compact digest of its last action."""
+    return await _classify(
+        digest,
+        "Given the last action in an autonomous security-testing agent's turn, "
+        "what capability tier does the NEXT step most likely need?",
+    )
+
+
+async def jev_classify_mission(task: str) -> tuple[str, str] | None:
+    """Classify a whole sub-agent mission's tier from its task description.
+
+    One call at spawn binds the sub-agent to a model for its life — coarser than
+    per-turn, cache-coherent, and where the multi-agent cost actually lives.
+    """
+    return await _classify(
+        {"mission": task[:2000]},
+        "Given this security-testing sub-agent's assigned mission, what capability "
+        "tier does carrying it out need overall?",
+    )

@@ -363,6 +363,13 @@ async def spawn_child_agent(
 
     child_id = uuid.uuid4().hex[:8]
     child_agent = factory(name=name, skills=skills)
+    # Per-mission model routing: bind this sub-agent to a tier-appropriate model
+    # for its whole life (cache-coherent). No-op unless live routing is on.
+    from strix.config.models import subagent_model_for_task
+
+    routed_model = await subagent_model_for_task(task)
+    if routed_model is not None:
+        child_agent.model = routed_model
     await coordinator.register(
         child_id,
         name,

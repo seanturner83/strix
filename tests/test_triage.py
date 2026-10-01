@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from strix.config import triage
+from strix.config import models, triage
 from strix.config.models import _TriageModel
 
 
@@ -120,6 +120,52 @@ def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
     )
     assert result is sentinel
     assert seen.get("called") is True
+
+
+def test_classify_mission_uses_jev_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
+
+    async def _jev(_task: str) -> tuple[str, str]:
+        return "standard", "jev mission"
+
+    monkeypatch.setattr("strix.config.jev_triage.jev_classify_mission", _jev)
+    tier, _ = asyncio.run(triage.classify_mission("recon the /api surface"))
+    assert tier == "standard"
+
+
+def test_classify_mission_defaults_safe_without_jev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "heuristic")
+    tier, _ = asyncio.run(triage.classify_mission("exploit the SQLi at /login"))
+    assert tier == "reasoning"  # heuristic can't read a mission -> safe tier
+
+
+def test_subagent_routing_off_when_not_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_TRIAGE", "shadow")  # not live
+    assert asyncio.run(models.subagent_model_for_task("any mission")) is None
+
+
+def test_subagent_routing_builds_tier_model_when_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_TRIAGE", "live")
+
+    async def _mission(_task: str) -> tuple[str, str]:
+        return "mechanical", "test"
+
+    sentinel = object()
+    seen: dict[str, Any] = {}
+
+    def _factory(model_id: str, _api_base: str | None) -> Any:
+        seen["model_id"] = model_id
+        return sentinel
+
+    monkeypatch.setattr("strix.config.triage.classify_mission", _mission)
+    monkeypatch.setattr(models, "_tier_model_factory", _factory)
+    for t in ("MECHANICAL", "STANDARD", "REASONING"):
+        monkeypatch.delenv(f"STRIX_TIER_{t}", raising=False)
+    monkeypatch.delenv("STRIX_ROUTE_POLICY", raising=False)
+
+    result = asyncio.run(models.subagent_model_for_task("list the open ports"))
+    assert result is sentinel
+    assert seen["model_id"] == "claude-code/claude-haiku-4-5"  # mechanical -> haiku
 
 
 def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> None:

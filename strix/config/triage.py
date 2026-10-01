@@ -155,3 +155,18 @@ async def classify_turn(model_input: str | list[Any], tools: list[Any]) -> tuple
             return result
         # Fail open to the heuristic when Jev is unavailable.
     return _heuristic_tier(model_input)
+
+
+async def classify_mission(task: str) -> tuple[str, str]:
+    """Classify a whole sub-agent mission into a tier (for spawn-time routing).
+
+    Jev-backed when configured; the heuristic can't read a free-text mission, so
+    it falls back to the safe (frontier) tier rather than guess.
+    """
+    if triage_backend() == "jev":
+        from strix.config.jev_triage import jev_classify_mission  # noqa: PLC0415
+
+        result = await jev_classify_mission(task)
+        if result is not None:
+            return result
+    return _DEFAULT_TIER, "no jev backend; mission defaults to the safe tier"
