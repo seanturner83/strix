@@ -1,4 +1,4 @@
-"""Capability-tier → model resolution and overrides."""
+"""Capability/cost map: default map, overrides, and policy-driven routing."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 
 def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRIX_ROUTE_POLICY", raising=False)
     for tier in ("REASONING", "STANDARD", "MECHANICAL"):
         monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
 
@@ -28,20 +29,52 @@ def test_unknown_tier_falls_back_to_reasoning(monkeypatch: pytest.MonkeyPatch) -
     assert model_tiers.tier_model("bogus") == model_tiers.tier_model("reasoning")
 
 
-def test_override_with_fleet_name_carries_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_override_beats_policy_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
-    monkeypatch.setenv("STRIX_TIER_MECHANICAL", "local-small")
-    model_id, api_base = model_tiers.tier_model("mechanical")
-    assert model_id == "minicpm5-1b"
-    assert api_base == "http://localhost:1234/v1"
-
-
-def test_override_with_raw_model_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_ROUTE_POLICY", "local")
     monkeypatch.setenv("STRIX_TIER_STANDARD", "openrouter/z-ai/glm-5.3")
     assert model_tiers.tier_model("standard") == ("openrouter/z-ai/glm-5.3", None)
 
 
-def test_fleet_lists_the_five_known_good() -> None:
+def test_override_with_fleet_name_carries_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_TIER_MECHANICAL", "local-small")
+    assert model_tiers.tier_model("mechanical") == ("minicpm5-1b", "http://localhost:1234/v1")
+
+
+def test_policy_subscription_picks_cheapest_sufficient(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_ROUTE_POLICY", "subscription")
+    # standard (med) -> haiku is the cheapest subscription model that clears med
+    assert model_tiers.tier_model("standard") == ("claude-code/claude-haiku-4-5", None)
+    # reasoning (high) -> sonnet is cheaper than opus, both high
+    assert model_tiers.tier_model("reasoning") == ("claude-code/claude-sonnet-4-6", None)
+
+
+def test_policy_api_picks_cheapest_sufficient(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_ROUTE_POLICY", "api")
+    assert model_tiers.tier_model("standard") == ("anthropic/claude-haiku-4-5", None)
+    assert model_tiers.tier_model("reasoning") == ("anthropic/claude-sonnet-4-6", None)
+
+
+def test_policy_local_falls_back_in_regime_when_under_capable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_ROUTE_POLICY", "local")
+    # mechanical (low) -> cheapest local meeting low = local-small (or local-big; both cost 0)
+    _m_model, m_base = model_tiers.tier_model("mechanical")
+    assert m_base == "http://localhost:1234/v1"
+    # reasoning (high): local has no high model -> stay in regime, use most capable local
+    assert model_tiers.tier_model("reasoning") == (
+        "qwen3.8-27b-ud-iq2xxs-q8head",
+        "http://localhost:1234/v1",
+    )
+
+
+def test_fleet_spans_three_regimes() -> None:
     names = set(model_tiers.fleet())
-    assert names == {"opus", "sonnet", "haiku", "local-big", "local-small"}
+    assert {"opus", "sonnet", "haiku"} <= names  # subscription
+    assert {"api-opus", "api-sonnet", "api-haiku"} <= names  # metered
+    assert {"local-big", "local-small"} <= names  # local
