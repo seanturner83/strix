@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import logging
 import os
+import random
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -529,26 +530,83 @@ class _TriageModel(Model):
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return self._default.get_retry_advice(request)
 
-    async def _route(
-        self, model_input: str | list[TResponseInputItem], tools: list[Tool]
-    ) -> Model:
+    def _tier_model(self, tier: str) -> Model:
         from strix.config.model_tiers import tier_model
-        from strix.config.triage import classify_turn, triage_mode
 
-        mode = triage_mode()
-        if mode == "off" or not tools:
-            return self._default
-        tier, reason = await classify_turn(model_input, tools)
         model_id, api_base = tier_model(tier)
-        logger.info("triage tier=%s model=%s mode=%s reason=%s", tier, model_id, mode, reason)
-        if mode != "live":
-            return self._default  # shadow: log the plan, serve from the default model
         key = (model_id, api_base)
         model = self._cache.get(key)
         if model is None:
             model = self._factory(model_id, api_base)
             self._cache[key] = model
         return model
+
+    async def _route(
+        self, model_input: str | list[TResponseInputItem], tools: list[Tool]
+    ) -> tuple[Model, str | None]:
+        """Return ``(model, tier)``. ``tier`` is None when not live-routing (off,
+        shadow, or a one-shot call) — the signal for whether to audit."""
+        from strix.config.model_tiers import tier_model
+        from strix.config.triage import classify_turn, triage_mode
+
+        mode = triage_mode()
+        if mode == "off" or not tools:
+            return self._default, None
+        tier, reason = await classify_turn(model_input, tools)
+        model_id = tier_model(tier)[0]
+        logger.info("triage tier=%s model=%s mode=%s reason=%s", tier, model_id, mode, reason)
+        if mode != "live":
+            return self._default, None  # shadow: log the plan, serve from the default
+        return self._tier_model(tier), tier
+
+    async def _maybe_audit(
+        self,
+        tier: str,
+        routed_response: ModelResponse,
+        *,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],  # noqa: A002
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: ResponsePromptParam | None,
+    ) -> None:
+        """On a sampled downgraded turn, run the frontier too and log whether the
+        tool calls diverged. The cheap model already served the turn — this only
+        measures misroute cost; it never changes the result or breaks the turn."""
+        from strix.config.triage import audit_rate
+
+        if tier == "reasoning" or random.random() >= audit_rate():  # noqa: S311 - sampling, not crypto
+            return
+        try:
+            frontier_response = await self._tier_model("reasoning").get_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        except Exception:  # noqa: BLE001 - an audit must never break the real turn
+            logger.warning("triage audit: frontier call failed", exc_info=True)
+            return
+        routed = _tool_names(routed_response)
+        frontier = _tool_names(frontier_response)
+        logger.info(
+            "triage audit tier=%s agreed=%s routed_tools=%s frontier_tools=%s",
+            tier,
+            routed == frontier,
+            sorted(routed),
+            sorted(frontier),
+        )
 
     async def get_response(
         self,
@@ -564,8 +622,8 @@ class _TriageModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
-        model = await self._route(input, tools)
-        return await model.get_response(
+        model, tier = await self._route(input, tools)
+        response = await model.get_response(
             system_instructions,
             input,
             model_settings,
@@ -577,6 +635,22 @@ class _TriageModel(Model):
             conversation_id=conversation_id,
             prompt=prompt,
         )
+        if tier is not None:
+            await self._maybe_audit(
+                tier,
+                response,
+                system_instructions=system_instructions,
+                input=input,
+                model_settings=model_settings,
+                tools=tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        return response
 
     async def stream_response(
         self,
@@ -592,7 +666,8 @@ class _TriageModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        model = await self._route(input, tools)
+        model, tier = await self._route(input, tools)
+        final_response: ModelResponse | None = None
         async for event in model.stream_response(
             system_instructions,
             input,
@@ -605,7 +680,34 @@ class _TriageModel(Model):
             conversation_id=conversation_id,
             prompt=prompt,
         ):
+            captured = getattr(event, "response", None)
+            if captured is not None:
+                final_response = captured
             yield event
+        if tier is not None and final_response is not None:
+            await self._maybe_audit(
+                tier,
+                final_response,
+                system_instructions=system_instructions,
+                input=input,
+                model_settings=model_settings,
+                tools=tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+
+
+def _tool_names(response: ModelResponse) -> set[str]:
+    """The set of tool-call names in a response — the unit of audit comparison."""
+    return {
+        name
+        for item in (getattr(response, "output", None) or [])
+        if getattr(item, "type", "") == "function_call" and (name := getattr(item, "name", None))
+    }
 
 
 def _split_cached_prefix(

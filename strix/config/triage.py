@@ -64,6 +64,20 @@ def triage_mode() -> str:
     return mode if mode in ("shadow", "live") else "off"
 
 
+def audit_rate() -> float:
+    """Fraction of downgraded turns to also run on the frontier for comparison.
+
+    STRIX_TRIAGE_AUDIT_RATE in [0,1] (default 0 = off). The routed (cheap) model
+    still serves the turn; the frontier result is only logged against it, so we
+    measure how often a downgrade would have diverged — trust the routing with
+    data instead of blindly.
+    """
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("STRIX_TRIAGE_AUDIT_RATE", "").strip())))
+    except ValueError:
+        return 0.0
+
+
 def triage_backend() -> str:
     """``"jev"`` when a TypeSafe/Jevstiller endpoint is configured, else ``"heuristic"``.
 
