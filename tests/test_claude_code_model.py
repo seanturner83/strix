@@ -173,6 +173,45 @@ def test_get_response_returns_model_response(monkeypatch: pytest.MonkeyPatch) ->
     assert [c.name for c in calls] == ["shell", "browser"]
 
 
+def test_run_strips_cache_point_marker_from_system_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt templates carry `<cache_point>` markers for the LiteLLM cache
+    split; this transport has no cache-point wire, so they must be stripped
+    rather than leaked verbatim into the prompt sent to `claude -p`."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_turn(_slug: str, message: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        captured["message"] = message
+        captured["system_prompt"] = kwargs.get("system_prompt")
+        return _result_event("simple_text.jsonl")
+
+    monkeypatch.setattr(claude_process, "run_turn", _fake_run_turn)
+    model = _ClaudeCodeModel("claude-opus-4-8")
+
+    system = f"You are Strix.{CACHE_POINT}\n# Scope{CACHE_POINT}\nonly api/"
+    asyncio.run(
+        model.get_response(
+            system,
+            [{"role": "user", "content": "go"}],
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+
+    # The system prompt now travels via --system-prompt-file (run_turn's
+    # system_prompt), stripped of the marker — not embedded in the message.
+    sp = captured["system_prompt"]
+    assert CACHE_POINT not in sp
+    assert "You are Strix." in sp
+    assert "only api/" in sp
+    assert CACHE_POINT not in _message_text(captured["message"])
 def test_reasoning_effort_becomes_extra_args() -> None:
     model = _ClaudeCodeModel("claude-opus-4-8", reasoning_effort="max")
     assert model._extra_args() == ["--effort", "max"]
