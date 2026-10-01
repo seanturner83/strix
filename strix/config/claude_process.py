@@ -32,8 +32,10 @@ import os
 import shutil
 import subprocess  # we invoke a trusted, user-installed CLI, never a shell
 import sys
+import tempfile
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from strix.config import claude_bridge, claude_code
@@ -164,7 +166,13 @@ def _get_executor(loop: asyncio.AbstractEventLoop) -> ThreadPoolExecutor:
     return executor
 
 
-def _build_argv(slug: str, extra_args: list[str], *, structured: bool = True) -> list[str]:
+def _build_argv(
+    slug: str,
+    extra_args: list[str],
+    *,
+    structured: bool = True,
+    system_prompt_file: str | None = None,
+) -> list[str]:
     binary = claude_code.binary_path()
     if binary is None:
         raise claude_code.ClaudeCodeError(
@@ -173,6 +181,11 @@ def _build_argv(slug: str, extra_args: list[str], *, structured: bool = True) ->
             retryable=False,
         )
     argv = [binary, *_BASE_ARGS, "--model", slug]
+    if system_prompt_file is not None:
+        # The system prompt goes here, not in the stdin user message, so the CLI
+        # keeps it as a stable cache-controlled prefix: a repeated prompt is a
+        # server-side cache hit across turns instead of a full re-prefill.
+        argv += ["--system-prompt-file", system_prompt_file]
     if structured:
         # Only agent turns speak the {text, tool_calls} envelope. Forcing the
         # schema on a one-shot completion would bury the caller's answer inside it.
@@ -312,10 +325,23 @@ def _encode_message(message: dict[str, Any]) -> str:
     return json.dumps(message, separators=(",", ":")) + "\n"
 
 
+def _write_system_prompt(system_prompt: str) -> str:
+    """Write the system prompt to a temp file for ``--system-prompt-file``.
+
+    A file (not an argv string) avoids ARG_MAX limits on a large preamble and
+    keeps the bytes identical turn to turn so the server-side cache hits.
+    """
+    fd, path = tempfile.mkstemp(prefix="strix-claude-sysprompt-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(system_prompt)
+    return path
+
+
 async def run_turn(
     slug: str,
     message: dict[str, Any],
     *,
+    system_prompt: str | None = None,
     extra_args: list[str] | None = None,
     structured: bool = True,
     timeout: float | None = None,
@@ -332,9 +358,17 @@ async def run_turn(
     Raises :class:`claude_code.ClaudeCodeError` on a non-zero exit, a timeout, or
     a stream with no result event; the caller decodes it via ``claude_bridge``.
     """
-    argv = _build_argv(slug, extra_args or [], structured=structured)
-    completed = await _execute(argv, _encode_message(message), _turn_timeout(timeout))
-    return _decode_transcript(completed)
+    prompt_file = _write_system_prompt(system_prompt) if system_prompt else None
+    try:
+        argv = _build_argv(
+            slug, extra_args or [], structured=structured, system_prompt_file=prompt_file
+        )
+        completed = await _execute(argv, _encode_message(message), _turn_timeout(timeout))
+        return _decode_transcript(completed)
+    finally:
+        if prompt_file is not None:
+            with contextlib.suppress(OSError):
+                Path(prompt_file).unlink(missing_ok=True)
 
 
 def _tail(stderr: str, *, limit: int = 400) -> str:
