@@ -318,15 +318,16 @@ class _ClaudeCodeModel(Model):
         # wire for, but two fields are real instructions from the rest of Strix
         # and are honoured: the request timeout (LLM_TIMEOUT) bounds the turn,
         # and parallel_tool_calls=False asks for one call per step.
-        # The prompt templates carry a `<cache_point>` marker for the LiteLLM
-        # cache-prefix split (`_split_cached_prefix`). This transport has no
-        # cache-point wire, so it strips the marker the same way every other
-        # non-LiteLLM route does, rather than leaking the literal token into the
-        # system prompt sent to `claude -p`.
+        # Strip the LiteLLM `<cache_point>` marker so it never leaks into the
+        # system prompt we send (this transport has no cache-point wire).
         if system_instructions:
             system_instructions = system_instructions.replace(CACHE_POINT, "")
+        # The system prompt travels via --system-prompt-file (run_turn), not in
+        # the stdin user message, so the CLI keeps it as a stable cache-controlled
+        # prefix — a repeated preamble is a cache hit across turns, not a full
+        # re-prefill. Only the conversation goes in the message.
         message = claude_bridge.build_message(
-            system_instructions,
+            None,
             input,
             tools,
             parallel_tool_calls=model_settings.parallel_tool_calls is not False,
@@ -334,6 +335,7 @@ class _ClaudeCodeModel(Model):
         result = await claude_process.run_turn(
             self._slug,
             message,
+            system_prompt=system_instructions,
             extra_args=self._extra_args(),
             structured=bool(tools),
             timeout=_request_timeout(model_settings),

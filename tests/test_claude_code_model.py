@@ -750,3 +750,44 @@ def test_the_executor_is_resized_with_the_bound(monkeypatch: pytest.MonkeyPatch)
         return first, claude_process._get_executor(loop)._max_workers
 
     assert asyncio.run(_sizes()) == (2, 5)
+
+
+def test_system_prompt_goes_via_file_not_the_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The preamble must travel as system_prompt (-> --system-prompt-file), not in
+    the stdin user message, so the CLI can cache it across turns."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_turn(_slug: str, message: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        captured["message"] = message
+        captured["system_prompt"] = kwargs.get("system_prompt")
+        return _result_event("simple_text.jsonl")
+
+    monkeypatch.setattr(claude_process, "run_turn", _fake_run_turn)
+    model = _ClaudeCodeModel("claude-opus-4-8")
+    asyncio.run(
+        model.get_response(
+            "STRIX-PREAMBLE-MARKER",
+            [{"role": "user", "content": "go"}],
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+    assert captured["system_prompt"] == "STRIX-PREAMBLE-MARKER"
+    assert "STRIX-PREAMBLE-MARKER" not in _message_text(captured["message"])
+
+
+def test_build_argv_adds_system_prompt_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(claude_code, "binary_path", lambda: "/usr/bin/claude")
+    sp = "sysprompt.txt"
+    argv = claude_process._build_argv("claude-opus-4-8", [], structured=True, system_prompt_file=sp)
+    assert "--system-prompt-file" in argv
+    assert argv[argv.index("--system-prompt-file") + 1] == sp
+    # not requested -> not present
+    bare = claude_process._build_argv("claude-opus-4-8", [], structured=True)
+    assert "--system-prompt-file" not in bare
