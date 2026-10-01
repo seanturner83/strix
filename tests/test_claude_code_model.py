@@ -189,8 +189,9 @@ def test_run_strips_cache_point_marker_from_system_prompt(
     rather than leaked verbatim into the prompt sent to `claude -p`."""
     captured: dict[str, Any] = {}
 
-    async def _fake_run_turn(_slug: str, message: dict[str, Any], **_: Any) -> dict[str, Any]:
+    async def _fake_run_turn(_slug: str, message: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         captured["message"] = message
+        captured["system_prompt"] = kwargs.get("system_prompt")
         return _result_event("simple_text.jsonl")
 
     monkeypatch.setattr(claude_process, "run_turn", _fake_run_turn)
@@ -212,10 +213,13 @@ def test_run_strips_cache_point_marker_from_system_prompt(
         )
     )
 
-    text = _message_text(captured["message"])
-    assert CACHE_POINT not in text
-    assert "You are Strix." in text
-    assert "only api/" in text
+    # The system prompt now travels via --system-prompt-file (run_turn's
+    # system_prompt), stripped of the marker — not embedded in the message.
+    sp = captured["system_prompt"]
+    assert CACHE_POINT not in sp
+    assert "You are Strix." in sp
+    assert "only api/" in sp
+    assert CACHE_POINT not in _message_text(captured["message"])
 
 
 def test_reasoning_effort_becomes_extra_args() -> None:
