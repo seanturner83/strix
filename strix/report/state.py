@@ -800,7 +800,18 @@ class ReportState:
             self.run_record["status"] = status
 
         self._sync_llm_usage_record()
+        self._sync_triage_record(log_summary=mark_complete)
         self._save_artifacts()
+
+    def _sync_triage_record(self, *, log_summary: bool = False) -> None:
+        from strix.config import triage_stats
+
+        if not triage_stats.has_data():
+            return
+        snap = triage_stats.snapshot()
+        self.run_record["triage"] = snap
+        if log_summary:
+            logger.info("triage summary: %s", snap)
 
     def cleanup(self, status: str = "stopped") -> None:
         self.save_run_data(status=status)

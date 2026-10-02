@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from strix.config import models, triage
@@ -208,3 +209,62 @@ def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert result is tier_sentinel  # routed to the tier model, not the default
     assert built["model_id"] == "claude-code/claude-haiku-4-5"
+
+
+class _FakeResp:
+    def __init__(self, tool_names: list[str]) -> None:
+        self.output = [SimpleNamespace(type="function_call", name=t) for t in tool_names]
+
+
+def test_audit_rate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRIX_TRIAGE_AUDIT_RATE", raising=False)
+    assert triage.audit_rate() == 0.0
+    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", "0.05")
+    assert triage.audit_rate() == 0.05
+    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", "9")  # clamped to 1.0
+    assert triage.audit_rate() == 1.0
+
+
+def test_tool_names_extracts_function_calls() -> None:
+    assert models._tool_names(_FakeResp(["shell", "browser"])) == {"shell", "browser"}
+
+
+def _audit(monkeypatch: pytest.MonkeyPatch, tier: str, rate: str) -> int:
+    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", rate)
+    calls = {"frontier": 0}
+
+    class _Frontier:
+        async def get_response(self, *_a: Any, **_k: Any) -> Any:
+            calls["frontier"] += 1
+            return _FakeResp(["shell"])
+
+    model = _TriageModel(object(), lambda _m, _b: _Frontier())  # type: ignore[arg-type]
+    asyncio.run(
+        model._maybe_audit(
+            tier,
+            _FakeResp(["shell"]),
+            system_instructions=None,
+            input=[],
+            model_settings=None,  # type: ignore[arg-type]
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=None,  # type: ignore[arg-type]
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+    return calls["frontier"]
+
+
+def test_audit_fires_on_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _audit(monkeypatch, "mechanical", "1.0") == 1  # frontier ran for comparison
+
+
+def test_audit_skips_reasoning_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _audit(monkeypatch, "reasoning", "1.0") == 0  # no self-audit of the frontier
+
+
+def test_audit_rate_zero_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _audit(monkeypatch, "mechanical", "0") == 0
