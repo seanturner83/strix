@@ -555,6 +555,9 @@ class _TriageModel(Model):
         tier, reason = await classify_turn(model_input, tools)
         model_id = tier_model(tier)[0]
         logger.info("triage tier=%s model=%s mode=%s reason=%s", tier, model_id, mode, reason)
+        from strix.config import triage_stats
+
+        triage_stats.record_route(tier, model_id, live=(mode == "live"))
         if mode != "live":
             return self._default, None  # shadow: log the plan, serve from the default
         return self._tier_model(tier), tier
@@ -600,10 +603,14 @@ class _TriageModel(Model):
             return
         routed = _tool_names(routed_response)
         frontier = _tool_names(frontier_response)
+        agreed = routed == frontier
+        from strix.config import triage_stats
+
+        triage_stats.record_audit(agreed=agreed)
         logger.info(
             "triage audit tier=%s agreed=%s routed_tools=%s frontier_tools=%s",
             tier,
-            routed == frontier,
+            agreed,
             sorted(routed),
             sorted(frontier),
         )
