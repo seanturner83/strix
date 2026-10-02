@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import cast
 
 
 logger = logging.getLogger(__name__)
@@ -50,10 +51,16 @@ _FLEET: dict[str, dict[str, object]] = {
                    "cap": "high", "regime": "api", "cost": 3.0},
     "api-haiku": {"model": "anthropic/claude-haiku-4-5", "api_base": None,
                   "cap": "med", "regime": "api", "cost": 0.8},
-    # local regime (free, unlimited, hardware-bound)
-    "local-big": {"model": "qwen3.8-27b-ud-iq2xxs-q8head", "api_base": "http://localhost:1234/v1",
+    # local regime (free, unlimited, hardware-bound). Endpoints are env-overridable
+    # so a LAN rig (e.g. a GPU workstation) stays out of committed source: set
+    # STRIX_LOCAL_BIG_BASE / _MODEL and STRIX_LOCAL_SMALL_BASE / _MODEL. The model id
+    # keeps the `openai/` prefix so a slashed LM Studio id (`openai/qwen/qwen3.8-27b`)
+    # routes to the OpenAI-compatible provider bound to api_base, not a LiteLLM prefix.
+    "local-big": {"model": "openai/qwen/qwen3.8-27b", "api_base": "http://localhost:1234/v1",
+                  "model_env": "STRIX_LOCAL_BIG_MODEL", "base_env": "STRIX_LOCAL_BIG_BASE",
                   "cap": "med", "regime": "local", "cost": 0.0},
-    "local-small": {"model": "minicpm5-1b", "api_base": "http://localhost:1234/v1",
+    "local-small": {"model": "openai/qwen2.5-7b-instruct", "api_base": "http://localhost:1235/v1",
+                    "model_env": "STRIX_LOCAL_SMALL_MODEL", "base_env": "STRIX_LOCAL_SMALL_BASE",
                     "cap": "low", "regime": "local", "cost": 0.0},
 }
 
@@ -61,8 +68,8 @@ _DEFAULT_TIER_MAP = {"reasoning": "opus", "standard": "sonnet", "mechanical": "h
 
 
 def fleet() -> dict[str, tuple[str, str | None]]:
-    """The fleet as name -> (model_id, api_base)."""
-    return {name: (str(e["model"]), e["api_base"]) for name, e in _FLEET.items()}  # type: ignore[misc]
+    """The fleet as name -> (model_id, api_base), env overrides applied."""
+    return {name: _entry_model(e) for name, e in _FLEET.items()}
 
 
 def route_policy() -> str | None:
@@ -72,7 +79,21 @@ def route_policy() -> str | None:
 
 
 def _entry_model(entry: dict[str, object]) -> tuple[str, str | None]:
-    return str(entry["model"]), entry["api_base"]  # type: ignore[return-value]
+    """``(model_id, api_base)`` for a fleet entry, applying any env overrides.
+
+    An entry may name ``model_env``/``base_env`` env vars (used by the local
+    tiers so a LAN endpoint is set at runtime, not hardcoded). A set, non-empty
+    value wins; otherwise the committed default stands.
+    """
+    model = str(entry["model"])
+    api_base = cast("str | None", entry["api_base"])
+    model_env = entry.get("model_env")
+    if isinstance(model_env, str) and (override := os.environ.get(model_env, "").strip()):
+        model = override
+    base_env = entry.get("base_env")
+    if isinstance(base_env, str) and (override := os.environ.get(base_env, "").strip()):
+        api_base = override
+    return model, api_base
 
 
 def _pick_by_policy(tier: str, policy: str) -> tuple[str, str | None] | None:
