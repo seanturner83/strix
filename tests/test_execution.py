@@ -1308,3 +1308,56 @@ async def test_autonomous_nudge_does_not_offer_the_user() -> None:
     )
 
     assert "respond_to_user" not in items[0]["content"]
+
+
+class _FinalOutput:
+    def __init__(self, text: str | None) -> None:
+        self.final_output = text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('All reporting tools return "No such tool available" in this environment.', True),
+        ("I cannot call create_vulnerability_report here.", True),
+        ("No tools available to me.", True),
+        ("Found SQL injection in app.py; filing it now.", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_detects_tool_denial_confabulation(text: str | None, expected: bool) -> None:
+    """The opus-4-8 'tools are unavailable' excuse is detected so the nudge can rebut it."""
+    assert execution._claims_tools_unavailable(_FinalOutput(text)) is expected
+
+
+@pytest.mark.asyncio
+async def test_denial_nudge_names_the_reporting_tool() -> None:
+    """When the agent claimed tools were missing, rebut the premise and name the tool."""
+    items = await execution._append_tool_required_message(
+        session=None,
+        context={"parent_id": None},
+        attempt=1,
+        limit=3,
+        interactive=False,
+        tools_denied=True,
+    )
+
+    content = items[0]["content"]
+    assert "create_vulnerability_report" in content
+    assert "IS registered and callable" in content
+
+
+@pytest.mark.asyncio
+async def test_ordinary_nudge_omits_the_denial_rebuttal() -> None:
+    """A plain missing-tool-call stall should not get the confabulation rebuttal."""
+    items = await execution._append_tool_required_message(
+        session=None,
+        context={"parent_id": None},
+        attempt=1,
+        limit=3,
+        interactive=False,
+        tools_denied=False,
+    )
+
+    assert "create_vulnerability_report" not in items[0]["content"]
