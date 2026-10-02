@@ -38,12 +38,12 @@ BASE_ENV = {
     "STRIX_TIER_REASONING": "opus",
     "STRIX_TIER_STANDARD": "haiku",
     "STRIX_TIER_MECHANICAL": "haiku",
-    "STRIX_TRIAGE_AUDIT_RATE": "0.3",
+    "STRIX_TRIAGE_AUDIT_RATE": "0.2",
 }
 
-# One knob varied per config. "baseline" turns routing off (all orchestrator).
+# One knob varied per config. Cheap/routed configs FIRST so a quota window that
+# blows on the heavy all-opus baseline (last) still leaves the routed data.
 CONFIGS: list[dict[str, dict[str, str]]] = [
-    {"name": "baseline-opus", "env": {"STRIX_TRIAGE": "off"}},
     {
         "name": "route-floor-0.3",
         "env": {"STRIX_TRIAGE": "live", "STRIX_TRIAGE_MIN_CONFIDENCE": "0.3"},
@@ -52,6 +52,7 @@ CONFIGS: list[dict[str, dict[str, str]]] = [
         "name": "route-floor-0.5",
         "env": {"STRIX_TRIAGE": "live", "STRIX_TRIAGE_MIN_CONFIDENCE": "0.5"},
     },
+    {"name": "baseline-opus", "env": {"STRIX_TRIAGE": "off"}},
 ]
 
 
