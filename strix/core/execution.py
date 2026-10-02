@@ -575,6 +575,7 @@ async def _run_until_lifecycle(
             attempt=recoveries,
             limit=recovery_limit,
             interactive=interactive,
+            tools_denied=_claims_tools_unavailable(result),
         )
 
 
@@ -873,6 +874,37 @@ def _final_output_preview(result: RunResultBase | None) -> str:
     return text[:300]
 
 
+# Phrases a model emits when it CONFABULATES that its tools are unavailable and
+# narrates findings as plain text instead of calling the reporting tool. Observed
+# with claude-opus-4-8 via the claude-code backend: it wrote 'all ... tools return
+# "No such tool available"' and skipped create_vulnerability_report, despite the
+# tools being registered and callable (it successfully called finish_scan in the
+# same run). The generic "call a tool" nudge doesn't dislodge this — the model has
+# convinced itself the tools don't exist — so we rebut the false premise directly.
+_TOOL_DENIAL_SIGNATURES = (
+    "no such tool",
+    "no tools available",
+    "tool is not available",
+    "tools are not available",
+    "tools return",
+    "no tool available",
+    "not a valid tool",
+    "tools appear unavailable",
+    "unable to call",
+    "cannot call",
+    "could not call",
+)
+
+
+def _claims_tools_unavailable(result: RunResultBase | None) -> bool:
+    """True when the agent's last message blamed missing/broken tools for stalling."""
+    final_output = getattr(result, "final_output", None)
+    if final_output is None:
+        return False
+    text = str(final_output).casefold()
+    return any(sig in text for sig in _TOOL_DENIAL_SIGNATURES)
+
+
 async def _append_tool_required_message(
     *,
     session: Session | None,
@@ -880,10 +912,23 @@ async def _append_tool_required_message(
     attempt: int,
     limit: int,
     interactive: bool,
+    tools_denied: bool = False,
 ) -> list[dict[str, str]]:
     finish_tool = "finish_scan" if context.get("parent_id") is None else "agent_finish"
+    # Rebut the specific confabulation where the model claims its tools are
+    # unavailable and narrates findings as text. Naming create_vulnerability_report
+    # is what actually unsticks it — the generic nudge lets it repeat the excuse.
+    denial_rebuttal = (
+        "Your previous message claimed a tool is unavailable (e.g. returns 'No such tool "
+        "available'). That is false: every tool in your tool list IS registered and callable "
+        "in this environment — call it directly instead of narrating that it is missing. If "
+        "you found a vulnerability, you MUST report it by calling create_vulnerability_report; "
+        "describing it in plain text does not file it. "
+        if tools_denied
+        else ""
+    )
     if interactive:
-        message = (
+        message = denial_rebuttal + (
             "Your previous message ended a turn without a tool call. Plain text never ends "
             "execution and never hands control to the user: it is shown to the user, and the "
             "run continues. Continue immediately and call exactly one tool. "
@@ -895,7 +940,7 @@ async def _append_tool_required_message(
             f"This is recovery attempt {attempt}/{limit}."
         )
     else:
-        message = (
+        message = denial_rebuttal + (
             "Your previous response ended the autonomous run without a lifecycle tool "
             "call. That is invalid in non-interactive mode; plain text final answers are "
             "ignored. Continue immediately and call exactly one tool. "
