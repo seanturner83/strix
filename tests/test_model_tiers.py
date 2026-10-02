@@ -15,6 +15,11 @@ def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRIX_ROUTE_POLICY", raising=False)
     for tier in ("REASONING", "STANDARD", "MECHANICAL"):
         monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
+    for var in (
+        "STRIX_LOCAL_BIG_BASE", "STRIX_LOCAL_BIG_MODEL",
+        "STRIX_LOCAL_SMALL_BASE", "STRIX_LOCAL_SMALL_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_default_map_is_known_good_4x(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,7 +44,10 @@ def test_override_beats_policy_and_default(monkeypatch: pytest.MonkeyPatch) -> N
 def test_override_with_fleet_name_carries_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("STRIX_TIER_MECHANICAL", "local-small")
-    assert model_tiers.tier_model("mechanical") == ("minicpm5-1b", "http://localhost:1234/v1")
+    assert model_tiers.tier_model("mechanical") == (
+        "openai/qwen2.5-7b-instruct",
+        "http://localhost:1235/v1",
+    )
 
 
 def test_policy_subscription_picks_cheapest_sufficient(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,7 +76,7 @@ def test_policy_local_falls_back_in_regime_when_under_capable(
     assert m_base == "http://localhost:1234/v1"
     # reasoning (high): local has no high model -> stay in regime, use most capable local
     assert model_tiers.tier_model("reasoning") == (
-        "qwen3.8-27b-ud-iq2xxs-q8head",
+        "openai/qwen/qwen3.8-27b",
         "http://localhost:1234/v1",
     )
 
@@ -78,3 +86,23 @@ def test_fleet_spans_three_regimes() -> None:
     assert {"opus", "sonnet", "haiku"} <= names  # subscription
     assert {"api-opus", "api-sonnet", "api-haiku"} <= names  # metered
     assert {"local-big", "local-small"} <= names  # local
+
+
+def test_local_endpoints_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A LAN rig points the local tiers at itself via env, not committed source."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("STRIX_TIER_REASONING", "local-big")
+    monkeypatch.setenv("STRIX_TIER_MECHANICAL", "local-small")
+    # defaults when nothing is set
+    assert model_tiers.tier_model("reasoning") == (
+        "openai/qwen/qwen3.8-27b", "http://localhost:1234/v1",
+    )
+    # env wins for base and/or model id, independently
+    monkeypatch.setenv("STRIX_LOCAL_BIG_BASE", "http://192.168.0.13:1234/v1")
+    monkeypatch.setenv("STRIX_LOCAL_SMALL_MODEL", "openai/llama-3.1-8b-instruct")
+    assert model_tiers.tier_model("reasoning") == (
+        "openai/qwen/qwen3.8-27b", "http://192.168.0.13:1234/v1",
+    )
+    assert model_tiers.tier_model("mechanical") == (
+        "openai/llama-3.1-8b-instruct", "http://localhost:1235/v1",
+    )
