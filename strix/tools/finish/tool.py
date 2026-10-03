@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
@@ -13,6 +14,43 @@ from strix.core.agents import coordinator_from_context
 
 
 logger = logging.getLogger(__name__)
+
+# A finding is only recorded when filed via ``create_vulnerability_report``. Models
+# (especially smaller/local ones) sometimes analyse correctly but then *describe* the
+# vulnerabilities in the finish_scan summary instead of filing them — so the scan ends
+# with findings in the prose and zero in the report store. These signal that the final
+# report PROSE enumerates rated vulnerabilities, used to catch that discrepancy.
+_SEVERITY_WORD = re.compile(r"\b(critical|high|medium|low)\b", re.IGNORECASE)
+_SEVERITY_TABLE_ROW = re.compile(
+    r"\|[^|\n]*\b(critical|high|medium|low)\b[^|\n]*\|", re.IGNORECASE
+)
+_VULN_CLASSES = re.compile(
+    r"\b(xss|cross-site scripting|sql injection|sqli|command injection|ssti|"
+    r"template injection|rce|remote code execution|path traversal|directory traversal|"
+    r"idor|csrf|ssrf|broken access control|insecure deserialization|"
+    r"hardcoded (?:secret|token|credential|password|key))\b",
+    re.IGNORECASE,
+)
+
+
+def _summary_claims_findings(*texts: str) -> bool:
+    """True when the final report prose enumerates rated vulnerabilities.
+
+    Deliberately conservative — keys off signals a genuinely clean scan won't emit:
+    a CVSS score, a markdown table row carrying a severity rating, or two-plus distinct
+    vulnerability classes named alongside two-plus severity ratings. A clean scan ("no
+    vulnerabilities identified") names no classes and no severities, so it won't trip.
+    """
+    blob = "\n".join(t for t in texts if t)
+    if not blob.strip():
+        return False
+    if "cvss" in blob.lower():
+        return True
+    if _SEVERITY_TABLE_ROW.search(blob):
+        return True
+    classes = {m.group(0).lower() for m in _VULN_CLASSES.finditer(blob)}
+    severities = _SEVERITY_WORD.findall(blob)
+    return len(classes) >= 2 and len(severities) >= 2
 
 
 def _do_finish(
@@ -56,6 +94,23 @@ def _do_finish(
                 "scan_completed": True,
                 "message": "Scan completed (not persisted)",
                 "warning": "Results could not be persisted - report state unavailable",
+            }
+        if not report_state.vulnerability_reports and _summary_claims_findings(
+            executive_summary, technical_analysis
+        ):
+            logger.warning("finish_scan blocked: summary describes findings but none were filed")
+            return {
+                "success": False,
+                "error": "Findings described in the summary but none were filed",
+                "message": (
+                    "Your executive_summary/technical_analysis describes vulnerabilities, but 0 "
+                    "were filed via create_vulnerability_report. A finding is ONLY recorded when "
+                    "filed with create_vulnerability_report (one call per finding, with its "
+                    "code_locations and evidence) — the executive summary is not a substitute. "
+                    "File each vulnerability you described, then call finish_scan again. If you "
+                    "genuinely found nothing, restate the summary to say no vulnerabilities were "
+                    "identified (then no filing is needed)."
+                ),
             }
         report_state.update_scan_final_fields(
             executive_summary=executive_summary.strip(),
