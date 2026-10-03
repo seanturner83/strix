@@ -1,4 +1,4 @@
-"""OODA turn triage: tier classification, backends, mode gating, delegation."""
+"""OODA turn routing: tier classification, backends, mode gating, delegation."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from strix.config import models, triage
-from strix.config.models import _TriageModel
+from strix.config import models, routing
+from strix.config.models import _RoutingModel
 
 
 if TYPE_CHECKING:
@@ -22,7 +22,7 @@ def _call(name: str) -> dict[str, Any]:
 
 
 def _tier(model_input: Any, tools: Any = _TOOLS) -> str:
-    return asyncio.run(triage.classify_turn(model_input, tools))[0]
+    return asyncio.run(routing.classify_turn(model_input, tools))[0]
 
 
 def test_mechanical_last_tool_is_mechanical_tier() -> None:
@@ -40,7 +40,7 @@ def test_uses_the_most_recent_call() -> None:
 
 
 def test_no_tools_is_non_agent_turn() -> None:
-    tier, reason = asyncio.run(triage.classify_turn([_call("read_file")], []))
+    tier, reason = asyncio.run(routing.classify_turn([_call("read_file")], []))
     assert tier == "reasoning"
     assert reason == "non-agent turn"
 
@@ -50,20 +50,20 @@ def test_no_recent_tool_defaults_to_reasoning() -> None:
 
 
 def test_mode_and_backend_gating(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STRIX_TRIAGE", raising=False)
-    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.delenv("STRIX_ROUTING", raising=False)
+    monkeypatch.delenv("STRIX_ROUTING_BACKEND", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    assert triage.triage_mode() == "off"
+    assert routing.routing_mode() == "off"
     # No explicit backend, no Jev endpoint -> heuristic floor.
-    assert triage.triage_backend() == "heuristic"
+    assert routing.routing_backend() == "heuristic"
     # No explicit backend but a Jev endpoint configured -> lean on Jev (S1).
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    assert triage.triage_backend() == "jev"
+    assert routing.routing_backend() == "jev"
     # Explicit backend always wins.
-    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "heuristic")
-    assert triage.triage_backend() == "heuristic"
-    monkeypatch.setenv("STRIX_TRIAGE", "shadow")
-    assert triage.triage_mode() == "shadow"
+    monkeypatch.setenv("STRIX_ROUTING_BACKEND", "heuristic")
+    assert routing.routing_backend() == "heuristic"
+    monkeypatch.setenv("STRIX_ROUTING", "shadow")
+    assert routing.routing_mode() == "shadow"
 
 
 def test_digest_is_compact_not_the_whole_context() -> None:
@@ -71,7 +71,7 @@ def test_digest_is_compact_not_the_whole_context() -> None:
         _call("read_file"),
         {"type": "function_call_output", "output": "X" * 5000},
     ]
-    d = triage.digest(conv)
+    d = routing.digest(conv)
     assert d["last_tool"] == "read_file"
     assert 0 < len(d["last_output"]) <= 600  # truncated, not the full 5000
 
@@ -79,20 +79,20 @@ def test_digest_is_compact_not_the_whole_context() -> None:
 def test_jev_backend_falls_back_to_heuristic_when_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
+    monkeypatch.setenv("STRIX_ROUTING_BACKEND", "jev")
 
     async def _none(_digest: dict[str, str]) -> None:
         return None
 
-    monkeypatch.setattr("strix.config.jev_triage.jev_classify_tier", _none)
+    monkeypatch.setattr("strix.config.jev_routing.jev_classify_tier", _none)
     # Jev unavailable → heuristic decides (mechanical tool → mechanical tier).
     assert _tier([_call("list_coverage")]) == "mechanical"
 
 
 def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shadow mode must classify but never alter what the inner model returns."""
-    monkeypatch.setenv("STRIX_TRIAGE", "shadow")
-    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.setenv("STRIX_ROUTING", "shadow")
+    monkeypatch.delenv("STRIX_ROUTING_BACKEND", raising=False)
     sentinel = object()
     seen: dict[str, Any] = {}
 
@@ -104,7 +104,7 @@ def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
     def _factory(_model_id: str, _api_base: str | None) -> Any:
         raise AssertionError("shadow mode must not build a tier model")
 
-    model = _TriageModel(_FakeInner(), _factory)  # type: ignore[arg-type]
+    model = _RoutingModel(_FakeInner(), _factory)  # type: ignore[arg-type]
     result = asyncio.run(
         model.get_response(
             None,
@@ -124,29 +124,29 @@ def test_shadow_model_delegates_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_classify_mission_uses_jev_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "jev")
+    monkeypatch.setenv("STRIX_ROUTING_BACKEND", "jev")
 
     async def _jev(_task: str) -> tuple[str, str]:
         return "standard", "jev mission"
 
-    monkeypatch.setattr("strix.config.jev_triage.jev_classify_mission", _jev)
-    tier, _ = asyncio.run(triage.classify_mission("recon the /api surface"))
+    monkeypatch.setattr("strix.config.jev_routing.jev_classify_mission", _jev)
+    tier, _ = asyncio.run(routing.classify_mission("recon the /api surface"))
     assert tier == "standard"
 
 
 def test_classify_mission_defaults_safe_without_jev(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_TRIAGE_BACKEND", "heuristic")
-    tier, _ = asyncio.run(triage.classify_mission("exploit the SQLi at /login"))
+    monkeypatch.setenv("STRIX_ROUTING_BACKEND", "heuristic")
+    tier, _ = asyncio.run(routing.classify_mission("exploit the SQLi at /login"))
     assert tier == "reasoning"  # heuristic can't read a mission -> safe tier
 
 
 def test_subagent_routing_off_when_not_live(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_TRIAGE", "shadow")  # not live
+    monkeypatch.setenv("STRIX_ROUTING", "shadow")  # not live
     assert asyncio.run(models.subagent_model_for_task("any mission")) is None
 
 
 def test_subagent_routing_builds_tier_model_when_live(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_TRIAGE", "live")
+    monkeypatch.setenv("STRIX_ROUTING", "live")
 
     async def _mission(_task: str) -> tuple[str, str]:
         return "mechanical", "test"
@@ -158,7 +158,7 @@ def test_subagent_routing_builds_tier_model_when_live(monkeypatch: pytest.Monkey
         seen["model_id"] = model_id
         return sentinel
 
-    monkeypatch.setattr("strix.config.triage.classify_mission", _mission)
+    monkeypatch.setattr("strix.config.routing.classify_mission", _mission)
     monkeypatch.setattr(models, "_tier_model_factory", _factory)
     for t in ("MECHANICAL", "STANDARD", "REASONING"):
         monkeypatch.delenv(f"STRIX_TIER_{t}", raising=False)
@@ -171,9 +171,9 @@ def test_subagent_routing_builds_tier_model_when_live(monkeypatch: pytest.Monkey
 
 def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """Un-pinned live mode serves the turn from the tier's model, not the default."""
-    monkeypatch.setenv("STRIX_TRIAGE", "live")
-    monkeypatch.setenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", "0")  # allow per-turn downgrade
-    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.setenv("STRIX_ROUTING", "live")
+    monkeypatch.setenv("STRIX_ROUTING_PIN_ORCHESTRATOR", "0")  # allow per-turn downgrade
+    monkeypatch.delenv("STRIX_ROUTING_BACKEND", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)  # -> heuristic backend
     for tier in ("MECHANICAL", "STANDARD", "REASONING"):
         monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
@@ -192,7 +192,7 @@ def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> 
         built["model_id"] = model_id
         return _Tier()
 
-    model = _TriageModel(_Default(), _factory)  # type: ignore[arg-type]
+    model = _RoutingModel(_Default(), _factory)  # type: ignore[arg-type]
     # A mechanical tool -> mechanical tier -> haiku in the default map.
     result = asyncio.run(
         model.get_response(
@@ -214,10 +214,10 @@ def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_pinned_live_serves_default_not_tier(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pinned (default): live mode classifies/logs the plan but serves the default —
-    the root/orchestrator is never downgraded to a cheap tier by the per-turn triager."""
-    monkeypatch.setenv("STRIX_TRIAGE", "live")
-    monkeypatch.delenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", raising=False)  # default = pinned
-    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    the root/orchestrator is never downgraded to a cheap tier by the per-turn routingr."""
+    monkeypatch.setenv("STRIX_ROUTING", "live")
+    monkeypatch.delenv("STRIX_ROUTING_PIN_ORCHESTRATOR", raising=False)  # default = pinned
+    monkeypatch.delenv("STRIX_ROUTING_BACKEND", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     for tier in ("MECHANICAL", "STANDARD", "REASONING"):
         monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
@@ -230,7 +230,7 @@ def test_pinned_live_serves_default_not_tier(monkeypatch: pytest.MonkeyPatch) ->
     def _factory(_model_id: str, _api_base: str | None) -> Any:
         raise AssertionError("pinned mode must not build or route to a tier model")
 
-    model = _TriageModel(_Default(), _factory)  # type: ignore[arg-type]
+    model = _RoutingModel(_Default(), _factory)  # type: ignore[arg-type]
     result = asyncio.run(
         model.get_response(
             None,
@@ -249,11 +249,11 @@ def test_pinned_live_serves_default_not_tier(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_pin_orchestrator_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", raising=False)
-    assert triage.pin_orchestrator() is True  # pinned by default
+    monkeypatch.delenv("STRIX_ROUTING_PIN_ORCHESTRATOR", raising=False)
+    assert routing.pin_orchestrator() is True  # pinned by default
     for off in ("0", "false", "no", "off", "OFF"):
-        monkeypatch.setenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", off)
-        assert triage.pin_orchestrator() is False, off
+        monkeypatch.setenv("STRIX_ROUTING_PIN_ORCHESTRATOR", off)
+        assert routing.pin_orchestrator() is False, off
 
 
 class _FakeResp:
@@ -262,12 +262,12 @@ class _FakeResp:
 
 
 def test_audit_rate_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STRIX_TRIAGE_AUDIT_RATE", raising=False)
-    assert triage.audit_rate() == 0.0
-    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", "0.05")
-    assert triage.audit_rate() == 0.05
-    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", "9")  # clamped to 1.0
-    assert triage.audit_rate() == 1.0
+    monkeypatch.delenv("STRIX_ROUTING_AUDIT_RATE", raising=False)
+    assert routing.audit_rate() == 0.0
+    monkeypatch.setenv("STRIX_ROUTING_AUDIT_RATE", "0.05")
+    assert routing.audit_rate() == 0.05
+    monkeypatch.setenv("STRIX_ROUTING_AUDIT_RATE", "9")  # clamped to 1.0
+    assert routing.audit_rate() == 1.0
 
 
 def test_tool_names_extracts_function_calls() -> None:
@@ -275,7 +275,7 @@ def test_tool_names_extracts_function_calls() -> None:
 
 
 def _audit(monkeypatch: pytest.MonkeyPatch, tier: str, rate: str) -> int:
-    monkeypatch.setenv("STRIX_TRIAGE_AUDIT_RATE", rate)
+    monkeypatch.setenv("STRIX_ROUTING_AUDIT_RATE", rate)
     calls = {"frontier": 0}
 
     class _Frontier:
@@ -283,7 +283,7 @@ def _audit(monkeypatch: pytest.MonkeyPatch, tier: str, rate: str) -> int:
             calls["frontier"] += 1
             return _FakeResp(["shell"])
 
-    model = _TriageModel(object(), lambda _m, _b: _Frontier())  # type: ignore[arg-type]
+    model = _RoutingModel(object(), lambda _m, _b: _Frontier())  # type: ignore[arg-type]
     asyncio.run(
         model._maybe_audit(
             tier,

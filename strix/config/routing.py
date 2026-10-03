@@ -1,4 +1,4 @@
-"""OODA turn triage — a System-1 gate on the per-turn orchestrator loop.
+"""OODA turn routing — a System-1 gate on the per-turn orchestrator loop.
 
 The orchestrator's turn loop is the hot path (~99% of a scan's tokens). Most
 turns cost a full big-model generation over a large context, yet many need far
@@ -7,7 +7,7 @@ the **capability tier** the turn needs; routing (later) maps each tier to the
 cheapest model that can serve it — a fleet of N models ordered by capability,
 not a binary cheap/big split.
 
-Two backends (``STRIX_TRIAGE_BACKEND``):
+Two backends (``STRIX_ROUTING_BACKEND``):
 
 - ``heuristic`` (default, zero-dependency) — keys off the last tool action. It
   can only reliably tell ``mechanical`` (observation follow-ups) from
@@ -17,7 +17,7 @@ Two backends (``STRIX_TRIAGE_BACKEND``):
   N-way capability routing**; the heuristic cannot separate ``standard`` from
   ``reasoning`` reliably, and Jev can.
 
-**Phase 1 is shadow-only** (``STRIX_TRIAGE=shadow``): the tier is logged, not
+**Phase 1 is shadow-only** (``STRIX_ROUTING=shadow``): the tier is logged, not
 acted on, so we can measure the tier distribution of the hot path — and compare
 the heuristic floor against what Jev unlocks — at zero quality risk.
 """
@@ -57,41 +57,41 @@ _MECHANICAL_TOOLS = frozenset(
 )
 
 
-def triage_mode() -> str:
+def routing_mode() -> str:
     """``"off"`` (default), ``"shadow"`` (classify + log, serve from default), or
     ``"live"`` (classify + log + route the turn to the tier's model)."""
-    mode = os.environ.get("STRIX_TRIAGE", "").strip().lower()
+    mode = os.environ.get("STRIX_ROUTING", "").strip().lower()
     return mode if mode in ("shadow", "live") else "off"
 
 
 def audit_rate() -> float:
     """Fraction of downgraded turns to also run on the frontier for comparison.
 
-    STRIX_TRIAGE_AUDIT_RATE in [0,1] (default 0 = off). The routed (cheap) model
+    STRIX_ROUTING_AUDIT_RATE in [0,1] (default 0 = off). The routed (cheap) model
     still serves the turn; the frontier result is only logged against it, so we
     measure how often a downgrade would have diverged — trust the routing with
     data instead of blindly.
     """
     try:
-        return max(0.0, min(1.0, float(os.environ.get("STRIX_TRIAGE_AUDIT_RATE", "").strip())))
+        return max(0.0, min(1.0, float(os.environ.get("STRIX_ROUTING_AUDIT_RATE", "").strip())))
     except ValueError:
         return 0.0
 
 
 def pin_orchestrator() -> bool:
-    """Whether the per-turn triager keeps the ROOT/orchestrator on its own model.
+    """Whether the per-turn routingr keeps the ROOT/orchestrator on its own model.
 
-    Default True. The per-turn triager effectively wraps the root agent (subagents
+    Default True. The per-turn routingr effectively wraps the root agent (subagents
     are bound per-mission via ``subagent_model_for_task``, bypassing it), and a
     misclassified reasoning turn downgraded to a weak tier makes the root itself
     drive the scan on a cheap model — which collapses it (observed: a heuristic sent
     100%% of turns to a local tier, 0 findings). Pinned, ``live`` mode still
     classifies + logs + records the *planned* tier (telemetry intact) but SERVES the
     default reasoning model for the root; the cache-coherent per-mission subagent
-    routing remains the sole live downward router. Set STRIX_TRIAGE_PIN_ORCHESTRATOR
+    routing remains the sole live downward router. Set STRIX_ROUTING_PIN_ORCHESTRATOR
     to a false-y value to restore per-turn downgrading of the root.
     """
-    return os.environ.get("STRIX_TRIAGE_PIN_ORCHESTRATOR", "1").strip().lower() not in (
+    return os.environ.get("STRIX_ROUTING_PIN_ORCHESTRATOR", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -99,14 +99,14 @@ def pin_orchestrator() -> bool:
     )
 
 
-def triage_backend() -> str:
+def routing_backend() -> str:
     """``"jev"`` when a TypeSafe/Jevstiller endpoint is configured, else ``"heuristic"``.
 
-    Explicit ``STRIX_TRIAGE_BACKEND`` wins. Otherwise we lean on Jev/Jevstiller
+    Explicit ``STRIX_ROUTING_BACKEND`` wins. Otherwise we lean on Jev/Jevstiller
     as the System-1 whenever it is available — the heuristic is only the
     fail-open floor for when no S1 service is configured (or a call errors).
     """
-    backend = os.environ.get("STRIX_TRIAGE_BACKEND", "").strip().lower()
+    backend = os.environ.get("STRIX_ROUTING_BACKEND", "").strip().lower()
     if backend in ("heuristic", "jev"):
         return backend
     from strix.config.jev_client import api_key  # noqa: PLC0415  # avoid import cost when off
@@ -152,7 +152,7 @@ def _last_output_snippet(model_input: str | list[Any], limit: int = 600) -> str:
 
 
 def digest(model_input: str | list[Any]) -> dict[str, str]:
-    """Compact features for a triage decision — never the whole context.
+    """Compact features for a routing decision — never the whole context.
 
     Sending the full conversation to the classifier would defeat the purpose;
     the tier is decidable from the last action (its command and a snippet of
@@ -181,9 +181,9 @@ async def classify_turn(model_input: str | list[Any], tools: list[Any]) -> tuple
     """
     if not tools:
         return _DEFAULT_TIER, "non-agent turn"
-    if triage_backend() == "jev":
-        # Local import: jev_triage imports TIERS from this module.
-        from strix.config.jev_triage import jev_classify_tier  # noqa: PLC0415
+    if routing_backend() == "jev":
+        # Local import: jev_routing imports TIERS from this module.
+        from strix.config.jev_routing import jev_classify_tier  # noqa: PLC0415
 
         result = await jev_classify_tier(digest(model_input))
         if result is not None:
@@ -198,8 +198,8 @@ async def classify_mission(task: str) -> tuple[str, str]:
     Jev-backed when configured; the heuristic can't read a free-text mission, so
     it falls back to the safe (frontier) tier rather than guess.
     """
-    if triage_backend() == "jev":
-        from strix.config.jev_triage import jev_classify_mission  # noqa: PLC0415
+    if routing_backend() == "jev":
+        from strix.config.jev_routing import jev_classify_mission  # noqa: PLC0415
 
         result = await jev_classify_mission(task)
         if result is not None:

@@ -507,16 +507,16 @@ class _TurnGuardModel(Model):
         self._log_dropped(limiter)
 
 
-class _TriageModel(Model):
-    """OODA triage on the per-turn loop — dynamic model selection.
+class _RoutingModel(Model):
+    """OODA routing on the per-turn loop — dynamic model selection.
 
     On each *agent* turn (tools present) it classifies the turn's capability tier
-    (``triage.classify_turn``), maps it to a model (``model_tiers.tier_model``),
+    (``routing.classify_turn``), maps it to a model (``model_tiers.tier_model``),
     and logs the plan. In ``shadow`` mode it then serves from the default
     (orchestrator) model — zero-risk measurement. In ``live`` mode it serves the
     turn from the tier's model, so routine turns leave the frontier/subscription
     model for a cheaper or local one. One-shot calls (no tools) always use the
-    default. Tier models are built via ``factory`` (no triage wrap) and cached.
+    default. Tier models are built via ``factory`` (no routing wrap) and cached.
     """
 
     def __init__(
@@ -549,14 +549,14 @@ class _TriageModel(Model):
         """Return ``(model, tier)``. ``tier`` is None when not live-routing (off,
         shadow, or a one-shot call) — the signal for whether to audit."""
         from strix.config.model_tiers import tier_model
-        from strix.config.triage import classify_turn, pin_orchestrator, triage_mode
+        from strix.config.routing import classify_turn, pin_orchestrator, routing_mode
 
-        mode = triage_mode()
+        mode = routing_mode()
         if mode == "off" or not tools:
             return self._default, None
         tier, reason = await classify_turn(model_input, tools)
         model_id = tier_model(tier)[0]
-        # Pin the orchestrator (default): this per-turn triager effectively wraps the
+        # Pin the orchestrator (default): this per-turn routingr effectively wraps the
         # ROOT agent (subagents are bound per-mission, bypassing it), so a live
         # downgrade here routes the root itself to a cheap tier and can collapse the
         # scan. When pinned, still classify/log/record the planned tier (telemetry),
@@ -564,16 +564,16 @@ class _TriageModel(Model):
         pinned = mode == "live" and pin_orchestrator()
         live = mode == "live" and not pinned
         logger.info(
-            "triage tier=%s model=%s mode=%s pinned=%s reason=%s",
+            "routing tier=%s model=%s mode=%s pinned=%s reason=%s",
             tier,
             model_id,
             mode,
             pinned,
             reason,
         )
-        from strix.config import triage_stats
+        from strix.config import routing_stats
 
-        triage_stats.record_route(tier, model_id, live=live)
+        routing_stats.record_route(tier, model_id, live=live)
         if not live:
             return self._default, None  # shadow / pinned: log the plan, serve the default
         return self._tier_model(tier), tier
@@ -597,7 +597,7 @@ class _TriageModel(Model):
         """On a sampled downgraded turn, run the frontier too and log whether the
         tool calls diverged. The cheap model already served the turn — this only
         measures misroute cost; it never changes the result or breaks the turn."""
-        from strix.config.triage import audit_rate
+        from strix.config.routing import audit_rate
 
         if tier == "reasoning" or random.random() >= audit_rate():  # noqa: S311 - sampling, not crypto
             return
@@ -615,16 +615,16 @@ class _TriageModel(Model):
                 prompt=prompt,
             )
         except Exception:  # noqa: BLE001 - an audit must never break the real turn
-            logger.warning("triage audit: frontier call failed", exc_info=True)
+            logger.warning("routing audit: frontier call failed", exc_info=True)
             return
         routed = _tool_names(routed_response)
         frontier = _tool_names(frontier_response)
         agreed = routed == frontier
-        from strix.config import triage_stats
+        from strix.config import routing_stats
 
-        triage_stats.record_audit(agreed=agreed)
+        routing_stats.record_audit(agreed=agreed)
         logger.info(
-            "triage audit tier=%s agreed=%s routed_tools=%s frontier_tools=%s",
+            "routing audit tier=%s agreed=%s routed_tools=%s frontier_tools=%s",
             tier,
             agreed,
             sorted(routed),
@@ -980,18 +980,18 @@ class StrixProvider(MultiProvider):
 
     def get_model(self, model_name: str | None) -> Model:
         model = self._build_model(model_name)
-        from strix.config.triage import triage_mode
+        from strix.config.routing import routing_mode
 
-        if triage_mode() == "off":
+        if routing_mode() == "off":
             return model
         # Per-turn dynamic model selection. Tier models are built via
-        # _tier_model_factory (which calls _build_model, no triage wrap) so the
+        # _tier_model_factory (which calls _build_model, no routing wrap) so the
         # wrapper can never wrap itself.
-        return _TriageModel(model, _tier_model_factory)
+        return _RoutingModel(model, _tier_model_factory)
 
 
 def _tier_model_factory(model_id: str, api_base: str | None) -> Model:
-    """Build a guarded model for a triage tier — no triage wrap (avoids recursion)."""
+    """Build a guarded model for a routing tier — no routing wrap (avoids recursion)."""
     if api_base:
         llm = load_settings().llm
         provider = StrixProvider(api_key=llm.api_key or "local", base_url=api_base)
@@ -1005,12 +1005,12 @@ async def subagent_model_for_task(task: str) -> Model | None:
 
     Live routing only: classify the mission once (Jev), map it to a tier model,
     and bind the sub-agent to it for its whole life — cache-coherent, and it
-    bypasses the per-turn triager (the sub-agent runs on one model throughout).
+    bypasses the per-turn routingr (the sub-agent runs on one model throughout).
     """
     from strix.config.model_tiers import tier_model
-    from strix.config.triage import classify_mission, triage_mode
+    from strix.config.routing import classify_mission, routing_mode
 
-    if triage_mode() != "live" or not task:
+    if routing_mode() != "live" or not task:
         return None
     tier, reason = await classify_mission(task)
     model_id, api_base = tier_model(tier)

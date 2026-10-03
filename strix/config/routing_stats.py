@@ -1,7 +1,7 @@
-"""Per-run triage telemetry — route distribution, audit agreement, offload.
+"""Per-run routing telemetry — route distribution, audit agreement, offload.
 
-Accumulated as the scan runs (``_TriageModel`` records each routing decision and
-each audit result) and embedded into ``run.json`` under ``triage`` at save time,
+Accumulated as the scan runs (``_RoutingModel`` records each routing decision and
+each audit result) and embedded into ``run.json`` under ``routing`` at save time,
 so the routing wins are measurable — the feedback loop benchmarking needs.
 
 Process-global (one scan per process for the CLI); ``reset()`` clears it.

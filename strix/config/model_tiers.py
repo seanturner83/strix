@@ -1,6 +1,6 @@
 """Capability/cost model map and the routing resolver.
 
-The triage classifier returns a *capability tier*; this maps it to a concrete
+The routing classifier returns a *capability tier*; this maps it to a concrete
 model. Routing has two axes:
 
 - **capability** — can the model do this turn/mission? (tier -> required rank)

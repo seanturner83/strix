@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Triage routing benchmark harness.
+"""Routing routing benchmark harness.
 
 Runs a matrix of routing configs against one target and collects each run's
-`run.json` — findings (quality), triage.frontier_offload_pct (cost proxy),
-triage.audit.agreement_pct (safety proxy), tokens, and wall-clock — into one
+`run.json` — findings (quality), routing.frontier_offload_pct (cost proxy),
+routing.audit.agreement_pct (safety proxy), tokens, and wall-clock — into one
 comparison table. Vary ONE knob per config so the differences are legible.
 
-Usage:  uv run python bench/triage_bench.py [--target PATH] [--max-turns N]
+Usage:  uv run python bench/routing_bench.py [--target PATH] [--max-turns N]
 
 Needs: Docker (DOCKER_HOST), a Claude Code subscription (claude -p), and — for
 the Jev tiers — a Jevstiller/TypeSafe endpoint (TYPESAFE_API_KEY/_BASE_URL in
@@ -29,7 +29,7 @@ RUNS = REPO / "strix_runs"
 STRIX = REPO / ".venv" / "bin" / "strix"
 
 # Base env every config inherits. The subscription path (claude -p) + a Jev
-# endpoint for triage; idle watchdog off for slow local tiers.
+# endpoint for routing; idle watchdog off for slow local tiers.
 BASE_ENV = {
     "STRIX_LLM": "claude-code/claude-opus-4-8",
     "STRIX_CLAUDE_CODE_MAX_PROCS": "4",
@@ -38,7 +38,7 @@ BASE_ENV = {
     "STRIX_TIER_REASONING": "opus",
     "STRIX_TIER_STANDARD": "haiku",
     "STRIX_TIER_MECHANICAL": "haiku",
-    "STRIX_TRIAGE_AUDIT_RATE": "0.2",
+    "STRIX_ROUTING_AUDIT_RATE": "0.2",
 }
 
 # One knob varied per config. Cheap/routed configs FIRST so a quota window that
@@ -46,13 +46,13 @@ BASE_ENV = {
 CONFIGS: list[dict[str, dict[str, str]]] = [
     {
         "name": "route-floor-0.3",
-        "env": {"STRIX_TRIAGE": "live", "STRIX_TRIAGE_MIN_CONFIDENCE": "0.3"},
+        "env": {"STRIX_ROUTING": "live", "STRIX_ROUTING_MIN_CONFIDENCE": "0.3"},
     },
     {
         "name": "route-floor-0.5",
-        "env": {"STRIX_TRIAGE": "live", "STRIX_TRIAGE_MIN_CONFIDENCE": "0.5"},
+        "env": {"STRIX_ROUTING": "live", "STRIX_ROUTING_MIN_CONFIDENCE": "0.5"},
     },
-    {"name": "baseline-opus", "env": {"STRIX_TRIAGE": "off"}},
+    {"name": "baseline-opus", "env": {"STRIX_ROUTING": "off"}},
 ]
 
 
@@ -89,7 +89,7 @@ def _parse(name: str, run_dir: Path, wall: float) -> dict[str, object]:
     vulns_dir = run_dir / "vulnerabilities"
     findings = len(list(vulns_dir.glob("*.md"))) if vulns_dir.exists() else 0
     lu = rec.get("llm_usage") or {}
-    tri = rec.get("triage") or {}
+    tri = rec.get("routing") or {}
     audit = tri.get("audit") or {}
     return {
         "name": name,

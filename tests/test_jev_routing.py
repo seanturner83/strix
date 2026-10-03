@@ -1,11 +1,11 @@
-"""Jev triage tier classification and the confidence floor."""
+"""Jev routing tier classification and the confidence floor."""
 
 from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from strix.config import jev_triage
+from strix.config import jev_routing
 
 
 if TYPE_CHECKING:
@@ -23,16 +23,16 @@ def _run(coro: Any) -> Any:
 def _classify(monkeypatch: pytest.MonkeyPatch, choice: str, conf: float, floor: str | None) -> Any:
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     if floor is None:
-        monkeypatch.delenv("STRIX_TRIAGE_MIN_CONFIDENCE", raising=False)
+        monkeypatch.delenv("STRIX_ROUTING_MIN_CONFIDENCE", raising=False)
     else:
-        monkeypatch.setenv("STRIX_TRIAGE_MIN_CONFIDENCE", floor)
-    monkeypatch.setattr(jev_triage, "post", lambda _p, _t=None: _answer(choice, conf))
-    return _run(jev_triage.jev_classify_tier({"last_tool": "exec_command"}))
+        monkeypatch.setenv("STRIX_ROUTING_MIN_CONFIDENCE", floor)
+    monkeypatch.setattr(jev_routing, "post", lambda _p, _t=None: _answer(choice, conf))
+    return _run(jev_routing.jev_classify_tier({"last_tool": "exec_command"}))
 
 
 def test_no_key_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    assert _run(jev_triage.jev_classify_tier({})) is None
+    assert _run(jev_routing.jev_classify_tier({})) is None
 
 
 def test_default_floor_trusts_the_pick(monkeypatch: pytest.MonkeyPatch) -> None:

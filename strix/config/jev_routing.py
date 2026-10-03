@@ -1,4 +1,4 @@
-"""System-1 triage backend: classify a turn's capability tier via Jev.
+"""System-1 routing backend: classify a turn's capability tier via Jev.
 
 This is the highest-frequency Jev call (every agent turn) and the most
 domain-specific (pentest capability tiers), so it is the case that most wants
@@ -7,7 +7,7 @@ a *local* student trained on our own turn distribution answers per-turn calls â€
 no per-turn hit to the remote API, and the classification adapts to what a
 general upstream model would not understand.
 
-Fail-open: any error returns ``None`` so triage falls back to the heuristic.
+Fail-open: any error returns ``None`` so routing falls back to the heuristic.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import os
 import urllib.error
 
 from strix.config.jev_client import api_key, post
-from strix.config.triage import TIERS
+from strix.config.routing import TIERS
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def _min_confidence() -> float:
     dial that trades quota saving against the risk of a bad downgrade.
     """
     try:
-        return float(os.environ.get("STRIX_TRIAGE_MIN_CONFIDENCE", "").strip())
+        return float(os.environ.get("STRIX_ROUTING_MIN_CONFIDENCE", "").strip())
     except ValueError:
         return 0.0
 

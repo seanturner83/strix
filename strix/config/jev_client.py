@@ -3,7 +3,7 @@
 ``TYPESAFE_BASE_URL`` points at the Jev API directly, or at a Jevstiller proxy
 that distils a repeated classification into a local model. The call shape is
 identical either way, so a high-frequency, domain-specific task (the per-turn
-triage) points at Jevstiller — most calls then answer locally and never reach
+routing) points at Jevstiller — most calls then answer locally and never reach
 the remote API — while a low-frequency, general task (dedup/verify) can hit Jev
 directly.
 """
