@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import uuid
 from collections.abc import Callable
@@ -368,8 +369,13 @@ async def spawn_child_agent(
     from strix.config.models import subagent_model_for_task
 
     routed_model = await subagent_model_for_task(task)
+    child_run_config = run_config
     if routed_model is not None:
+        # Bind the sub-agent to its tier model. RunConfig.model overrides the model
+        # on EVERY agent, so setting child_agent.model alone is silently ignored —
+        # the child must also run under a run_config whose model IS the routed one.
         child_agent.model = routed_model
+        child_run_config = dataclasses.replace(run_config, model=routed_model)
     await coordinator.register(
         child_id,
         name,
@@ -383,7 +389,7 @@ async def spawn_child_agent(
         coordinator=coordinator,
         agents_db_path=agents_db_path,
         sessions_to_close=sessions_to_close,
-        run_config=run_config,
+        run_config=child_run_config,
         max_turns=max_turns,
         interactive=interactive,
         child_agent=child_agent,
