@@ -45,7 +45,11 @@ def _min_confidence() -> float:
 
 # Domain framing carried in the request — this is the pentest-specific knowledge
 # upstream Jev lacks, and exactly what a Jevstiller student distils and adapts.
-_TIER_CRITERIA = {
+# TURN criteria describe a single agent turn; MISSION criteria describe a whole
+# sub-agent's job. They are DIFFERENT questions — judging a mission with turn-level
+# definitions mis-tiers it (a broad SAST sweep reads as "a mechanical probe" ->
+# standard -> a weak model does the breadth-critical task). Keep them separate.
+_TURN_TIER_CRITERIA = {
     "mechanical": (
         "A routine observation follow-up — recording a file read, a directory "
         "listing, or a grep result and moving on. No real analysis needed."
@@ -59,17 +63,36 @@ _TIER_CRITERIA = {
         "interpreting an unexpected result. Needs the strongest model."
     ),
 }
+_MISSION_TIER_CRITERIA = {
+    "mechanical": (
+        "A single fixed lookup or record for the whole mission — one read, listing, "
+        "or grep, with no analysis."
+    ),
+    "standard": (
+        "Validate or confirm a SPECIFIC, already-identified finding — exploit or "
+        "confirm one named vulnerability at a known location. Competent, not frontier."
+    ),
+    "reasoning": (
+        "A BROAD review/audit that must enumerate across many vulnerability classes, "
+        "or novel exploit chaining — breadth or depth that needs the strongest model. "
+        "A SAST sweep or a 'find all the issues' mission is reasoning, NOT standard."
+    ),
+}
 
 
-async def _classify(state: dict[str, str], instructions: str) -> tuple[str, str] | None:
+async def _classify(
+    state: dict[str, str], instructions: str, criteria_by_tier: dict[str, str]
+) -> tuple[str, str] | None:
     """Ask Jev for a capability tier over ``state``; apply the confidence floor.
 
+    ``criteria_by_tier`` is the tier definitions to send — TURN-level for a single
+    turn, MISSION-level for a whole sub-agent mission (they are different questions).
     Returns ``(tier, reason)`` or ``None`` to fall back. Below the floor the
     classification isn't trusted and routes to the safe (frontier) tier.
     """
     if not api_key():
         return None
-    criteria = {tier: _TIER_CRITERIA.get(tier, tier) for tier in TIERS}
+    criteria = {tier: criteria_by_tier.get(tier, tier) for tier in TIERS}
     payload = {
         "model": "jev-latest",
         "state": json.dumps(state),
@@ -102,6 +125,7 @@ async def jev_classify_tier(digest: dict[str, str]) -> tuple[str, str] | None:
         digest,
         "Given the last action in an autonomous security-testing agent's turn, "
         "what capability tier does the NEXT step most likely need?",
+        _TURN_TIER_CRITERIA,
     )
 
 
@@ -114,5 +138,7 @@ async def jev_classify_mission(task: str) -> tuple[str, str] | None:
     return await _classify(
         {"mission": task[:2000]},
         "Given this security-testing sub-agent's assigned mission, what capability "
-        "tier does carrying it out need overall?",
+        "tier does carrying it out need overall? A broad review/audit sweep needs "
+        "reasoning; confirming one specific known finding is standard.",
+        _MISSION_TIER_CRITERIA,
     )

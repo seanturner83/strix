@@ -53,3 +53,35 @@ def test_confident_pick_clears_the_floor(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_unknown_choice_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _classify(monkeypatch, "gibberish", 0.99, floor=None) is None
+
+
+def test_mission_classify_sends_mission_level_criteria(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A whole mission is judged with MISSION criteria, not per-turn ones — so a
+    broad SAST sweep reads as reasoning, not 'a mechanical probe' -> standard."""
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.delenv("STRIX_ROUTING_MIN_CONFIDENCE", raising=False)
+    captured: dict[str, Any] = {}
+
+    def _cap(payload: dict[str, Any], _t: Any = None) -> dict[str, Any]:
+        captured["payload"] = payload
+        return _answer("reasoning", 0.9)
+
+    monkeypatch.setattr(jev_routing, "post", _cap)
+    _run(jev_routing.jev_classify_mission("Run a full SAST review and find all issues"))
+    crit = captured["payload"]["questions"]["tier"]["criteria"]
+    assert "SAST sweep" in crit["reasoning"]  # breadth sweep framed as reasoning
+    assert "confirm" in crit["standard"].lower()  # standard = confirm a specific finding
+
+
+def test_turn_classify_sends_turn_level_criteria(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    captured: dict[str, Any] = {}
+
+    def _cap(payload: dict[str, Any], _t: Any = None) -> dict[str, Any]:
+        captured["payload"] = payload
+        return _answer("mechanical", 0.9)
+
+    monkeypatch.setattr(jev_routing, "post", _cap)
+    _run(jev_routing.jev_classify_tier({"last_tool": "exec_command"}))
+    crit = captured["payload"]["questions"]["tier"]["criteria"]
+    assert "observation follow-up" in crit["mechanical"]  # per-turn wording, not mission
