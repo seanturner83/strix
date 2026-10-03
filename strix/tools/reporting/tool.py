@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -161,7 +162,12 @@ _REQUIRED_FIELDS = {
     "target": "Target cannot be empty",
     "technical_analysis": "Technical analysis cannot be empty",
     "poc_description": "PoC description cannot be empty",
-    "poc_script_code": "PoC script/code is REQUIRED - provide the actual exploit/payload",
+    "poc_script_code": (
+        "PoC script/code is REQUIRED - provide the actual exploit/payload. "
+        "If this is a real but non-exploitable weakness (hardcoded secret, missing "
+        "hardening, contrived-only), or a downstream tool will triage/validate the "
+        "findings, set STRIX_REQUIRE_POC=0 to file raw findings without a runnable PoC."
+    ),
     "remediation_steps": "Remediation steps cannot be empty",
     "evidence": "Evidence cannot be empty - provide concrete proof of the finding",
     "assumptions": "Assumptions cannot be empty - state exploitability prerequisites",
@@ -173,11 +179,33 @@ _MAX_HTTP_EXCHANGE_IDS = 10
 _MAX_HTTP_EXCHANGE_ID_CHARS = 128
 
 
+# A runnable PoC/exploit is mandatory by default (upstream's FP-reduction intent).
+# Setting STRIX_REQUIRE_POC to a false-y value turns it off for "raw findings" use —
+# SAST/SCA and defense-in-depth work, where many real, gradable weaknesses (hardcoded
+# secrets, missing hardening, contrived-only issues) have no practical exploit and
+# should still be filed and graded (down to informational), not dropped.
+_POC_OPTIONAL_FIELD = "poc_script_code"
+
+
+def _poc_required() -> bool:
+    return os.environ.get("STRIX_REQUIRE_POC", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _validate_required_text(fields: dict[str, str]) -> list[str]:
-    """Report every ``_REQUIRED_FIELDS`` entry that arrived blank."""
-    return [
-        msg for name, msg in _REQUIRED_FIELDS.items() if not str(fields.get(name) or "").strip()
-    ]
+    """Report every ``_REQUIRED_FIELDS`` entry that arrived blank.
+
+    When ``STRIX_REQUIRE_POC`` is disabled, a blank ``poc_script_code`` is allowed so
+    exploit-less findings can still be filed (and graded on their merits).
+    """
+    required = _REQUIRED_FIELDS
+    if not _poc_required():
+        required = {k: v for k, v in _REQUIRED_FIELDS.items() if k != _POC_OPTIONAL_FIELD}
+    return [msg for name, msg in required.items() if not str(fields.get(name) or "").strip()]
 
 
 def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]:
