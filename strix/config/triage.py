@@ -78,6 +78,27 @@ def audit_rate() -> float:
         return 0.0
 
 
+def pin_orchestrator() -> bool:
+    """Whether the per-turn triager keeps the ROOT/orchestrator on its own model.
+
+    Default True. The per-turn triager effectively wraps the root agent (subagents
+    are bound per-mission via ``subagent_model_for_task``, bypassing it), and a
+    misclassified reasoning turn downgraded to a weak tier makes the root itself
+    drive the scan on a cheap model — which collapses it (observed: a heuristic sent
+    100%% of turns to a local tier, 0 findings). Pinned, ``live`` mode still
+    classifies + logs + records the *planned* tier (telemetry intact) but SERVES the
+    default reasoning model for the root; the cache-coherent per-mission subagent
+    routing remains the sole live downward router. Set STRIX_TRIAGE_PIN_ORCHESTRATOR
+    to a false-y value to restore per-turn downgrading of the root.
+    """
+    return os.environ.get("STRIX_TRIAGE_PIN_ORCHESTRATOR", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def triage_backend() -> str:
     """``"jev"`` when a TypeSafe/Jevstiller endpoint is configured, else ``"heuristic"``.
 

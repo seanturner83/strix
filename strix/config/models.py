@@ -549,19 +549,33 @@ class _TriageModel(Model):
         """Return ``(model, tier)``. ``tier`` is None when not live-routing (off,
         shadow, or a one-shot call) — the signal for whether to audit."""
         from strix.config.model_tiers import tier_model
-        from strix.config.triage import classify_turn, triage_mode
+        from strix.config.triage import classify_turn, pin_orchestrator, triage_mode
 
         mode = triage_mode()
         if mode == "off" or not tools:
             return self._default, None
         tier, reason = await classify_turn(model_input, tools)
         model_id = tier_model(tier)[0]
-        logger.info("triage tier=%s model=%s mode=%s reason=%s", tier, model_id, mode, reason)
+        # Pin the orchestrator (default): this per-turn triager effectively wraps the
+        # ROOT agent (subagents are bound per-mission, bypassing it), so a live
+        # downgrade here routes the root itself to a cheap tier and can collapse the
+        # scan. When pinned, still classify/log/record the planned tier (telemetry),
+        # but serve the default model; per-mission subagent routing is the live lever.
+        pinned = mode == "live" and pin_orchestrator()
+        live = mode == "live" and not pinned
+        logger.info(
+            "triage tier=%s model=%s mode=%s pinned=%s reason=%s",
+            tier,
+            model_id,
+            mode,
+            pinned,
+            reason,
+        )
         from strix.config import triage_stats
 
-        triage_stats.record_route(tier, model_id, live=(mode == "live"))
-        if mode != "live":
-            return self._default, None  # shadow: log the plan, serve from the default
+        triage_stats.record_route(tier, model_id, live=live)
+        if not live:
+            return self._default, None  # shadow / pinned: log the plan, serve the default
         return self._tier_model(tier), tier
 
     async def _maybe_audit(

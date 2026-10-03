@@ -170,8 +170,9 @@ def test_subagent_routing_builds_tier_model_when_live(monkeypatch: pytest.Monkey
 
 
 def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live mode serves the turn from the tier's model, not the default."""
+    """Un-pinned live mode serves the turn from the tier's model, not the default."""
     monkeypatch.setenv("STRIX_TRIAGE", "live")
+    monkeypatch.setenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", "0")  # allow per-turn downgrade
     monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)  # -> heuristic backend
     for tier in ("MECHANICAL", "STANDARD", "REASONING"):
@@ -209,6 +210,50 @@ def test_live_mode_routes_to_the_tier_model(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert result is tier_sentinel  # routed to the tier model, not the default
     assert built["model_id"] == "claude-code/claude-haiku-4-5"
+
+
+def test_pinned_live_serves_default_not_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned (default): live mode classifies/logs the plan but serves the default —
+    the root/orchestrator is never downgraded to a cheap tier by the per-turn triager."""
+    monkeypatch.setenv("STRIX_TRIAGE", "live")
+    monkeypatch.delenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", raising=False)  # default = pinned
+    monkeypatch.delenv("STRIX_TRIAGE_BACKEND", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    for tier in ("MECHANICAL", "STANDARD", "REASONING"):
+        monkeypatch.delenv(f"STRIX_TIER_{tier}", raising=False)
+    default_sentinel = object()
+
+    class _Default:
+        async def get_response(self, *_a: Any, **_k: Any) -> Any:
+            return default_sentinel
+
+    def _factory(_model_id: str, _api_base: str | None) -> Any:
+        raise AssertionError("pinned mode must not build or route to a tier model")
+
+    model = _TriageModel(_Default(), _factory)  # type: ignore[arg-type]
+    result = asyncio.run(
+        model.get_response(
+            None,
+            [_call("list_coverage")],  # a mechanical turn that would normally downgrade
+            None,  # type: ignore[arg-type]
+            _TOOLS,  # type: ignore[arg-type]
+            None,
+            [],
+            None,  # type: ignore[arg-type]
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    )
+    assert result is default_sentinel  # root stayed on its own model
+
+
+def test_pin_orchestrator_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", raising=False)
+    assert triage.pin_orchestrator() is True  # pinned by default
+    for off in ("0", "false", "no", "off", "OFF"):
+        monkeypatch.setenv("STRIX_TRIAGE_PIN_ORCHESTRATOR", off)
+        assert triage.pin_orchestrator() is False, off
 
 
 class _FakeResp:
