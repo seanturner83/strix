@@ -44,6 +44,13 @@ _FLEET: dict[str, dict[str, object]] = {
                "cap": "high", "regime": "subscription", "cost": 3.0},
     "haiku": {"model": "claude-code/claude-haiku-4-5", "api_base": None,
               "cap": "med", "regime": "subscription", "cost": 1.0},
+    # DAST-friendly frontier: a 4.x opus that generates offensive/DAST payloads WITHOUT the
+    # refusal/safeguard trips of 5.x or the tool-dispatch confabulation of 4.8 — the PREMIUM
+    # lane of the refusal axis (frontier quality + unlimited parallelism, but burns credit);
+    # the local abliterated models are the free/private lane. `refusal_tolerant` marks the
+    # offensive-tier candidates so routing can pick a no-refusal model for payload-gen turns.
+    "opus-dast": {"model": "claude-code/claude-opus-4-6", "api_base": None,
+                  "cap": "high", "regime": "subscription", "cost": 9.0, "refusal_tolerant": True},
     # metered API regime (caching works)
     "api-opus": {"model": "anthropic/claude-opus-4-8", "api_base": None,
                  "cap": "high", "regime": "api", "cost": 15.0},

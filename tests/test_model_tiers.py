@@ -88,6 +88,13 @@ def test_fleet_spans_three_regimes() -> None:
     assert {"local-big", "local-small"} <= names  # local
 
 
+def test_dast_friendly_frontier_is_in_fleet_and_tagged() -> None:
+    """opus-4.6 is the premium no-refusal lane for offensive/DAST payload-gen turns."""
+    assert model_tiers.fleet()["opus-dast"] == ("claude-code/claude-opus-4-6", None)
+    # the refusal_tolerant tag marks offensive-tier candidates for the router
+    assert model_tiers._FLEET["opus-dast"].get("refusal_tolerant") is True
+
+
 def test_local_endpoints_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A LAN rig points the local tiers at itself via env, not committed source."""
     _clear(monkeypatch)
