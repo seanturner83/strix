@@ -392,6 +392,50 @@ async def finish_scan(
             default=str,
         )
 
+    # Jev filing guard (semantic + under-filing aware): catch vulnerabilities described
+    # in the write-up but not filed as reports, INCLUDING when some were filed — the
+    # describe-don't-file failure the regex heuristic in _do_finish misses (it reads
+    # phrasing and only fires on zero-filed). Fail-safe: blocks only on a confident
+    # verdict; the regex guard stays as the fallback when Jev is off. Root agent only.
+    if parent_id is None:
+        from strix.report import jev_filing
+
+        if jev_filing.jev_enabled():
+            from strix.report.state import get_global_report_state
+
+            report_state = get_global_report_state()
+            if report_state is not None:
+                filed = report_state.vulnerability_reports
+                filed_titles = [str(r.get("title") or "") for r in filed]
+                write_up = "\n\n".join(
+                    t for t in (executive_summary, technical_analysis, recommendations) if t
+                )
+                verdict = await jev_filing.jev_claims_unfiled_findings(write_up, filed_titles)
+                if verdict and verdict.get("claims_unfiled"):
+                    logger.warning(
+                        "finish_scan blocked by Jev filing guard (confidence %.2f): write-up "
+                        "describes findings not among %d filed report(s)",
+                        verdict.get("confidence", 0.0),
+                        len(filed_titles),
+                    )
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": "Findings described in the write-up but not all were filed",
+                            "message": (
+                                "Your write-up describes one or more vulnerabilities that were NOT "
+                                "filed via create_vulnerability_report. A finding is ONLY recorded "
+                                "when filed (one call per finding, with its code_locations and "
+                                "evidence) — the executive summary / remediation text is not a "
+                                "substitute. File each described-but-unfiled vulnerability, then "
+                                "call finish_scan again. If a described item is not actually a "
+                                "finding, remove it from the write-up."
+                            ),
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+
     result = await asyncio.to_thread(
         _do_finish,
         parent_id=parent_id,
