@@ -51,6 +51,33 @@ _CODE_LOCATION_FIELDS = (
 )
 
 
+# Sandbox mount root (mirrors strix.runtime.session_manager._WORKSPACE_ROOT). Agents see
+# the target at /workspace/<subdir>/... and naturally report code_locations with that
+# absolute path; the report format wants it relative.
+_WORKSPACE_ROOT = "/workspace"
+
+
+def _to_workspace_relative(path: str) -> str:
+    """Make a sandbox-absolute code-location path relative to the workspace root.
+
+    Agents report the absolute path they see in the sandbox (e.g.
+    ``/workspace/<subdir>/src/x.py``). Rejecting that as "must be relative" is the
+    silent cause of findings-detected-but-never-filed (findings=N filed_reports=0):
+    the report is dropped and the agent cannot file what it found. Strip the
+    workspace-root prefix so the path validates and files. A path genuinely outside
+    the workspace is left unchanged for the validator to reject.
+    """
+    if not path:
+        return path
+    p = PurePosixPath(path)
+    if not p.is_absolute():
+        return path
+    try:
+        return str(p.relative_to(_WORKSPACE_ROOT))
+    except ValueError:
+        return path
+
+
 def _validate_file_path(path: str) -> str | None:
     if not path or not path.strip():
         return "file path cannot be empty"
@@ -85,6 +112,8 @@ def _normalize_code_locations(
                     if field in ("snippet", "fix_before", "fix_after")
                     else str(value).strip()
                 )
+                if field == "file":
+                    text = _to_workspace_relative(text)
                 if text:
                     normalized[field] = text
         if normalized.get("file") and normalized.get("start_line") is not None:
