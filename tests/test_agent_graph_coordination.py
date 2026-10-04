@@ -256,3 +256,36 @@ async def test_agent_finish_without_report_state_still_completes() -> None:
 
     assert result["success"] is True
     assert result["filed_report_ids"] == []
+
+
+# --- subagent filing guard (usestrix/strix#1439: findings reported but not filed) ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("report_state")
+async def test_agent_finish_blocks_findings_reported_but_not_filed() -> None:
+    coordinator = await _graph(interactive=False)
+    res = await _call(
+        agent_finish,
+        coordinator,
+        "child",
+        {"result_summary": "Found SSTI->RCE", "findings": ["SSTI->RCE in /hello"]},
+        parent_id="root",
+    )
+    assert res["success"] is False
+    assert "filed" in res["error"].lower()
+    assert "create_vulnerability_report" in res["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("report_state")
+async def test_agent_finish_allows_clean_subtask_with_no_findings() -> None:
+    coordinator = await _graph(interactive=False)
+    res = await _call(
+        agent_finish,
+        coordinator,
+        "child",
+        {"result_summary": "Reviewed; nothing confirmed", "findings": []},
+        parent_id="root",
+    )
+    assert res.get("success") is not False  # clean subtask not blocked by the filing guard

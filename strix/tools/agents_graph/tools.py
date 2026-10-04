@@ -693,6 +693,30 @@ async def agent_finish(
     filed_reports = _filed_reports_by(me)
     filed_report_ids = [str(r.get("id")) for r in filed_reports]
 
+    # Filing guard (subagent handoff): a subagent that reports findings but filed none
+    # has described-but-not-filed — the finding is never recorded and is lost when the
+    # parent/root tallies filed reports (usestrix/strix#1439: local models frequently
+    # detect but never file). Refuse the finish so it files each via
+    # create_vulnerability_report first. Fail-safe: blocks only the unambiguous gap
+    # (claims findings, filed zero); a genuinely clean subtask passes findings=[].
+    if findings and not filed_reports:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "Findings reported to the parent but none were filed",
+                "message": (
+                    "You passed findings= but filed 0 vulnerability reports. A finding is "
+                    "ONLY recorded when filed with create_vulnerability_report (one call per "
+                    "finding, with its code_locations and evidence) — the findings= list is a "
+                    "summary for the parent, not a filed record, so it would be LOST. File each "
+                    "finding you reported, then call agent_finish again. If you did not actually "
+                    "confirm any vulnerability, pass findings=[] (then no filing is needed)."
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
     parent_notified = False
     if report_to_parent and await coordinator.claim_parent_notice(me):
         async with coordinator._lock:
