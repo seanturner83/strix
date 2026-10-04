@@ -990,13 +990,115 @@ class StrixProvider(MultiProvider):
         return _RoutingModel(model, _tier_model_factory)
 
 
+class _ReasoningEffortModel(Model):
+    """Force a fixed ``reasoning_effort`` on an inner model's every request.
+
+    Local "thinking" models (e.g. a Qwen3 MoE) reason on every turn regardless of
+    prompt — on a cheap routing tier that is pure latency tax, and *omitting* the
+    effort does not stop it (the model defaults to thinking-on); it must be sent
+    ``none`` explicitly. Pinning it here leaves the global reasoning effort the
+    cloud/frontier tiers rely on untouched.
+    """
+
+    def __init__(self, inner: Model, effort: ReasoningEffort) -> None:
+        self._inner = inner
+        self._effort = effort
+
+    def _apply(self, model_settings: ModelSettings) -> ModelSettings:
+        return model_settings.resolve(ModelSettings(reasoning=Reasoning(effort=self._effort)))
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        return self._inner.get_retry_advice(request)
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],  # noqa: A002
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: ResponsePromptParam | None,
+    ) -> ModelResponse:
+        return await self._inner.get_response(
+            system_instructions,
+            input,
+            self._apply(model_settings),
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],  # noqa: A002
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: ResponsePromptParam | None,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        return self._inner.stream_response(
+            system_instructions,
+            input,
+            self._apply(model_settings),
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+def _local_reasoning_effort() -> ReasoningEffort | None:
+    """Effort to pin on local (custom api_base) tier models; ``None`` to inherit.
+
+    ``STRIX_LOCAL_REASONING_EFFORT`` (default ``none``) silences always-on
+    reasoning on local thinking models that would otherwise think on every
+    cheap-tier turn. Set ``inherit`` to leave the global effort in place (e.g. a
+    local model that is serving the reasoning tier and *should* think).
+    """
+    raw = os.environ.get("STRIX_LOCAL_REASONING_EFFORT", "none").strip().lower()
+    if raw in ("", "inherit"):
+        return None
+    if raw in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        return cast("ReasoningEffort", raw)
+    return "none"
+
+
 def _tier_model_factory(model_id: str, api_base: str | None) -> Model:
-    """Build a guarded model for a routing tier — no routing wrap (avoids recursion)."""
+    """Build a guarded model for a routing tier — no routing wrap (avoids recursion).
+
+    Local tiers (custom ``api_base``) get their reasoning effort pinned (default
+    ``none``) so always-on local reasoners answer directly on cheap tiers.
+    """
     if api_base:
         llm = load_settings().llm
         provider = StrixProvider(api_key=llm.api_key or "local", base_url=api_base)
-    else:
-        provider = StrixProvider()
+        model = provider._build_model(model_id)
+        effort = _local_reasoning_effort()
+        if effort is not None:
+            model = _ReasoningEffortModel(model, effort)
+        return model
+    provider = StrixProvider()
     return provider._build_model(model_id)
 
 
