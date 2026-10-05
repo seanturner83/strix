@@ -225,16 +225,55 @@ def _poc_required() -> bool:
     )
 
 
+# Analysis fields that may be relaxed from required -> optional for weak-model / raw-findings
+# use. The finding still RECORDS: title/description/impact/target/code_locations/cvss/confidence
+# stay required. STRIX_RELAX_FINDING_FIELDS: "1"/"all" relaxes the whole set; a comma-list names
+# a subset (essentials can never be relaxed). Default empty = strict. An exploit-focused run keeps
+# them; a localization/triage run (findings fed to a downstream verifier) relaxes them so a
+# detected finding is recorded, not rejected for a missing field (usestrix/strix#1439).
+_RELAXABLE_FIELDS = frozenset(
+    {
+        "technical_analysis",
+        "poc_description",
+        "remediation_steps",
+        "evidence",
+        "assumptions",
+        "counterevidence",
+        "severity_change_conditions",
+    }
+)
+
+
+def _relaxed_fields() -> frozenset[str]:
+    raw = os.environ.get("STRIX_RELAX_FINDING_FIELDS", "").strip().lower()
+    if not raw:
+        return frozenset()
+    if raw in ("1", "true", "yes", "on", "all"):
+        return _RELAXABLE_FIELDS
+    named = {f.strip() for f in raw.split(",") if f.strip()}
+    return frozenset(named & _RELAXABLE_FIELDS)
+
+
 def _validate_required_text(fields: dict[str, str]) -> list[str]:
     """Report every ``_REQUIRED_FIELDS`` entry that arrived blank.
 
-    When ``STRIX_REQUIRE_POC`` is disabled, a blank ``poc_script_code`` is allowed so
-    exploit-less findings can still be filed (and graded on their merits).
+    ``STRIX_REQUIRE_POC`` disabled allows a blank ``poc_script_code``;
+    ``STRIX_RELAX_FINDING_FIELDS`` additionally drops the named analysis fields, so a
+    detected finding is still recorded rather than rejected for a missing analysis field.
     """
-    required = _REQUIRED_FIELDS
+    relaxed = _relaxed_fields()
+    required = {k: v for k, v in _REQUIRED_FIELDS.items() if k not in relaxed}
     if not _poc_required():
-        required = {k: v for k, v in _REQUIRED_FIELDS.items() if k != _POC_OPTIONAL_FIELD}
-    return [msg for name, msg in required.items() if not str(fields.get(name) or "").strip()]
+        required = {k: v for k, v in required.items() if k != _POC_OPTIONAL_FIELD}
+    missing = [msg for name, msg in required.items() if not str(fields.get(name) or "").strip()]
+    skipped = sorted(
+        n for n in relaxed if n in _REQUIRED_FIELDS and not str(fields.get(n) or "").strip()
+    )
+    if skipped:
+        logger.info(
+            "filing with relaxed-blank fields (STRIX_RELAX_FINDING_FIELDS): %s", ", ".join(skipped)
+        )
+    return missing
 
 
 def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]:
@@ -366,13 +405,16 @@ def _validate_analysis_fields(
 ) -> list[str]:
     """Validate the counterevidence / confidence closure metadata."""
     errors: list[str] = []
-    if not str(counterevidence or "").strip():
+    relaxed = _relaxed_fields()
+    ce = str(counterevidence or "").strip()
+    scc = str(severity_change_conditions or "").strip()
+    if "counterevidence" not in relaxed and not ce:
         errors.append(
             "Counterevidence cannot be empty - state the strongest evidence against "
             "this finding, or what you checked and found none (e.g. 'no input "
             "validation, WAF, or authorization check found on this path')"
         )
-    if not str(severity_change_conditions or "").strip():
+    if "severity_change_conditions" not in relaxed and not scc:
         errors.append(
             "severity_change_conditions cannot be empty - state the one concrete piece "
             "of evidence that would raise or lower the severity"
