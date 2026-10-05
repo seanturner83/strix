@@ -908,11 +908,23 @@ async def _do_create(  # noqa: PLR0911  # verify gate adds an early rejection re
     errors.extend(http_exchange_errors)
 
     if errors:
+        # Log it: a rejected filing is otherwise invisible (returned to the agent, not
+        # logged), so a finding detected-but-not-filed looks like silence. Surfacing the
+        # rejected fields is how we see WHY a finding never lands (usestrix/strix#1439).
+        logger.warning(
+            "create_vulnerability_report rejected (title=%r): %d validation error(s): %s",
+            (title or "")[:80],
+            len(errors),
+            "; ".join(errors[:8]),
+        )
         return {"success": False, "error": "Validation failed", "errors": errors}
 
     try:
         cvss_score, severity, _vector = _calculate_cvss(cvss_breakdown)
     except ValueError as exc:
+        logger.warning(
+            "create_vulnerability_report rejected (title=%r): CVSS: %s", (title or "")[:80], exc
+        )
         return {"success": False, "error": "Validation failed", "errors": [str(exc)]}
 
     try:
