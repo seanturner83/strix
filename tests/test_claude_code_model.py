@@ -32,6 +32,8 @@ from strix.config.models import (
     _TurnGuardModel,
     uses_chat_completions_tool_schema,
 )
+from strix.agents.prompt import CACHE_POINT
+from strix.llm.request_log import RequestLoggingModel
 from strix.report import dedupe
 from strix.report import state as report_state
 
@@ -247,7 +249,11 @@ def test_get_model_leaves_api_key_path_untouched(
 
     model = StrixProvider().get_model("anthropic/claude-opus-4-8")
     assert isinstance(model, _TurnGuardModel)
-    assert model._inner is sentinel
+    # Upstream wraps the non-subscription path in request logging; our subscription
+    # code must leave the underlying provider model (the sentinel) untouched beneath it.
+    inner = model._inner
+    assert isinstance(inner, RequestLoggingModel)
+    assert inner._inner is sentinel
 
 
 def test_claude_code_uses_json_function_tools() -> None:
