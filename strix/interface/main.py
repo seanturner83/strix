@@ -166,9 +166,7 @@ def _claude_code_error_hint(exc: BaseException) -> str | None:
     return None
 
 
-async def warm_up_llm(show_model_warning: bool = True) -> None:
-    from agents.models.interface import ModelTracing
-
+async def warm_up_llm() -> None:
     from strix.config.models import (
         configure_sdk_model_defaults,
         is_known_openai_bare_model,

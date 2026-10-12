@@ -15,7 +15,7 @@ import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from strix.config import Settings, load_settings, subscription
+from strix.config import Settings, claude_code, codex, load_settings, subscription
 from strix.core.paths import run_dir_for
 from strix.interface.utils import (
     assign_workspace_subdirs,
@@ -72,7 +72,7 @@ def _header_candidates(
     prefix: str, model: str | None, api_key: str | None, extra_headers: dict[str, str] | None
 ) -> list[tuple[str, str]]:
     candidates: list[tuple[str, str]] = []
-    if api_key and not codex.subscription_model(model):
+    if api_key and not (codex.subscription_model(model) or claude_code.claude_code_model(model)):
         candidates.append((f"{prefix}LLM_API_KEY", api_key))
     for header, value in (extra_headers or {}).items():
         candidates.append((f"{prefix}LLM_EXTRA_HEADERS header name {header!r}", header))
