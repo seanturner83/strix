@@ -124,6 +124,8 @@ def _turn_timeout(requested: float | None = None) -> float:
 # first awaited on, so a single cached instance shared between the warm-up loop
 # (`asyncio.run(warm_up_llm())`) and the separate scan loop would fail once it
 # had waiters on both. Keyed by loop and auto-dropped when the loop is collected.
+# Mutated without a lock: Strix runs one active loop at a time (warm-up, then the
+# scan), so these caches are only ever touched from a single thread.
 _sems: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[asyncio.Semaphore, int]] = (
     weakref.WeakKeyDictionary()
 )
