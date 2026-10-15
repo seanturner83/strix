@@ -267,7 +267,7 @@ def _run_claude(args: list[str]) -> subprocess.CompletedProcess[bytes]:
     binary = claude_code.binary_path()
     if binary is None:
         raise claude_code.ClaudeCodeError("the `claude` CLI is not on PATH")
-    return subprocess.run([binary, *args], check=False)  # noqa: S603
+    return subprocess.run([binary, *args], check=False)  # noqa: S603  # fixed argv, no shell
 
 
 def _login_claude(console: Console) -> int:
