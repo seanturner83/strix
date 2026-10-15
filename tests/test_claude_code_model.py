@@ -22,6 +22,7 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from strix.agents.prompt import CACHE_POINT
 from strix.config import claude_bridge, claude_code, claude_process, codex, loader
 from strix.config.loader import load_settings
 from strix.config.models import (
@@ -32,7 +33,6 @@ from strix.config.models import (
     _TurnGuardModel,
     uses_chat_completions_tool_schema,
 )
-from strix.agents.prompt import CACHE_POINT
 from strix.llm.request_log import RequestLoggingModel
 from strix.report import dedupe
 from strix.report import state as report_state
@@ -237,6 +237,11 @@ def test_get_model_routes_claude_code(
     assert isinstance(model._inner, _ClaudeCodeModel)
     # Subscription backends are never wrapped in the non-streaming shim.
     assert not isinstance(model._inner, _NonStreamingModel)
+    # The single event arrives only at completion, so every stream bound must be
+    # None (no bound). A 0.0 here is a real 0s limit and abandons every turn.
+    assert model._stream_idle_timeout is None
+    assert model._first_event_timeout is None
+    assert model._total_timeout is None
 
 
 def test_get_model_leaves_api_key_path_untouched(

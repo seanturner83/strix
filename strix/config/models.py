@@ -763,8 +763,10 @@ class StrixProvider(MultiProvider):
             # meaningless and LLM_DISABLE_STREAMING does not apply — same stance
             # as codex / the non-streaming wrapper below.
             model: Model = _ClaudeCodeModel(cc_slug, reasoning_effort=llm.reasoning_effort)
-            idle_timeout = 0.0
-            first_event_timeout = total_timeout = None
+            # No stream bounds: a single event arrives only at completion, so an
+            # idle/first-event/total limit would abandon every turn. None = no bound
+            # (0.0 is a real 0s limit here, not "unbounded").
+            idle_timeout = first_event_timeout = total_timeout = None
         elif slug:
             # The ChatGPT subscription backend is always streamed; it has no
             # non-streaming mode to fall back to, so LLM_DISABLE_STREAMING
