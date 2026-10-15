@@ -51,9 +51,12 @@ _CODE_LOCATION_FIELDS = (
 )
 
 
-# Sandbox mount root (mirrors strix.runtime.session_manager._WORKSPACE_ROOT). Agents see
-# the target at /workspace/<subdir>/... and naturally report code_locations with that
-# absolute path; the report format wants it relative.
+# Sandbox mount root. Deliberately mirrored from strix.runtime.session_manager
+# rather than imported: that module pulls in the sandbox/Docker machinery
+# (agents.sandbox.*) at load, and this reporting tool is otherwise runtime-free.
+# The value is a fixed "/workspace"; keep the two in sync if it ever changes.
+# Agents see the target at /workspace/<subdir>/... and naturally report
+# code_locations with that absolute path; the report format wants it relative.
 _WORKSPACE_ROOT = "/workspace"
 
 
@@ -251,6 +254,13 @@ def _relaxed_fields() -> frozenset[str]:
     if raw in ("1", "true", "yes", "on", "all"):
         return _RELAXABLE_FIELDS
     named = {f.strip() for f in raw.split(",") if f.strip()}
+    unknown = named - _RELAXABLE_FIELDS
+    if unknown:
+        logger.warning(
+            "STRIX_RELAX_FINDING_FIELDS: ignoring unrecognized field(s): %s (relaxable: %s)",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(_RELAXABLE_FIELDS)),
+        )
     return frozenset(named & _RELAXABLE_FIELDS)
 
 

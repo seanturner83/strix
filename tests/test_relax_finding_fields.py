@@ -7,6 +7,7 @@ analysis field — the create-side cause of findings-detected-but-never-filed
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from strix.tools.reporting.tool import (
@@ -52,6 +53,17 @@ def test_relaxed_fields_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     # essentials can never be relaxed (not in the relaxable set)
     monkeypatch.setenv("STRIX_RELAX_FINDING_FIELDS", "title,description,evidence")
     assert _relaxed_fields() == frozenset({"evidence"})
+
+
+def test_relaxed_fields_warns_on_unknown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A typo'd field name must not be silently ignored.
+    monkeypatch.setenv("STRIX_RELAX_FINDING_FIELDS", "evidence,technical_analsis")
+    with caplog.at_level(logging.WARNING):
+        assert _relaxed_fields() == frozenset({"evidence"})
+    assert "technical_analsis" in caplog.text
+    assert "unrecognized" in caplog.text.lower()
 
 
 def test_strict_rejects_blank_analysis_fields(monkeypatch: pytest.MonkeyPatch) -> None:
