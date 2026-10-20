@@ -70,6 +70,20 @@ RESULT_SCHEMA: dict[str, Any] = {
 }
 
 
+# The synthetic tool Claude Code uses to deliver ``--json-schema`` output. With
+# ``--tools ""`` it is the only real tool in the session.
+_STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
+
+# Key under which parse_transcript stashes native tool_use calls on the result.
+# Deep in a long context a model can call Strix's tools as NATIVE tool_use blocks
+# instead of listing them in the envelope's tool_calls. Claude Code answers each
+# with a real "No such tool available" error and the model retries inside the
+# same ``claude -p`` process (one run spent 1.5M and 3.1M input tokens on two such
+# turns), then reports its tools as broken. Strix only reads the terminal result,
+# so without this the calls are lost and the errors are invisible.
+NATIVE_CALLS_KEY = "_strix_native_tool_calls"
+
+
 class ClaudeStreamError(RuntimeError):
     """A ``claude -p`` turn failed. ``status_code`` classifies it for the retry policy."""
 
@@ -372,8 +386,11 @@ def parse_transcript(lines: Iterable[str]) -> dict[str, Any]:
 
     Non-JSON lines (Claude Code prints occasional diagnostics to stdout) are
     skipped. Raises :class:`ClaudeStreamError` if no ``result`` line is present.
+    The latest assistant message's native tool calls, if any, are attached under
+    :data:`NATIVE_CALLS_KEY` for :func:`decode_result` to salvage.
     """
     result: dict[str, Any] | None = None
+    native_calls: list[dict[str, Any]] = []
     for raw in lines:
         text = raw.strip()
         if not text:
@@ -387,23 +404,80 @@ def parse_transcript(lines: Iterable[str]) -> dict[str, Any]:
             event_dict = cast("dict[str, Any]", event)
             if event_dict.get("type") == "result":
                 result = event_dict
+            elif event_dict.get("type") == "assistant":
+                calls = _native_tool_uses(event_dict)
+                if calls:
+                    native_calls = calls
     if result is None:
         raise ClaudeStreamError("claude -p produced no result event")
+    if native_calls:
+        result[NATIVE_CALLS_KEY] = native_calls
     return result
 
 
-def decode_result(result: dict[str, Any]) -> ModelResponse:
+def _native_tool_uses(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """The non-StructuredOutput tool_use blocks in one assistant event."""
+    message = _as_dict(event.get("message"))
+    calls: list[dict[str, Any]] = []
+    for block in cast("list[Any]", message.get("content") or []):
+        block_dict = _as_dict(block)
+        if block_dict.get("type") != "tool_use":
+            continue
+        name = str(block_dict.get("name") or "")
+        if name and name != _STRUCTURED_OUTPUT_TOOL:
+            calls.append({"name": name, "arguments": block_dict.get("input")})
+    return calls
+
+
+def _is_max_turns(result: dict[str, Any]) -> bool:
+    return "max_turns" in str(result.get("subtype") or "")
+
+
+def _salvageable(result: dict[str, Any], tool_names: frozenset[str] | None) -> list[Any]:
+    """Native calls worth running: only names Strix registered, when it said which."""
+    calls = cast("list[Any]", result.get(NATIVE_CALLS_KEY) or [])
+    return [
+        call
+        for call in calls
+        if tool_names is None
+        or _strip_namespace(str(_as_dict(call).get("name") or "")) in tool_names
+    ]
+
+
+def decode_result(
+    result: dict[str, Any], tool_names: frozenset[str] | None = None
+) -> ModelResponse:
     """Fold a terminal ``result`` event into a :class:`ModelResponse`.
 
     Raises :class:`ClaudeStreamError` on an error result, tagging rate-limit and
-    overload failures with a retryable status code.
+    overload failures with a retryable status code. When the envelope carries no
+    tool calls but the model called registered Strix tools natively, those calls
+    are salvaged and run as if the envelope had listed them; a turn cut off by
+    ``--max-turns`` is salvaged the same way before it is treated as an error.
     """
-    if result.get("is_error"):
+    salvage = _salvageable(result, tool_names)
+    if _is_max_turns(result):
+        if not salvage:
+            # Untagged, so the statusless retry runs it again from scratch: the
+            # loop is inside this one process and a fresh one usually clears it.
+            raise ClaudeStreamError("claude -p hit --max-turns with no salvageable tool call")
+        logger.warning(
+            "claude -p hit --max-turns after native tool calls; salvaging %s",
+            [_as_dict(call).get("name") for call in salvage],
+        )
+        payload: dict[str, Any] = {"text": "", "tool_calls": salvage}
+    elif result.get("is_error"):
         status = _error_status(result)
         message = _flatten_text(result.get("result")) or result.get("subtype") or "claude -p error"
         raise ClaudeStreamError(str(message), status_code=status)
-
-    payload = _structured_payload(result)
+    else:
+        payload = _structured_payload(result)
+        if salvage and not payload.get("tool_calls"):
+            logger.warning(
+                "claude -p reply had no envelope tool_calls but native calls %s; salvaging",
+                [_as_dict(call).get("name") for call in salvage],
+            )
+            payload = {**payload, "tool_calls": salvage}
     output: list[Any] = []
 
     text = str(payload.get("text") or "")

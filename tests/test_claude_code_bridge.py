@@ -472,3 +472,128 @@ def test_invalid_model_transcript_is_classified_and_surfaced() -> None:
 )
 def test_error_status_classification(result: dict[str, Any], expected: int | None) -> None:
     assert claude_bridge._error_status(result) == expected
+
+
+def _native_transcript(result: dict[str, Any], *calls: tuple[str, dict[str, Any]]) -> list[str]:
+    """A transcript where the model called tools natively, then ended with ``result``."""
+    events: list[dict[str, Any]] = [{"type": "system", "subtype": "init"}]
+    for name, arguments in calls:
+        events.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "running it"},
+                        {"type": "tool_use", "id": "t1", "name": name, "input": arguments},
+                    ]
+                },
+            }
+        )
+        events.append(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "is_error": True,
+                            "content": (
+                                "<tool_use_error>Error: No such tool available: "
+                                f"{name}</tool_use_error>"
+                            ),
+                        }
+                    ]
+                },
+            }
+        )
+    events.append({"type": "result", **result})
+    return [json.dumps(event) for event in events]
+
+
+_TOOLS = frozenset({"exec_command", "finish_scan"})
+
+
+def test_native_tool_calls_are_salvaged_when_the_envelope_has_none() -> None:
+    # Observed with claude-opus-4-8 deep in a long scan: the model called Strix
+    # tools natively, got real "No such tool available" errors back inside the
+    # process, and ended with an envelope that only narrated the "outage".
+    lines = _native_transcript(
+        {
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": {"text": "Runtime toolset is degraded", "tool_calls": []},
+        },
+        ("exec_command", {"cmd": "ls"}),
+        ("exec_command", {"cmd": "sed -n 1,40p api/handlers.go"}),
+    )
+    response = claude_bridge.decode_result(claude_bridge.parse_transcript(lines), _TOOLS)
+    calls = _tool_calls(response)
+    # Only the latest attempt runs, not every retry the model made in the loop.
+    assert [(c.name, json.loads(c.arguments)) for c in calls] == [
+        ("exec_command", {"cmd": "sed -n 1,40p api/handlers.go"})
+    ]
+    assert _assistant_text(response) == "Runtime toolset is degraded"
+
+
+def test_envelope_tool_calls_win_over_native_ones() -> None:
+    lines = _native_transcript(
+        {
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": {
+                "text": "",
+                "tool_calls": [{"name": "finish_scan", "arguments": {}}],
+            },
+        },
+        ("exec_command", {"cmd": "ls"}),
+    )
+    response = claude_bridge.decode_result(claude_bridge.parse_transcript(lines), _TOOLS)
+    assert [c.name for c in _tool_calls(response)] == ["finish_scan"]
+
+
+def test_unregistered_native_calls_are_not_salvaged() -> None:
+    # A native Bash call is the model reaching for Claude Code's own tool; Strix
+    # never registered it, so running it would be inventing a call.
+    lines = _native_transcript(
+        {
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": {"text": "hm", "tool_calls": []},
+        },
+        ("Bash", {"command": "ls"}),
+    )
+    response = claude_bridge.decode_result(claude_bridge.parse_transcript(lines), _TOOLS)
+    assert _tool_calls(response) == []
+
+
+def test_max_turns_salvages_native_calls() -> None:
+    lines = _native_transcript(
+        {"subtype": "error_max_turns", "is_error": True, "num_turns": 4},
+        ("exec_command", {"cmd": "ls"}),
+    )
+    response = claude_bridge.decode_result(claude_bridge.parse_transcript(lines), _TOOLS)
+    assert [c.name for c in _tool_calls(response)] == ["exec_command"]
+
+
+def test_max_turns_without_salvage_raises_untagged() -> None:
+    # Untagged, so the statusless retry starts a fresh process.
+    lines = _native_transcript(
+        {"subtype": "error_max_turns", "is_error": True, "num_turns": 4},
+        ("Bash", {"command": "ls"}),
+    )
+    with pytest.raises(claude_bridge.ClaudeStreamError) as excinfo:
+        claude_bridge.decode_result(claude_bridge.parse_transcript(lines), _TOOLS)
+    assert excinfo.value.status_code is None
+
+
+def test_structured_output_tool_use_is_not_a_native_call() -> None:
+    lines = _native_transcript(
+        {
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": {"text": "ok", "tool_calls": []},
+        },
+        ("StructuredOutput", {"text": "ok", "tool_calls": []}),
+    )
+    assert claude_bridge.NATIVE_CALLS_KEY not in claude_bridge.parse_transcript(lines)

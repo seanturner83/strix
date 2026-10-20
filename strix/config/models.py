@@ -341,7 +341,9 @@ class _ClaudeCodeModel(Model):
             structured=bool(tools),
             timeout=_request_timeout(model_settings),
         )
-        response = claude_bridge.decode_result(result)
+        response = claude_bridge.decode_result(
+            result, tool_names=frozenset(tool.name for tool in tools)
+        )
         _record_claude_code_cost(result)
         return response
 

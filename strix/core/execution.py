@@ -915,6 +915,9 @@ def _final_output_preview(result: RunResultBase | None) -> str:
 # tools being registered and callable (it successfully called finish_scan in the
 # same run). The generic "call a tool" nudge doesn't dislodge this — the model has
 # convinced itself the tools don't exist — so we rebut the false premise directly.
+# On that backend the errors were real, not invented: the model had called the
+# tools natively inside ``claude -p``, where they do not exist. claude_bridge now
+# salvages those calls, so this rebuttal is the fallback, not the fix.
 _TOOL_DENIAL_SIGNATURES = (
     "no such tool",
     "no tools available",
