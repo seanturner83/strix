@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
+
+
+# LiteLLM fetches its cost map from GitHub at import unless told otherwise, so
+# pricing tests would follow upstream edits to that map. Pin the copy bundled
+# with the locked litellm version. Must be set before anything imports litellm.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import pytest
 
