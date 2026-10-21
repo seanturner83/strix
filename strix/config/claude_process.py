@@ -75,6 +75,25 @@ _BASE_ARGS = (
 )
 
 
+# Agentic turns one ``claude -p`` process may take. A normal structured reply is
+# a single StructuredOutput call, which the CLI does not count against the cap.
+# The cap bounds the failure where the model calls Strix tools natively and
+# retries each "No such tool available" error inside the same process: without
+# it one Strix turn ran to 3.1M input tokens. The calls are salvaged either way.
+_DEFAULT_MAX_TURNS = 3
+
+
+def _max_turns() -> int:
+    raw = os.environ.get("STRIX_CLAUDE_CODE_MAX_TURNS")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return _DEFAULT_MAX_TURNS
+        return max(1, value)
+    return _DEFAULT_MAX_TURNS
+
+
 def _max_procs() -> int:
     raw = os.environ.get("STRIX_CLAUDE_CODE_MAX_PROCS")
     if raw:
@@ -192,7 +211,7 @@ def _build_argv(
         # Only agent turns speak the {text, tool_calls} envelope. Forcing the
         # schema on a one-shot completion would bury the caller's answer inside it.
         schema = json.dumps(claude_bridge.RESULT_SCHEMA, separators=(",", ":"))
-        argv += ["--json-schema", schema]
+        argv += ["--json-schema", schema, "--max-turns", str(_max_turns())]
     return [*argv, *extra_args]
 
 
