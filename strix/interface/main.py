@@ -8,6 +8,8 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from strix.config import claude_code, codex, load_settings, persist_current
+from strix.config import Settings, claude_code, claude_quota, codex, load_settings, persist_current
 from strix.core.paths import RUNS_DIR_NAME, run_dir_for
 from strix.interface.cli_args import (
     FAIL_ON_SEVERITIES,
@@ -146,6 +148,12 @@ _CLAUDE_CODE_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
         "subscription includes, e.g. STRIX_LLM=claude-code/claude-sonnet-4-6.",
     ),
     (
+        ("usage limit", "hit your session limit", "hit your weekly limit", "hit your limit"),
+        "Your Claude subscription's usage window is spent. Strix waits for the reset by "
+        "default; STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT is set to 0 or below the time to the reset. "
+        "Resume the run after the reset with --resume <run_name>.",
+    ),
+    (
         ("429", "rate limit", "rate_limit", "overloaded"),
         "Your Claude subscription is rate-limited. Multi-agent scans burst hard, "
         "Max 20x is realistically needed; on Pro, use a quick scan with fewer agents.",
@@ -164,6 +172,44 @@ def _claude_code_error_hint(exc: BaseException) -> str | None:
         if any(marker in joined for marker in markers):
             return hint
     return None
+
+
+async def _preflight_through_quota(raw_model: str, settings: Settings, console: Console) -> None:
+    """Preflight the model, first waiting out a spent Claude subscription window.
+
+    A scan started while the window is spent (a queued or resumed scan, most
+    often) waits for the reset instead of failing. With
+    ``STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT=0``, or a reset further away than that
+    allows, the refusal is raised and reported as before.
+    """
+    first_refused: float | None = None
+    while True:
+        try:
+            await preflight_model_connection(raw_model, settings=settings)
+        except claude_quota.QuotaExhaustedError as exc:
+            if claude_quota.max_wait() <= 0:
+                raise
+            if first_refused is None:
+                first_refused = time.time()
+            until = claude_quota.GATE.close_for_refusal(
+                claude_quota.Refusal(message=str(exc), resets_at=exc.resets_at, window=None)
+            )
+            claude_quota.check_wait_allowed(until, first_refused)
+            notice = Text()
+            notice.append("SUBSCRIPTION USAGE LIMIT REACHED", style="bold yellow")
+            notice.append("\n\n", style="white")
+            notice.append(
+                f"Waiting until {datetime.fromtimestamp(until).astimezone():%Y-%m-%d %H:%M %Z} "
+                "for the window to reset, then starting the scan. "
+                "Set STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT=0 to fail instead.",
+                style="white",
+            )
+            console.print(
+                Panel(notice, title="[bold white]STRIX", title_align="left", border_style="yellow")
+            )
+            await claude_quota.GATE.wait()
+        else:
+            return
 
 
 async def warm_up_llm() -> None:
@@ -212,7 +258,7 @@ async def warm_up_llm() -> None:
             )
             sys.exit(1)
 
-        await preflight_model_connection(raw_model, settings=settings)
+        await _preflight_through_quota(raw_model, settings, console)
         logger.info("LLM warm-up succeeded for model %s", (llm.model or "").strip())
 
         if settings.dedupe.model:
@@ -380,6 +426,8 @@ def _subscription_error_heading(exc: BaseException) -> str:
     joined = " ".join(_exception_messages(exc)).lower()
     if "not on path" in joined or "claude code cli" in joined:
         return "CLAUDE CODE CLI NOT AVAILABLE"
+    if "usage limit" in joined or "hit your" in joined:
+        return "SUBSCRIPTION USAGE LIMIT REACHED"
     if any(marker in joined for marker in ("rate limit", "rate_limit", "overloaded", "429")):
         return "SUBSCRIPTION RATE LIMITED"
     if any(

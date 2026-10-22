@@ -83,6 +83,11 @@ _STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 # so without this the calls are lost and the errors are invisible.
 NATIVE_CALLS_KEY = "_strix_native_tool_calls"
 
+# Key under which parse_transcript stashes the turn's latest ``rate_limit_info``
+# (subscription window status, utilization and reset times). ``claude_quota``
+# reads it to tell a usage-limit refusal from other errors and to time the wait.
+RATE_LIMIT_KEY = "_strix_rate_limit_info"
+
 
 class ClaudeStreamError(RuntimeError):
     """A ``claude -p`` turn failed. ``status_code`` classifies it for the retry policy."""
@@ -387,10 +392,12 @@ def parse_transcript(lines: Iterable[str]) -> dict[str, Any]:
     Non-JSON lines (Claude Code prints occasional diagnostics to stdout) are
     skipped. Raises :class:`ClaudeStreamError` if no ``result`` line is present.
     The latest assistant message's native tool calls, if any, are attached under
-    :data:`NATIVE_CALLS_KEY` for :func:`decode_result` to salvage.
+    :data:`NATIVE_CALLS_KEY` for :func:`decode_result` to salvage, and the latest
+    ``rate_limit_event``'s info under :data:`RATE_LIMIT_KEY`.
     """
     result: dict[str, Any] | None = None
     native_calls: list[dict[str, Any]] = []
+    rate_limit: dict[str, Any] | None = None
     for raw in lines:
         text = raw.strip()
         if not text:
@@ -408,10 +415,16 @@ def parse_transcript(lines: Iterable[str]) -> dict[str, Any]:
                 calls = _native_tool_uses(event_dict)
                 if calls:
                     native_calls = calls
+            elif event_dict.get("type") == "rate_limit_event":
+                info = event_dict.get("rate_limit_info")
+                if isinstance(info, dict):
+                    rate_limit = cast("dict[str, Any]", info)
     if result is None:
         raise ClaudeStreamError("claude -p produced no result event")
     if native_calls:
         result[NATIVE_CALLS_KEY] = native_calls
+    if rate_limit is not None:
+        result[RATE_LIMIT_KEY] = rate_limit
     return result
 
 

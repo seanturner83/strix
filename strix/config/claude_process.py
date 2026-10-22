@@ -33,12 +33,13 @@ import shutil
 import subprocess  # we invoke a trusted, user-installed CLI, never a shell
 import sys
 import tempfile
+import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from strix.config import claude_bridge, claude_code
+from strix.config import claude_bridge, claude_code, claude_quota
 
 
 logger = logging.getLogger(__name__)
@@ -376,20 +377,55 @@ async def run_turn(
     ``{text, tool_calls}`` schema, one-shot completions return the model's own
     answer verbatim.
 
+    A turn refused by the subscription's usage limit is not returned: it closes
+    the quota gate, waits for the reset, and is sent again unchanged (see
+    ``claude_quota``). Every turn waits at the gate before it spawns, so a
+    closed gate costs no process and no semaphore slot.
+
     Raises :class:`claude_code.ClaudeCodeError` on a non-zero exit, a timeout, or
     a stream with no result event; the caller decodes it via ``claude_bridge``.
+    Raises :class:`claude_quota.QuotaExhaustedError` when the turn is refused and
+    waiting is off, or the reset is further away than the wait allows.
     """
     prompt_file = _write_system_prompt(system_prompt) if system_prompt else None
+    first_refused: float | None = None
     try:
         argv = _build_argv(
             slug, extra_args or [], structured=structured, system_prompt_file=prompt_file
         )
-        completed = await _execute(argv, _encode_message(message), _turn_timeout(timeout))
-        return _decode_transcript(completed)
+        while True:
+            await _wait_at_gate(first_refused)
+            completed = await _execute(argv, _encode_message(message), _turn_timeout(timeout))
+            result = _decode_transcript(completed)
+            refused = claude_quota.refusal(result)
+            if refused is None:
+                claude_quota.GATE.observe(result)
+                return result
+            if not claude_quota.waiting_enabled():
+                raise claude_quota.exhausted_error(refused)
+            if first_refused is None:
+                first_refused = time.time()
+            claude_quota.GATE.close_for_refusal(refused)
     finally:
         if prompt_file is not None:
             with contextlib.suppress(OSError):
                 Path(prompt_file).unlink(missing_ok=True)
+
+
+async def _wait_at_gate(first_refused: float | None) -> None:
+    """Wait while the quota gate is closed, within the configured maximum."""
+    gate = claude_quota.GATE
+    if not gate.is_closed():
+        return
+    if not claude_quota.waiting_enabled():
+        raise claude_quota.QuotaExhaustedError(
+            "Claude subscription usage limit reached; the scan is waiting for the reset.",
+            resets_at=gate.until,
+        )
+    claude_quota.check_wait_allowed(
+        gate.until, first_refused if first_refused is not None else time.time()
+    )
+    await gate.wait()
 
 
 def _tail(stderr: str, *, limit: int = 400) -> str:

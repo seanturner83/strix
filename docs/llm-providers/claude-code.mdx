@@ -94,6 +94,32 @@ and retries Anthropic's `529` overload too.
   unset, a turn is bounded by `LLM_TIMEOUT` (default 300s), and a generous 900s ceiling
   backstops a turn nothing else bounded.
 
+## Usage limits
+
+A subscription has a 5-hour and a 7-day usage window. When one is spent, Claude Code
+refuses every turn ("You've hit your session limit · resets 12:30pm") until it resets. A
+deep scan reaches this in normal use, so Strix waits instead of failing:
+
+- The first refused turn closes a gate until the reset time Claude Code reports. Every turn
+  waits at the gate before it starts a `claude` process, and the refused turn is sent again
+  unchanged when the gate opens. Agents see a slow turn, not an error, and the scan carries
+  on where it was.
+- A scan started while a window is spent waits for the reset before it starts.
+- The wait follows the wall clock, so a laptop that sleeps through the reset carries on when
+  it wakes.
+
+Knobs:
+
+- `STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT` (default 8 days) is the longest wait in seconds. A
+  reset further away stops the scan with an error. `0` turns waiting off: a refused turn
+  fails at once and is not retried.
+- `STRIX_CLAUDE_CODE_QUOTA_CEILING`, a fraction such as `0.85`, closes the gate when a
+  window reaches that much use, before the limit. Use it to keep headroom on an account you
+  also use interactively. Unset by default.
+
+If the Strix process itself stops during a wait (a reboot, Ctrl-C), continue the run with
+`strix --resume <run_name>`.
+
 ## Reasoning effort
 
 `STRIX_REASONING_EFFORT` maps to Claude Code's `--effort` flag; `none` and `minimal`
@@ -140,3 +166,4 @@ subscription session, whereas an API key drops cleanly into a secret. Use
 | `Your Anthropic organization has disabled Claude Code subscription access` | Ask an admin to enable it, or switch to `anthropic/<model>` + `LLM_API_KEY`. Strix does not retry this. |
 | `That model isn't available on your plan, or the slug is wrong` | Use a model your subscription includes. |
 | Rate limits mid-scan | Lower `STRIX_CLAUDE_CODE_MAX_PROCS`, or use a quick scan with fewer agents. |
+| `SUBSCRIPTION USAGE LIMIT REACHED` | A usage window is spent. Strix waits for the reset unless `STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT` is `0` or shorter than the time to the reset. See [Usage limits](#usage-limits). |

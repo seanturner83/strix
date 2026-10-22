@@ -15,7 +15,7 @@ import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from strix.config import Settings, claude_code, codex, load_settings, subscription
+from strix.config import Settings, claude_code, claude_quota, codex, load_settings, subscription
 from strix.core.paths import run_dir_for
 from strix.interface.utils import (
     assign_workspace_subdirs,
@@ -150,21 +150,24 @@ async def preflight_request(
         has_tools=False,
     )
     try:
-        await asyncio.wait_for(
-            model.get_response(
-                system_instructions="You are a helpful assistant.",
-                input="Reply with just 'OK'.",
-                model_settings=request_settings,
-                tools=[],
-                output_schema=None,
-                handoffs=[],
-                tracing=ModelTracing.DISABLED,
-                previous_response_id=None,
-                conversation_id=None,
-                prompt=None,
-            ),
-            timeout=timeout,
-        )
+        # A refused preflight raises at once rather than waiting silently under
+        # the timeout; the warm-up reports the reset and waits for it itself.
+        with claude_quota.no_waiting():
+            await asyncio.wait_for(
+                model.get_response(
+                    system_instructions="You are a helpful assistant.",
+                    input="Reply with just 'OK'.",
+                    model_settings=request_settings,
+                    tools=[],
+                    output_schema=None,
+                    handoffs=[],
+                    tracing=ModelTracing.DISABLED,
+                    previous_response_id=None,
+                    conversation_id=None,
+                    prompt=None,
+                ),
+                timeout=timeout,
+            )
     except TimeoutError:
         raise TimeoutError(
             f"{model_name} did not answer within {timeout}s (LLM_PREFLIGHT_TIMEOUT). "
