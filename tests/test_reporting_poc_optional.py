@@ -47,3 +47,34 @@ def test_flag_falsey_and_truthy_values(monkeypatch: pytest.MonkeyPatch) -> None:
     for on in ("1", "true", "yes", ""):  # empty/ambiguous -> safe default (required)
         monkeypatch.setenv("STRIX_REQUIRE_POC", on)
         assert reporting_tool._poc_required() is True, on
+
+
+# The runtime validators above are the single source of required-ness, because the
+# flags are per-run env and the tool schema is built once at import. The schema must
+# therefore mark the flag-gated fields OPTIONAL — otherwise a required-in-schema PoC
+# forces the model to emit (and fabricate) one even when STRIX_REQUIRE_POC=0. The
+# always-required essentials stay schema-required.
+_SCHEMA_OPTIONAL = frozenset(
+    {
+        "poc_script_code",
+        "technical_analysis",
+        "poc_description",
+        "remediation_steps",
+        "evidence",
+        "assumptions",
+        "counterevidence",
+        "severity_change_conditions",
+    }
+)
+_SCHEMA_REQUIRED = frozenset(
+    {"title", "description", "impact", "target", "confidence", "fix_effort", "cvss_breakdown"}
+)
+
+
+def test_flag_gated_fields_are_schema_optional() -> None:
+    required = set(reporting_tool.create_vulnerability_report.params_json_schema["required"])
+    # every always-required essential is still schema-required
+    assert required >= _SCHEMA_REQUIRED
+    # no flag-gated field is schema-required (the model may omit it; the flag-aware
+    # runtime validator decides whether the omission is allowed)
+    assert not (_SCHEMA_OPTIONAL & required)

@@ -61,14 +61,15 @@ _WORKSPACE_ROOT = "/workspace"
 
 
 def _to_workspace_relative(path: str) -> str:
-    """Make a sandbox-absolute code-location path relative to the workspace root.
+    """Make a sandbox-absolute code-location path repo-root-relative.
 
     Agents report the absolute path they see in the sandbox (e.g.
     ``/workspace/<subdir>/src/x.py``). Rejecting that as "must be relative" is the
     silent cause of findings-detected-but-never-filed (findings=N filed_reports=0):
     the report is dropped and the agent cannot file what it found. Strip the
-    workspace-root prefix so the path validates and files. A path genuinely outside
-    the workspace is left unchanged for the validator to reject.
+    workspace root *and* the per-target mount subdir so the path is repo-root-relative
+    (what SARIF and the report expect) and files. A path genuinely outside the
+    workspace is left unchanged for the validator to reject.
     """
     if not path:
         return path
@@ -76,9 +77,20 @@ def _to_workspace_relative(path: str) -> str:
     if not p.is_absolute():
         return path
     try:
-        return str(p.relative_to(_WORKSPACE_ROOT))
+        rel = p.relative_to(_WORKSPACE_ROOT)
     except ValueError:
         return path
+    # The target is mounted at /workspace/<subdir>/..., where <subdir> is Strix's
+    # per-target mount point, not part of the scanned repo. SARIF and the report
+    # want a *repo-root-relative* path (strix/report/sarif.py: "File locations must
+    # be repo-relative POSIX paths") so a consumer rooted at the repo — GitHub code
+    # scanning, an IDE SARIF viewer — can resolve it; a leading <subdir>/ prefix
+    # breaks that mapping. Drop the mount component too. A bare /workspace/<subdir>
+    # (no file beneath it) has nothing to strip and is left as-is.
+    parts = rel.parts
+    if len(parts) > 1:
+        return str(PurePosixPath(*parts[1:]))
+    return str(rel)
 
 
 def _validate_file_path(path: str) -> str | None:
@@ -1102,19 +1114,27 @@ def _caller_identity(ctx: RunContextWrapper) -> tuple[str | None, str | None]:
 @function_tool(timeout=180, strict_mode=False)
 async def create_vulnerability_report(
     ctx: RunContextWrapper,
+    *,
     title: str,
     description: str,
     impact: str,
     target: str,
-    technical_analysis: str,
-    poc_description: str,
-    poc_script_code: str,
-    remediation_steps: str,
-    evidence: str,
-    assumptions: str,
-    counterevidence: str,
+    # Flag-gated fields default to "" so they are schema-OPTIONAL: STRIX_REQUIRE_POC
+    # governs poc_script_code and STRIX_RELAX_FINDING_FIELDS the analysis fields. When a
+    # flag is unset these are still required, but enforcement lives in the flag-aware
+    # runtime validators (_validate_required_text / _validate_analysis_fields), not in a
+    # static schema. A required-in-schema field would force the model to emit (and so
+    # fabricate) a PoC even when the operator disabled the PoC requirement — see #1439.
+    technical_analysis: str = "",
+    poc_description: str = "",
+    poc_script_code: str = "",
+    remediation_steps: str = "",
+    evidence: str = "",
+    assumptions: str = "",
+    counterevidence: str = "",
+    severity_change_conditions: str = "",
+    # Always required (never relaxable); no default keeps them schema-required.
     confidence: str,
-    severity_change_conditions: str,
     fix_effort: str,
     cvss_breakdown: dict[str, str],
     endpoint: str | None = None,
@@ -1378,7 +1398,13 @@ async def create_vulnerability_report(
         target: Affected URL / domain / repository.
         technical_analysis: The mechanism and root cause.
         poc_description: Step-by-step reproduction (steps only, no code).
-        poc_script_code: Working PoC (Python preferred).
+        poc_script_code: Working PoC (Python preferred). Required by default;
+            omit it only when the operator has set ``STRIX_REQUIRE_POC=0`` for a
+            raw-findings run — never fabricate a PoC to satisfy the field.
+            ``technical_analysis``, ``poc_description``, ``remediation_steps``,
+            ``evidence``, ``assumptions``, ``counterevidence`` and
+            ``severity_change_conditions`` are likewise required unless the
+            operator relaxed them via ``STRIX_RELAX_FINDING_FIELDS``.
         remediation_steps: Specific, actionable fix (prose, no code).
         evidence: Concrete proof the issue is real and exploitable —
             request/response excerpts, observed behavior, tool output.
