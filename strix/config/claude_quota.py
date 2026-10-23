@@ -107,6 +107,25 @@ class QuotaExhaustedError(claude_code.ClaudeCodeError):
         self.resets_at = resets_at
 
 
+def describe_exhaustion(resets_at: float | None) -> str:
+    """A clear, actionable one-liner for a spent subscription window.
+
+    Used where Strix fails fast rather than waiting (e.g. the interactive TUI
+    setup screen): it names the reset time in the local zone when known and
+    points the user at the headless wait path for an unattended scan.
+    """
+    if resets_at is not None:
+        when = datetime.fromtimestamp(resets_at).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        window = f"the usage window resets at {when}"
+    else:
+        window = "the usage window will reset shortly"
+    return (
+        f"Claude subscription usage limit reached — {window}. Re-run once it resets. "
+        "For an unattended scan that waits out the window instead, run headless "
+        "(STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT controls the wait)."
+    )
+
+
 @dataclass(frozen=True)
 class Refusal:
     """A turn refused by the usage limit."""

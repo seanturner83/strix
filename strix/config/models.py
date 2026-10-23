@@ -342,11 +342,14 @@ class _ClaudeCodeModel(Model):
             structured=bool(tools),
             timeout=_request_timeout(model_settings),
         )
-        response = claude_bridge.decode_result(
+        # Record cost BEFORE decoding: decode_result raises on a --max-turns or
+        # error-status result (ClaudeStreamError), but that turn still billed, and the
+        # budget guard on an API-key run depends on seeing the spend. Recording first
+        # keeps the ledger accurate even when the turn ends in an error we re-raise.
+        _record_claude_code_cost(result)
+        return claude_bridge.decode_result(
             result, tool_names=frozenset(tool.name for tool in tools)
         )
-        _record_claude_code_cost(result)
-        return response
 
     async def get_response(
         self,
@@ -764,7 +767,18 @@ class StrixProvider(MultiProvider):
             # subprocess turn completes, so idle-gap and first-event bounds are
             # meaningless and LLM_DISABLE_STREAMING does not apply — same stance
             # as codex / the non-streaming wrapper below.
-            model: Model = _ClaudeCodeModel(cc_slug, reasoning_effort=llm.reasoning_effort)
+            # Wrap in RequestLoggingModel like the codex branch: this backend never
+            # reaches LiteLLM, so without the wrapper a Claude turn leaves no row in
+            # run.json's llm_requests when telemetry.run_record_timings is on. There is
+            # no HTTP client here (it shells out), so the httpx HttpReply stays empty
+            # and status/headers degrade gracefully; timing, tokens, provider, model and
+            # agent are still captured, and an error turn (max-turns / 429) still emits.
+            model: Model = request_log.RequestLoggingModel(
+                _ClaudeCodeModel(cc_slug, reasoning_effort=llm.reasoning_effort),
+                model_name=cc_slug,
+                provider=claude_code.PROVIDER,
+                base_url=None,
+            )
             # No stream bounds: a single event arrives only at completion, so an
             # idle/first-event/total limit would abandon every turn. None = no bound
             # (0.0 is a real 0s limit here, not "unbounded").

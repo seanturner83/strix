@@ -236,9 +236,13 @@ def test_get_model_routes_claude_code(
 
     model = StrixProvider().get_model("claude-code/claude-opus-4-8")
     assert isinstance(model, _TurnGuardModel)
-    assert isinstance(model._inner, _ClaudeCodeModel)
+    # The backend never reaches LiteLLM, so it is wrapped in RequestLoggingModel
+    # (like the codex branch) to record each turn in run.json's llm_requests.
+    assert isinstance(model._inner, RequestLoggingModel)
+    assert model._inner._provider == claude_code.PROVIDER
+    assert isinstance(model._inner._inner, _ClaudeCodeModel)
     # Subscription backends are never wrapped in the non-streaming shim.
-    assert not isinstance(model._inner, _NonStreamingModel)
+    assert not isinstance(model._inner._inner, _NonStreamingModel)
     # The single event arrives only at completion, so every stream bound must be
     # None (no bound). A 0.0 here is a real 0s limit and abandons every turn.
     assert model._stream_idle_timeout is None
@@ -283,7 +287,8 @@ def test_claude_code_takes_priority_over_codex(
 
     model = StrixProvider().get_model("claude-code/claude-opus-4-8")
     assert isinstance(model, _TurnGuardModel)
-    assert isinstance(model._inner, _ClaudeCodeModel)
+    assert isinstance(model._inner, RequestLoggingModel)
+    assert isinstance(model._inner._inner, _ClaudeCodeModel)
 
 
 # --------------------------------------------------------------------------- #

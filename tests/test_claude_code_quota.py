@@ -354,3 +354,19 @@ def test_warm_up_with_waiting_off_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(claude_quota.QuotaExhaustedError):
         asyncio.run(strix_main._preflight_through_quota("claude-code/x", None, console))  # type: ignore[arg-type]
+
+
+def test_describe_exhaustion_names_reset_time() -> None:
+    # A known reset time is rendered in the local zone and the message points at
+    # the headless wait path (the TUI fails fast rather than hanging).
+    resets_at = time.time() + 3600
+    msg = claude_quota.describe_exhaustion(resets_at)
+    assert "usage limit reached" in msg
+    assert "resets at" in msg
+    assert "STRIX_CLAUDE_CODE_QUOTA_MAX_WAIT" in msg
+
+
+def test_describe_exhaustion_without_reset_time() -> None:
+    msg = claude_quota.describe_exhaustion(None)
+    assert "reset shortly" in msg
+    assert "resets at" not in msg

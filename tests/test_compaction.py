@@ -250,6 +250,36 @@ async def test_summarize_routes_through_provider_with_settings(
     assert settings.max_tokens == 64
 
 
+@pytest.mark.asyncio
+async def test_summarize_enforces_output_cap_when_backend_overruns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A backend that cannot honor ModelSettings.max_tokens (e.g. the claude -p CLI,
+    # which has no output-token flag) can return a summary larger than the budget
+    # _summary_input_budget already reserved. _summarize must enforce the cap itself so
+    # the compacted context still fits the window; count_tokens == len under _patch_budget.
+    _patch_budget(monkeypatch, keep_tokens=30, window=4_000)
+    _patch_summary(monkeypatch, "S" * 2_000)  # 2000 "tokens", well over the cap below
+
+    result = await compaction._summarize("claude-code/claude-opus-4-8", "p", 200)
+
+    assert result is not None
+    assert len(result) <= 200
+    assert compaction._HEAD_TRUNCATED_MARKER in result
+
+
+@pytest.mark.asyncio
+async def test_summarize_leaves_within_budget_summary_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_budget(monkeypatch, keep_tokens=30, window=4_000)
+    _patch_summary(monkeypatch, "a short summary")
+
+    # Under the cap, the summary is returned verbatim (no spurious truncation marker).
+    result = await compaction._summarize("claude-code/claude-opus-4-8", "p", 64)
+    assert result == "a short summary"
+
+
 def test_fit_to_tokens_truncates_oversized_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(compaction, "count_tokens", lambda _m, t: len(t))
     text = "x" * 10_000

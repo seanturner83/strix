@@ -343,7 +343,22 @@ async def _summarize(model: str, prompt: str, max_tokens: int) -> str | None:
     if not content:
         logger.warning("compaction summary returned no content")
         return None
-    return content
+    # ModelSettings.max_tokens is advisory for backends that cannot enforce it —
+    # the claude -p CLI has no output-token flag, so a Claude Code summary can
+    # overrun the budget that _summary_input_budget already reserved for it and
+    # overflow the window compaction is meant to free. Enforce the cap here, in a
+    # backend-agnostic way. A backend that honored max_tokens is already under the
+    # cap, so count_tokens(...) <= max_tokens and this returns content unchanged.
+    # max_tokens <= 0 means the output limit is unknown (output_limit() -> 0): there
+    # is no cap to enforce, so leave the summary as-is rather than truncate to nothing.
+    if max_tokens <= 0:
+        return content
+    fitted = _fit_to_tokens(model, content, max_tokens)
+    if fitted != content:
+        logger.warning(
+            "compaction summary exceeded its %d-token budget; truncated to fit", max_tokens
+        )
+    return fitted
 
 
 async def maybe_compact(
