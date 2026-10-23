@@ -214,6 +214,8 @@ def test_run_strips_cache_point_marker_from_system_prompt(
     assert "You are Strix." in sp
     assert "only api/" in sp
     assert CACHE_POINT not in _message_text(captured["message"])
+
+
 def test_reasoning_effort_becomes_extra_args() -> None:
     model = _ClaudeCodeModel("claude-opus-4-8", reasoning_effort="max")
     assert model._extra_args() == ["--effort", "max"]
